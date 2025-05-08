@@ -363,39 +363,3 @@ plot(irf(VAR1C,c("Eks.towarów","Należności.","P.wynagrodzenie"),
 plot(irf(VAR4p, response="r",  n.ahead = 20, boot = T))
 
 ?ur.df
-
-
-0. Jak weryfikujemy wiarygodność opinii eksperckich SRO (outliery, sprzeczne oceny, brakujące pola)?
-
-1. Dlaczego kategorie z < 10 obserwacjami dostają Risk 1:200 = 0, skoro istnieją realne straty? Zerowanie VaR dla kategorii, która po „pożyczce” wciąż ma < 10 obserwacji. Ile kategorii ma Risk 1:200 = 0? CO jeśli te straty zaczęły pojawiać się w ostatnich miesiącach i będą pojawiać się dalej. Wtedy w żaden sposób ich nie uwzględniamy.
-
-2. Jeśli weźmiemy dane dla P z P życie i później bierzemy te same dane w P życie. Czy tutaj nie będziemy mieli zbyt dużej korelacji między tymi kolumnami?
-Jak uzasadniono statystycznie, że profile strat obu spółek są wymienne? | Czy podczas agregacji grupowej nie korelujecie w ten sposób zdarzeń 1-do-1?
-
-3. Ile realnie punktów wpada w ogon każdej kategorii?. Bo jeśli weźmiemy 32 obserwacje i 2 będą w ogonie, to dopasowujemy rozkład do 2 punktów. Ile punktów nad progiem ma każda kategoria? 
-
-4. Czy testowano alternatywne rozkłady ciężkoogonowe (Weibull, Gamma, Burr) dla strat? 
-Czy przeprowadzono testy wskazujące, że lognormal będzie odpowiedni.
-
-6. freq_var ≤ freq_mean × 1.10  10 % to arbitralny próg. Dla ilu z M = 100 bootstrapów kończy z Poissonem, a ilu z NB?
-
-
-4. Wielkość każdej próbki bywa bardzo różna; może zdarzyć się, że w 60 losowych miesiącach nie trafi żadna strata wektor pusty, a mimo to dalej dopasowujemy log-normal. Losowe próbki 60 m-cy mogą mieć 0–2 zdarzeń; dopasowanie LN do takiej próbki.
-Jeśli warunek jest wieksze niż 10 a to jest we wszystkich miesiącach (czyli 120 miesiącach) to może się zdarzyć, że nie mamy nic.
-
-5. Jeśli curr_xi ma 0 obserwacji, to log-normal się dopasuje. log(0) → -inf; MLE zwróci nan, a ponieważ wyjątki są wyciszone, lgnm_ksz=0, lgnm_skal=0 → dalsza symulacja generuje same zera zamiast strat. warnings.filterwarnings("ignore", category=RuntimeWarning)
-
-
-7. par_p = 0.1 czy było to testowane.
-
-8. Tylko log-Normal poniżej progu; testowano Weibull/Gamma? Jeżeli prawdziwe straty są asymetryczne (Weibull) lub z częstymi małymi outliers (Gamma), LN może dać za gruby/za cienki body. Czy wykonano GOF-test (KS/AD) porównujący LN, Weibull, Gamma? | Rozszerzyć fitting: pick best AIC/BIC lub mixture
-
-10. Jaki jest błąd Monte-Carlo VaR(99.5 %) przy zmianie seeda RNG (np. 500 powtórzeń) – czy mieści się w granicach ± 5 %?
-
-11. Dlaczego korzystamy wyłącznie z kopuły t-Studenta/Gaussa z jednym ν dla wszystkich par – rozważano vine-copul. Czy wykonywali państwo testy dopasowania kopuli? W jaki sposób uzasadniamy, że to właśnie tStudenta jest (jak rozumiem) najlepszym wyborem.
-
-12. Czy przeprowadzano testy wrażliwości na macierz Korelacji Spermana?
-
-13. Jak w modelu rozwiązano następującą sytuację: dla kategorii z liczbą obserwacji < 10 wchodzi ona do kalibracji macierzy korelacji (kopuła „widzi” kolumnę), natomiast moduł symulacji zwraca pusty wektor strat. Co robi algorytm w takim momencie?
-
-14. W dokumentacji (§ 3.4.1.2 – 3.4.2) przewidziano, że kategorie z liczbą obserwacji < min_obs mają zostać zsumowane w „sztuczny koszyk 0”, który jest komonotoniczny z ryzykami z Mᶜ, a dopiero następnie uwzględniony przy kalibracji macierzy Σ i liczby stopni swobody kopuły t-Studenta. W aktualnym kodzie CopulaJoin nie znajduję tworzenia takiego koszyka ani zastąpienia brakujących kolumn korelacją = 1; macierz Spearmana jest budowana na wszystkich oryginalnych kolumnach, a ujemne korelacje są jedynie obcinane do zera. Czy planujecie (lub gdzie w innym miejscu implementacji) dodać etap tworzenia komonotonicznego koszyka 0 dla kategorii z małą liczbą zdarzeń oraz kalibrację kopuły wyłącznie na zbiorze {0} ∪ M, aby spełnić wymogi § 3.4?
