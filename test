@@ -1,20 +1,32 @@
-DROP TABLE IF EXISTS koszty_zdyskontowane;
+koszty_rent_suma AS (
+    SELECT
+        DATA_SPR,
+        KOD_ZU,
+        SUM(koszt_zdyskontowany) AS suma_kosztow_rent
+    FROM koszty_rent_dyskonto
+    GROUP BY
+        DATA_SPR,
+        KOD_ZU
+),
 
-CREATE TABLE koszty_zdyskontowane AS
+r0240 AS (
+    SELECT
+        DATA_SPR,
+        KOD_ZU,
+        C0070
+    FROM SNU_ANA.dbo.V_S_26_14_01_01_DIU
+    WHERE KOD_POZYCJI = 'R0240'
+),
 
-SELECT
-    p.DATA_SPR,
-    p.KOD_ZU,
-    p.NAZWA_ZU,
-    p.tenor,
-    p.przyszle_koszty_rent,
-    d.dyskonto,
-    p.przyszle_koszty_rent * d.dyskonto AS koszt_zdyskontowany
-FROM przyszle_koszty_rent p
-JOIN dyskonto d
-    ON p.DATA_SPR = d.DATA_SPR
-   AND p.tenor = d.tenor
-ORDER BY
-    p.DATA_SPR,
-    p.KOD_ZU,
-    p.tenor;
+wspolczynnik_rent AS (
+    SELECT
+        r.DATA_SPR,
+        r.KOD_ZU,
+        r.C0070,
+        k.suma_kosztow_rent,
+        r.C0070 / NULLIF(k.suma_kosztow_rent,0) AS wspolczynnik
+    FROM r0240 r
+    JOIN koszty_rent_suma k
+        ON r.DATA_SPR = k.DATA_SPR
+       AND r.KOD_ZU = k.KOD_ZU
+)
