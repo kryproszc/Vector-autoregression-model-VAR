@@ -1,0 +1,7 @@
+# usunięcie kolumn które mają tylko NULL
+df = df.dropna(axis=1, how="all")
+
+# zapis z powrotem do bazy
+df.to_sql("stopy_eiopa", conn, if_exists="replace", index=False)
+
+conn.close()
