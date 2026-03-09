@@ -17,7 +17,7 @@ zaklady AS (
     FROM baza
 )
 
--- 1 część: C0130 / C0131
+-- 1 część: C0130 lub C0131
 SELECT
     DATA_SPR,
     KOD_ZU,
@@ -36,7 +36,7 @@ SELECT
     z.NAZWA_ZU,
     0 AS przyszle_koszty_rent,
     2 AS kolejnosc,
-    v.n
+    CAST(v.n AS varchar(10)) AS KOD_POZYCJI
 FROM zaklady z
 CROSS JOIN (
     SELECT 1 AS n UNION ALL
@@ -53,7 +53,7 @@ SELECT
     DATA_SPR,
     KOD_ZU,
     NAZWA_ZU,
-    C0290,
+    C0290 AS przyszle_koszty_rent,
     3 AS kolejnosc,
     KOD_POZYCJI
 FROM baza
