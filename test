@@ -1,22 +1,15 @@
-BEGIN TRANSACTION;
+DROP TABLE IF EXISTS dyskonto;
 
--- tworzymy nową strukturę bez Unnamed: 0
-CREATE TABLE stopy_eiopa_tmp AS
+CREATE TABLE dyskonto AS
+
 SELECT
-    "Unnamed: 0" AS tenor,
-    YE2019,
-    YE2020,
-    YE2021,
-    YE2022,
-    YE2023,
-    YE2024
+    tenor,
+
+    1.0 / POWER(1.0 + YE2019, tenor) AS YE2019,
+    1.0 / POWER(1.0 + YE2020, tenor) AS YE2020,
+    1.0 / POWER(1.0 + YE2021, tenor) AS YE2021,
+    1.0 / POWER(1.0 + YE2022, tenor) AS YE2022,
+    1.0 / POWER(1.0 + YE2023, tenor) AS YE2023,
+    1.0 / POWER(1.0 + YE2024, tenor) AS YE2024
+
 FROM stopy_eiopa;
-
--- usuwamy starą tabelę
-DROP TABLE stopy_eiopa;
-
--- zmieniamy nazwę nowej
-ALTER TABLE stopy_eiopa_tmp
-RENAME TO stopy_eiopa;
-
-COMMIT;
