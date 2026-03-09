@@ -1,49 +1,20 @@
-DROP TABLE IF EXISTS dyskonto;
+DROP TABLE IF EXISTS koszty_zdyskontowane;
 
-CREATE TABLE dyskonto AS
-
-SELECT
-    '2019-12-31' AS DATA_SPR,
-    ROW_NUMBER() OVER (ORDER BY tenor) AS tenor,
-    1.0 / POWER(1.0 + YE2019, tenor) AS dyskonto
-FROM stopy_eiopa
-
-UNION ALL
+CREATE TABLE koszty_zdyskontowane AS
 
 SELECT
-    '2020-12-31',
-    ROW_NUMBER() OVER (ORDER BY tenor),
-    1.0 / POWER(1.0 + YE2020, tenor)
-FROM stopy_eiopa
-
-UNION ALL
-
-SELECT
-    '2021-12-31',
-    ROW_NUMBER() OVER (ORDER BY tenor),
-    1.0 / POWER(1.0 + YE2021, tenor)
-FROM stopy_eiopa
-
-UNION ALL
-
-SELECT
-    '2022-12-31',
-    ROW_NUMBER() OVER (ORDER BY tenor),
-    1.0 / POWER(1.0 + YE2022, tenor)
-FROM stopy_eiopa
-
-UNION ALL
-
-SELECT
-    '2023-12-31',
-    ROW_NUMBER() OVER (ORDER BY tenor),
-    1.0 / POWER(1.0 + YE2023, tenor)
-FROM stopy_eiopa
-
-UNION ALL
-
-SELECT
-    '2024-12-31',
-    ROW_NUMBER() OVER (ORDER BY tenor),
-    1.0 / POWER(1.0 + YE2024, tenor)
-FROM stopy_eiopa;
+    p.DATA_SPR,
+    p.KOD_ZU,
+    p.NAZWA_ZU,
+    p.tenor,
+    p.przyszle_koszty_rent,
+    d.dyskonto,
+    p.przyszle_koszty_rent * d.dyskonto AS koszt_zdyskontowany
+FROM przyszle_koszty_rent p
+JOIN dyskonto d
+    ON p.DATA_SPR = d.DATA_SPR
+   AND p.tenor = d.tenor
+ORDER BY
+    p.DATA_SPR,
+    p.KOD_ZU,
+    p.tenor;
