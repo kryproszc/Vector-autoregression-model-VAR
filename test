@@ -1,77 +1,49 @@
-WITH baza AS (
-    SELECT
-        DATA_SPR,
-        KOD_ZU,
-        NAZWA_ZU,
-        KOD_POZYCJI,
-        COALESCE(C0130, C0131) AS wartosc,
-        C0290
-    FROM V_S_13_01_01_01_DIU
-),
+DROP TABLE IF EXISTS dyskonto;
 
-zaklady AS (
-    SELECT DISTINCT
-        DATA_SPR,
-        KOD_ZU,
-        NAZWA_ZU
-    FROM baza
-),
+CREATE TABLE dyskonto AS
 
-dane AS (
-
--- 1 część: C0130 lub C0131
 SELECT
-    DATA_SPR,
-    KOD_ZU,
-    NAZWA_ZU,
-    wartosc AS przyszle_koszty_rent,
-    1 AS kolejnosc,
-    KOD_POZYCJI
-FROM baza
+    '2019-12-31' AS DATA_SPR,
+    ROW_NUMBER() OVER (ORDER BY tenor) AS tenor,
+    1.0 / POWER(1.0 + YE2019, tenor) AS dyskonto
+FROM stopy_eiopa
 
 UNION ALL
 
--- 2 część: pięć zer
 SELECT
-    z.DATA_SPR,
-    z.KOD_ZU,
-    z.NAZWA_ZU,
-    0 AS przyszle_koszty_rent,
-    2 AS kolejnosc,
-    CAST(v.n AS varchar(10)) AS KOD_POZYCJI
-FROM zaklady z
-CROSS JOIN (
-    SELECT 1 AS n UNION ALL
-    SELECT 2 UNION ALL
-    SELECT 3 UNION ALL
-    SELECT 4 UNION ALL
-    SELECT 5
-) v
+    '2020-12-31',
+    ROW_NUMBER() OVER (ORDER BY tenor),
+    1.0 / POWER(1.0 + YE2020, tenor)
+FROM stopy_eiopa
 
 UNION ALL
 
--- 3 część: C0290
 SELECT
-    DATA_SPR,
-    KOD_ZU,
-    NAZWA_ZU,
-    C0290 AS przyszle_koszty_rent,
-    3 AS kolejnosc,
-    KOD_POZYCJI
-FROM baza
-)
+    '2021-12-31',
+    ROW_NUMBER() OVER (ORDER BY tenor),
+    1.0 / POWER(1.0 + YE2021, tenor)
+FROM stopy_eiopa
+
+UNION ALL
 
 SELECT
-    DATA_SPR,
-    KOD_ZU,
-    NAZWA_ZU,
-    ROW_NUMBER() OVER (
-        PARTITION BY DATA_SPR, KOD_ZU
-        ORDER BY kolejnosc, KOD_POZYCJI
-    ) AS tenor,
-    przyszle_koszty_rent
-FROM dane
-ORDER BY
-    DATA_SPR,
-    KOD_ZU,
-    tenor;s
+    '2022-12-31',
+    ROW_NUMBER() OVER (ORDER BY tenor),
+    1.0 / POWER(1.0 + YE2022, tenor)
+FROM stopy_eiopa
+
+UNION ALL
+
+SELECT
+    '2023-12-31',
+    ROW_NUMBER() OVER (ORDER BY tenor),
+    1.0 / POWER(1.0 + YE2023, tenor)
+FROM stopy_eiopa
+
+UNION ALL
+
+SELECT
+    '2024-12-31',
+    ROW_NUMBER() OVER (ORDER BY tenor),
+    1.0 / POWER(1.0 + YE2024, tenor)
+FROM stopy_eiopa;
