@@ -15,7 +15,9 @@ zaklady AS (
         KOD_ZU,
         NAZWA_ZU
     FROM baza
-)
+),
+
+dane AS (
 
 -- 1 część: C0130 lub C0131
 SELECT
@@ -57,9 +59,19 @@ SELECT
     3 AS kolejnosc,
     KOD_POZYCJI
 FROM baza
+)
 
+SELECT
+    DATA_SPR,
+    KOD_ZU,
+    NAZWA_ZU,
+    ROW_NUMBER() OVER (
+        PARTITION BY DATA_SPR, KOD_ZU
+        ORDER BY kolejnosc, KOD_POZYCJI
+    ) AS tenor,
+    przyszle_koszty_rent
+FROM dane
 ORDER BY
     DATA_SPR,
     KOD_ZU,
-    kolejnosc,
-    KOD_POZYCJI
+    tenor;s
