@@ -1,1 +1,20 @@
-f
+, wskaznik_zobowiazan AS
+(
+SELECT
+    a.DATA_SPR,
+    a.TYP_OKRESU,
+    a.KOD_ZU,
+    a.SUMA_C0040,
+    a.SUMA_C0050,
+    b.SUMA_C0040 AS SUMA_C0040_POPRZEDNI_ROK,
+
+    (b.SUMA_C0040 - (a.SUMA_C0040 - a.SUMA_C0050)) * 1.0 
+        / b.SUMA_C0040 AS WSKAZNIK
+
+FROM sumy_zobowiazan_na_zycie a
+LEFT JOIN sumy_zobowiazan_na_zycie b
+    ON a.KOD_ZU = b.KOD_ZU
+    AND a.TYP_OKRESU = b.TYP_OKRESU
+    AND CAST(SUBSTR(a.DATA_SPR,1,4) AS INT) =
+        CAST(SUBSTR(b.DATA_SPR,1,4) AS INT) + 1
+)
