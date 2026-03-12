@@ -32,7 +32,7 @@ tmp_pasywa_split AS (
         SELECT
             b.DATA_SPR,
             b.KOD_ZU,
-            b.tenor + n/100.0 AS tenor,   -- zachowuje kolejność
+            b.tenor + (n * 0.001) AS tenor,   -- zachowanie kolejności
             b.pasywa_przeplywy / 10.0 AS pasywa_przeplywy
         FROM base b
         CROSS JOIN numbers
