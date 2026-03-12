@@ -1,103 +1,36 @@
-WITH base_irr AS (
+WITH irr_table AS (
+    SELECT
+        b.DATA_SPR,
+        b.KOD_ZU,
+        b.tenor,
+        b.pasywa_przeplywy,
+        b.dyskonto,
+        b.CFv,
+        b.CFv_do_t,
+        CASE
+            WHEN b.tenor = 1 THEN irr_calc.irr
+        END AS irr
+    FROM base_irr b
+    LEFT JOIN irr_calc
+        ON b.DATA_SPR = irr_calc.DATA_SPR
+       AND b.KOD_ZU = irr_calc.KOD_ZU
+)
 
-SELECT
-    tps.DATA_SPR,
-    tps.KOD_ZU,
-    tps.tenor,
-    tps.pasywa_przeplywy,
-    dysk.dyskonto,
-    tps.pasywa_przeplywy * dysk.dyskonto AS CFv,
-    tps.pasywa_przeplywy * dysk.dyskonto * tps.tenor AS CFv_do_t
-
-FROM tmp_pasywa_split tps
-
-LEFT JOIN dyskonto dysk
-    ON tps.DATA_SPR = dysk.DATA_SPR
-    AND tps.tenor = dysk.tenor
-
-),
-
-irr_cf AS (
 
 SELECT
     DATA_SPR,
     KOD_ZU,
-    tenor,
-    pasywa_przeplywy AS cf
-FROM base_irr
 
-UNION ALL
+    SUM(CFv) AS suma_CFv,
+    SUM(CFv_do_t) AS suma_CFv_do_t,
 
-SELECT
+    MAX(irr) AS irr,
+
+    SUM(CFv_do_t) / SUM(CFv) /
+    (1 + MAX(irr)) AS duration_aktywow
+
+FROM irr_table
+
+GROUP BY
     DATA_SPR,
-    KOD_ZU,
-    0 AS tenor,
-    -SUM(CFv) AS cf
-FROM base_irr
-GROUP BY DATA_SPR, KOD_ZU
-
-),
-
-irr_calc AS (
-
-WITH RECURSIVE iter(step, DATA_SPR, KOD_ZU, r) AS (
-
-SELECT
-0,
-DATA_SPR,
-KOD_ZU,
-0.1
-FROM (SELECT DISTINCT DATA_SPR, KOD_ZU FROM irr_cf)
-
-UNION ALL
-
-SELECT
-step + 1,
-i.DATA_SPR,
-i.KOD_ZU,
-
-r - (
-    (SELECT SUM(cf / POWER(1+r, tenor))
-     FROM irr_cf
-     WHERE DATA_SPR = i.DATA_SPR
-     AND KOD_ZU = i.KOD_ZU)
-   /
-    (SELECT SUM(-tenor * cf / POWER(1+r, tenor+1))
-     FROM irr_cf
-     WHERE DATA_SPR = i.DATA_SPR
-     AND KOD_ZU = i.KOD_ZU)
-)
-
-FROM iter i
-WHERE step < 30
-
-)
-
-SELECT
-DATA_SPR,
-KOD_ZU,
-r AS irr
-FROM iter
-WHERE step = 30
-
-)
-
-SELECT
-    b.DATA_SPR,
-    b.KOD_ZU,
-    b.tenor,
-    b.pasywa_przeplywy,
-    b.dyskonto,
-    b.CFv,
-    b.CFv_do_t,
-
-    CASE
-        WHEN b.tenor = 1 THEN irr_calc.irr
-        ELSE NULL
-    END AS irr
-
-FROM base_irr b
-
-LEFT JOIN irr_calc
-    ON b.DATA_SPR = irr_calc.DATA_SPR
-    AND b.KOD_ZU = irr_calc.KOD_ZU;
+    KOD_ZU;
