@@ -1,23 +1,12 @@
-WITH t2 AS (
-SELECT
-DATA_SPR,
-KOD_ZU,
-C0040_2,
-ROW_NUMBER() OVER (
-    PARTITION BY DATA_SPR, KOD_ZU
-    ORDER BY LP
-) AS pozycja
-FROM [SNU_ANA].[dbo].[V_S_06_02_01_02_DIU]
-)
-
-SELECT
-v01.DATA_SPR,
-v01.KOD_ZU,
-v01.C0040_2,
-t2.pozycja
-FROM [SNU_ANA].[dbo].[V_S_06_02_01_01_DIU] v01
-
-LEFT JOIN t2
-ON v01.DATA_SPR = t2.DATA_SPR
-AND v01.KOD_ZU = t2.KOD_ZU
-AND v01.C0040_2 = t2.C0040_2
+SELECT [DATA_SPR]
+      ,[TYP_OKRESU]
+      ,[DZIAL]
+      ,[KOD_ZU]
+      ,[NAZWA_ZU]
+      ,[KOD_POZYCJI]
+      ,[KOD_MACIERZY_DANYCH]
+      ,[C0040_2]
+      ,c0170
+FROM [V_S_06_02_01_01_DIU]
+WHERE KOD_ZU = 16
+  AND strftime('%m', [DATA_SPR]) = '12';
