@@ -1,12 +1,1 @@
-SELECT [DATA_SPR]
-      ,[TYP_OKRESU]
-      ,[DZIAL]
-      ,[KOD_ZU]
-      ,[NAZWA_ZU]
-      ,[KOD_POZYCJI]
-      ,[KOD_MACIERZY_DANYCH]
-      ,[C0040_2]
-      ,c0170
-FROM [V_S_06_02_01_01_DIU]
-WHERE KOD_ZU = 16
-  AND strftime('%m', [DATA_SPR]) = '12';
+AND SUBSTRING(CAST(DATA_SPR AS varchar(10)),6,2) = '12'
