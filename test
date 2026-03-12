@@ -1,8 +1,60 @@
-SELECT
-    DATA_SPR,
-    KOD_ZU,
-    KOD_POZYCJI,
-    tenor,
-    pasywa_przeplywy
-FROM pasywa_przeplywy
-ORDER BY DATA_SPR, KOD_ZU, KOD_POZYCJI, tenor;
+WITH numbers AS (
+    SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
+    UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10
+),
+
+tmp_pasywa_split AS (
+
+    WITH base AS (
+        SELECT
+            DATA_SPR,
+            KOD_ZU,
+            KOD_POZYCJI,
+            tenor,
+            pasywa_przeplywy,
+            ROW_NUMBER() OVER (
+                PARTITION BY DATA_SPR, KOD_ZU
+                ORDER BY KOD_POZYCJI DESC, tenor DESC
+            ) AS rn_desc
+        FROM pasywa_przeplywy
+    ),
+
+    normal_rows AS (
+        SELECT
+            DATA_SPR,
+            KOD_ZU,
+            KOD_POZYCJI,
+            tenor,
+            pasywa_przeplywy
+        FROM base
+        WHERE rn_desc > 3
+    ),
+
+    split_rows AS (
+        SELECT
+            b.DATA_SPR,
+            b.KOD_ZU,
+            b.KOD_POZYCJI,
+            b.tenor + (n * 0.001) AS tenor,
+            b.pasywa_przeplywy / 10.0 AS pasywa_przeplywy
+        FROM base b
+        CROSS JOIN numbers
+        WHERE rn_desc <= 3
+    ),
+
+    all_rows AS (
+        SELECT * FROM normal_rows
+        UNION ALL
+        SELECT * FROM split_rows
+    )
+
+    SELECT
+        DATA_SPR,
+        KOD_ZU,
+        pasywa_przeplywy,
+        ROW_NUMBER() OVER (
+            PARTITION BY DATA_SPR, KOD_ZU
+            ORDER BY KOD_POZYCJI, tenor
+        ) AS tenor
+    FROM all_rows
+)
