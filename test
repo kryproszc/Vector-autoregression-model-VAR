@@ -1,8 +1,13 @@
 DROP TABLE IF EXISTS duration_pasywow;
 
 CREATE TABLE duration_pasywow AS
-WITH base AS (
 
+WITH numbers AS (
+    SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
+    UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10
+),
+
+base AS (
     SELECT
         DATA_SPR,
         KOD_ZU,
@@ -13,38 +18,31 @@ WITH base AS (
             ORDER BY tenor DESC
         ) AS rn_desc
     FROM pasywa_przeplywy
-
 ),
 
 normal_rows AS (
-
     SELECT
         DATA_SPR,
         KOD_ZU,
         pasywa_przeplywy
     FROM base
     WHERE rn_desc > 3
-
 ),
 
 split_rows AS (
-
     SELECT
         b.DATA_SPR,
         b.KOD_ZU,
         b.pasywa_przeplywy / 10.0 AS pasywa_przeplywy
     FROM base b
-    CROSS JOIN generate_series(1,10) g
+    CROSS JOIN numbers
     WHERE rn_desc <= 3
-
 ),
 
 all_rows AS (
-
     SELECT * FROM normal_rows
     UNION ALL
     SELECT * FROM split_rows
-
 )
 
 SELECT
