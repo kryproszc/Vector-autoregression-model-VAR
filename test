@@ -1,60 +1,94 @@
-WITH numbers AS (
-    SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
-    UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10
+WITH base AS (
+
+SELECT
+    tps.DATA_SPR,
+    tps.KOD_ZU,
+    tps.tenor,
+    tps.pasywa_przeplywy,
+    dysk.dyskonto,
+    tps.pasywa_przeplywy * dysk.dyskonto AS CFv
+FROM tmp_pasywa_split tps
+LEFT JOIN dyskonto dysk
+    ON tps.DATA_SPR = dysk.DATA_SPR
+   AND tps.tenor = dysk.tenor
+
 ),
 
-tmp_pasywa_split AS (
+cf AS (
 
-    WITH base AS (
-        SELECT
-            DATA_SPR,
-            KOD_ZU,
-            KOD_POZYCJI,
-            tenor,
-            pasywa_przeplywy,
-            ROW_NUMBER() OVER (
-                PARTITION BY DATA_SPR, KOD_ZU
-                ORDER BY KOD_POZYCJI DESC, tenor DESC
-            ) AS rn_desc
-        FROM pasywa_przeplywy
-    ),
+SELECT
+    DATA_SPR,
+    KOD_ZU,
+    tenor,
+    pasywa_przeplywy AS cf
+FROM base
 
-    normal_rows AS (
-        SELECT
-            DATA_SPR,
-            KOD_ZU,
-            KOD_POZYCJI,
-            tenor,
-            pasywa_przeplywy
-        FROM base
-        WHERE rn_desc > 3
-    ),
+UNION ALL
 
-    split_rows AS (
-        SELECT
-            b.DATA_SPR,
-            b.KOD_ZU,
-            b.KOD_POZYCJI,
-            b.tenor + (n * 0.001) AS tenor,
-            b.pasywa_przeplywy / 10.0 AS pasywa_przeplywy
-        FROM base b
-        CROSS JOIN numbers
-        WHERE rn_desc <= 3
-    ),
+SELECT
+    DATA_SPR,
+    KOD_ZU,
+    0 AS tenor,
+    -SUM(CFv) AS cf
+FROM base
+GROUP BY DATA_SPR, KOD_ZU
 
-    all_rows AS (
-        SELECT * FROM normal_rows
-        UNION ALL
-        SELECT * FROM split_rows
+),
+
+irr AS (
+
+WITH RECURSIVE iter(step, DATA_SPR, KOD_ZU, r) AS (
+
+SELECT
+0,
+DATA_SPR,
+KOD_ZU,
+0.1
+FROM (SELECT DISTINCT DATA_SPR, KOD_ZU FROM cf)
+
+UNION ALL
+
+SELECT
+step+1,
+i.DATA_SPR,
+i.KOD_ZU,
+
+r - (
+      (SELECT SUM(cf / POWER(1+r, tenor))
+       FROM cf
+       WHERE DATA_SPR=i.DATA_SPR
+       AND KOD_ZU=i.KOD_ZU)
+     /
+      (SELECT SUM(-tenor * cf / POWER(1+r, tenor+1))
+       FROM cf
+       WHERE DATA_SPR=i.DATA_SPR
+       AND KOD_ZU=i.KOD_ZU)
     )
 
-    SELECT
-        DATA_SPR,
-        KOD_ZU,
-        pasywa_przeplywy,
-        ROW_NUMBER() OVER (
-            PARTITION BY DATA_SPR, KOD_ZU
-            ORDER BY KOD_POZYCJI, tenor
-        ) AS tenor
-    FROM all_rows
+FROM iter i
+WHERE step < 30
 )
+
+SELECT DATA_SPR, KOD_ZU, r AS irr
+FROM iter
+WHERE step = 30
+
+)
+
+SELECT
+    b.DATA_SPR,
+    b.KOD_ZU,
+    b.tenor,
+    b.pasywa_przeplywy,
+    b.CFv,
+
+    CASE
+        WHEN b.tenor = 1 THEN irr.irr
+        ELSE NULL
+    END AS irr
+
+FROM base b
+LEFT JOIN irr
+    ON b.DATA_SPR = irr.DATA_SPR
+   AND b.KOD_ZU = irr.KOD_ZU
+;
