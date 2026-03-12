@@ -9,10 +9,11 @@ tmp_pasywa_split AS (
         SELECT
             DATA_SPR,
             KOD_ZU,
+            KOD_POZYCJI,
             tenor,
             pasywa_przeplywy,
             ROW_NUMBER() OVER(
-                PARTITION BY DATA_SPR, KOD_ZU
+                PARTITION BY DATA_SPR, KOD_ZU, KOD_POZYCJI
                 ORDER BY tenor DESC
             ) AS rn_desc
         FROM pasywa_przeplywy
@@ -22,6 +23,7 @@ tmp_pasywa_split AS (
         SELECT
             DATA_SPR,
             KOD_ZU,
+            KOD_POZYCJI,
             tenor,
             pasywa_przeplywy
         FROM base
@@ -32,7 +34,8 @@ tmp_pasywa_split AS (
         SELECT
             b.DATA_SPR,
             b.KOD_ZU,
-            b.tenor + (n * 0.001) AS tenor,   -- zachowanie kolejności
+            b.KOD_POZYCJI,
+            b.tenor + (n * 0.001) AS tenor,
             b.pasywa_przeplywy / 10.0 AS pasywa_przeplywy
         FROM base b
         CROSS JOIN numbers
@@ -48,10 +51,19 @@ tmp_pasywa_split AS (
     SELECT
         DATA_SPR,
         KOD_ZU,
+        KOD_POZYCJI,
         pasywa_przeplywy,
         ROW_NUMBER() OVER(
             PARTITION BY DATA_SPR, KOD_ZU
-            ORDER BY tenor
+            ORDER BY KOD_POZYCJI, tenor
         ) AS tenor
     FROM all_rows
 )
+
+INSERT INTO duration_pasywow (DATA_SPR, KOD_ZU, tenor, pasywa_przeplywy)
+SELECT
+    DATA_SPR,
+    KOD_ZU,
+    tenor,
+    pasywa_przeplywy
+FROM tmp_pasywa_split;s
