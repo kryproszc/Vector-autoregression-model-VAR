@@ -1,29 +1,58 @@
+DROP TABLE IF EXISTS duration_pasywow;
+
+CREATE TABLE duration_pasywow AS
+WITH base AS (
+
+    SELECT
+        DATA_SPR,
+        KOD_ZU,
+        tenor,
+        pasywa_przeplywy,
+        ROW_NUMBER() OVER(
+            PARTITION BY DATA_SPR, KOD_ZU
+            ORDER BY tenor DESC
+        ) AS rn_desc
+    FROM pasywa_przeplywy
+
+),
+
+normal_rows AS (
+
+    SELECT
+        DATA_SPR,
+        KOD_ZU,
+        pasywa_przeplywy
+    FROM base
+    WHERE rn_desc > 3
+
+),
+
+split_rows AS (
+
+    SELECT
+        b.DATA_SPR,
+        b.KOD_ZU,
+        b.pasywa_przeplywy / 10.0 AS pasywa_przeplywy
+    FROM base b
+    CROSS JOIN generate_series(1,10) g
+    WHERE rn_desc <= 3
+
+),
+
+all_rows AS (
+
+    SELECT * FROM normal_rows
+    UNION ALL
+    SELECT * FROM split_rows
+
+)
+
 SELECT
-    YEAR(q.DATA_SPR) AS ROK,
-    q.KOD_ZU,
-    SUM(q.C0360_C0170) AS SUMA_C0360_C0170
-FROM
-(
-    SELECT 
-        t1.[DATA_SPR],
-        t1.[DZIAL],
-        t1.[KOD_ZU],
-        t1.[KOD_POZYCJI],
-        t1.[KOD_MACIERZY_DANYCH],
-        t1.[C0040_2],
-        t1.[c0170],
-        ISNULL(t2.[C0360], 0) AS C0360,
-        t1.[c0170] * ISNULL(t2.[C0360], 0) AS C0360_C0170
-    FROM [V_S_06_02_01_01_DIU] t1
-    LEFT JOIN [SNU_ANA].[dbo].[V_S_06_02_01_02_DIU] t2
-        ON t1.[C0040_2] = t2.[C0040_2]
-        AND t1.[DATA_SPR] = t2.[DATA_SPR]
-        AND t1.[KOD_ZU] = t2.[KOD_ZU]
-    WHERE SUBSTRING(CAST(t1.DATA_SPR AS varchar(10)),6,2) = '12'
-) q
-GROUP BY
-    YEAR(q.DATA_SPR),
-    q.KOD_ZU
-ORDER BY
-    ROK,
-    KOD_ZU
+    DATA_SPR,
+    KOD_ZU,
+    pasywa_przeplywy,
+    ROW_NUMBER() OVER(
+        PARTITION BY DATA_SPR, KOD_ZU
+        ORDER BY (SELECT NULL)
+    ) AS tenor
+FROM all_rows;
