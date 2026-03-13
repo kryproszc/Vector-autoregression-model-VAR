@@ -1,28 +1,15 @@
-WITH t1 AS (
-    SELECT DATA_SPR, TYP_OKRESU, KOD_ZU, C0010
-    FROM SNU_ANA.dbo.V_S_02_01_02_01_DIU
-    WHERE KOD_POZYCJI = 'R0500'
-),
-t2 AS (
-    SELECT DATA_SPR, TYP_OKRESU, KOD_ZU, C0010
-    FROM SNU_ANA.dbo.V_S_02_01_01_01_DIU
-    WHERE KOD_POZYCJI = 'R0500'
+aktywa_ogolem AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        SUM(C0010) AS Aktywa
+    FROM (
+        SELECT * FROM t1
+        UNION ALL
+        SELECT * FROM t2
+    )
+    GROUP BY DATA_SPR, TYP_OKRESU, KOD_ZU
 )
 
-SELECT * FROM t1
-UNION ALL
-SELECT * FROM t2;
-
-WITH aktywa_ogolem AS (
-    SELECT * FROM t1
-    UNION ALL
-    SELECT * FROM t2
-)
-
-SELECT 
-    DATA_SPR,
-    TYP_OKRESU,
-    KOD_ZU,
-    SUM(C0010) AS Aktywa
-FROM aktywa_ogolem
-GROUP BY DATA_SPR, TYP_OKRESU, KOD_ZU;
+SELECT * FROM aktywa_ogolem;
