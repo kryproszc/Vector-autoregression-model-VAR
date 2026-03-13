@@ -23,5 +23,9 @@ select
             ) - 1
     end as wymog_do_najlepszego_oszacowania_netto_kwartalnie
 
-from calkowity_wymog_bez_przyrostow
+from (
+    select *
+    from calkowity_wymog_bez_przyrostow
+    where TYP_OKRESU = 'K'
+) t
 order by KOD_ZU, DATA_SPR;
