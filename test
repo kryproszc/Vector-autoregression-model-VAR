@@ -1,35 +1,14 @@
-DROP TABLE IF EXISTS duration_aktywow;
+import pandas as pd
 
-WITH q AS (
-    SELECT
-        t1.[DATA_SPR],
-        t1.[DZIAL],
-        t1.[KOD_ZU],
-        t1.[KOD_POZYCJI],
-        t1.[KOD_MACIERZY_DANYCH],
-        t1.[C0040_2],
-        t1.[c0170],
-        IFNULL(t2.[c0360], 0) AS c0360,
-        t1.[c0170] * IFNULL(t2.[c0360], 0) AS c0360_c0170
-    FROM [V_S_06_02_01_01_DTU] t1
-    LEFT JOIN [SNU_ANA].[dbo].[V_S_06_02_01_02_DTU] t2
-        ON t1.[C0040_2] = t2.[C0040_2]
-        AND t1.[DATA_SPR] = t2.[DATA_SPR]
-        AND t1.[KOD_ZU] = t2.[KOD_ZU]
-    WHERE SUBSTRING(CAST(t1.DATA_SPR AS varchar(10)),6,2) = '12'
-)
+df = pd.DataFrame(columns=[
+    "DATA_SPR",
+    "TYP_OKRESU",
+    "KOD_ZU",
+    "Rynkowe",
+    "Kredytowe"
+])
 
-CREATE TABLE duration_aktywow AS
-SELECT
-    q.DATA_SPR,
-    q.KOD_ZU,
-    SUM(q.c0360_c0170) AS SUMA_C0360_C0170,
-    SUM(q.c0170) AS suma_c0170,
-    SUM(q.c0360_c0170) / SUM(q.c0170) AS duration_aktywow
-FROM q
-GROUP BY
-    q.DATA_SPR,
-    q.KOD_ZU
-ORDER BY
-    q.DATA_SPR,
-    q.KOD_ZU;
+df.loc[len(df)] = ["2025-12-31", "R", "ZU001", 0.12, 0.34]
+df.loc[len(df)] = ["2026-01-31", "M", "ZU002", 0.15, 0.29]
+
+print(df)
