@@ -2,32 +2,58 @@ select
     t.DATA_SPR,
     t.TYP_OKRESU,
     t.KOD_ZU,
-    t.wymog_do_aktywow,
-    t.wymog_do_najlepszego_oszacowania_netto,
+    t.KOD_POZYCJI,
+
+    t.wymog_do_naj_oszac_maj,
+    t.wymog_do_skladki_zar_net,
+    t.wymog_skladki_naj_oszac_rez_skl,
+    t.wymog_rezerw_naj_oszac_rez_na_niewyplacone,
+
+    -- kwartalnie
+    case
+        when t.TYP_OKRESU = 'K' and q.wymog_do_naj_oszac_maj is not null
+        then t.wymog_do_naj_oszac_maj / q.wymog_do_naj_oszac_maj - 1
+    end as wymog_do_naj_oszac_maj_kwartalnie,
 
     case
-        when t.TYP_OKRESU = 'K' and q.wymog_do_aktywow is not null
-        then t.wymog_do_aktywow / q.wymog_do_aktywow - 1
-    end as wymog_do_aktywow_kwartalnie,
+        when t.TYP_OKRESU = 'K' and q.wymog_do_skladki_zar_net is not null
+        then t.wymog_do_skladki_zar_net / q.wymog_do_skladki_zar_net - 1
+    end as wymog_do_skladki_zar_net_kwartalnie,
 
     case
-        when t.TYP_OKRESU = 'K' and q.wymog_do_najlepszego_oszacowania_netto is not null
-        then t.wymog_do_najlepszego_oszacowania_netto / q.wymog_do_najlepszego_oszacowania_netto - 1
-    end as wymog_do_najlepszego_oszacowania_netto_kwartalnie,
+        when t.TYP_OKRESU = 'K' and q.wymog_skladki_naj_oszac_rez_skl is not null
+        then t.wymog_skladki_naj_oszac_rez_skl / q.wymog_skladki_naj_oszac_rez_skl - 1
+    end as wymog_skladki_naj_oszac_rez_skl_kwartalnie,
 
     case
-        when y.wymog_do_aktywow is not null
-        then t.wymog_do_aktywow / y.wymog_do_aktywow - 1
-    end as wymog_do_aktywow_yoy,
+        when t.TYP_OKRESU = 'K' and q.wymog_rezerw_naj_oszac_rez_na_niewyplacone is not null
+        then t.wymog_rezerw_naj_oszac_rez_na_niewyplacone / q.wymog_rezerw_naj_oszac_rez_na_niewyplacone - 1
+    end as wymog_rezerw_naj_oszac_rez_na_niewyplacone_kwartalnie,
+
+    -- rok do roku
+    case
+        when y.wymog_do_naj_oszac_maj is not null
+        then t.wymog_do_naj_oszac_maj / y.wymog_do_naj_oszac_maj - 1
+    end as wymog_do_naj_oszac_maj_yoy,
 
     case
-        when y.wymog_do_najlepszego_oszacowania_netto is not null
-        then t.wymog_do_najlepszego_oszacowania_netto / y.wymog_do_najlepszego_oszacowania_netto - 1
-    end as wymog_do_najlepszego_oszacowania_netto_yoy
+        when y.wymog_do_skladki_zar_net is not null
+        then t.wymog_do_skladki_zar_net / y.wymog_do_skladki_zar_net - 1
+    end as wymog_do_skladki_zar_net_yoy,
 
-from calkowity_wymog_bez_przyrostow t
+    case
+        when y.wymog_skladki_naj_oszac_rez_skl is not null
+        then t.wymog_skladki_naj_oszac_rez_skl / y.wymog_skladki_naj_oszac_rez_skl - 1
+    end as wymog_skladki_naj_oszac_rez_skl_yoy,
 
-left join calkowity_wymog_bez_przyrostow q
+    case
+        when y.wymog_rezerw_naj_oszac_rez_na_niewyplacone is not null
+        then t.wymog_rezerw_naj_oszac_rez_na_niewyplacone / y.wymog_rezerw_naj_oszac_rez_na_niewyplacone - 1
+    end as wymog_rezerw_naj_oszac_rez_na_niewyplacone_yoy
+
+from ryzyko_majatkowe_bez_przyrostow t
+
+left join ryzyko_majatkowe_bez_przyrostow q
     on q.KOD_ZU = t.KOD_ZU
    and q.TYP_OKRESU = 'K'
    and t.TYP_OKRESU = 'K'
@@ -42,7 +68,7 @@ left join calkowity_wymog_bez_przyrostow q
            then substr(t.DATA_SPR, 1, 4) || '-09-30'
    end
 
-left join calkowity_wymog_bez_przyrostow y
+left join ryzyko_majatkowe_bez_przyrostow y
     on y.KOD_ZU = t.KOD_ZU
    and y.TYP_OKRESU = t.TYP_OKRESU
    and y.DATA_SPR = date(t.DATA_SPR, '-1 year')
