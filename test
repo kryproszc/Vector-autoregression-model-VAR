@@ -5,19 +5,23 @@ select
     wymog_do_aktywow,
     wymog_do_najlepszego_oszacowania_netto,
 
-    (wymog_do_aktywow /
-        lag(wymog_do_aktywow) over (
-            partition by KOD_ZU
-            order by DATA_SPR
-        ) - 1
-    ) as wymog_do_aktywow_kwartalnie,
+    case 
+        when TYP_OKRESU = 'K' then
+            wymog_do_aktywow /
+            lag(wymog_do_aktywow) over (
+                partition by KOD_ZU
+                order by DATA_SPR
+            ) - 1
+    end as wymog_do_aktywow_kwartalnie,
 
-    (wymog_do_najlepszego_oszacowania_netto /
-        lag(wymog_do_najlepszego_oszacowania_netto) over (
-            partition by KOD_ZU
-            order by DATA_SPR
-        ) - 1
-    ) as wymog_do_najlepszego_oszacowania_netto_kwartalnie
+    case 
+        when TYP_OKRESU = 'K' then
+            wymog_do_najlepszego_oszacowania_netto /
+            lag(wymog_do_najlepszego_oszacowania_netto) over (
+                partition by KOD_ZU
+                order by DATA_SPR
+            ) - 1
+    end as wymog_do_najlepszego_oszacowania_netto_kwartalnie
 
 from calkowity_wymog_bez_przyrostow
-order by KOD_ZU, DATA_SPR
+order by KOD_ZU, DATA_SPR;
