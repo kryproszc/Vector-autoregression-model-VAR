@@ -1,31 +1,41 @@
+with kwartalne as (
+    select
+        DATA_SPR,
+        KOD_ZU,
+        wymog_do_aktywow,
+        wymog_do_najlepszego_oszacowania_netto,
+        lag(wymog_do_aktywow) over (
+            partition by KOD_ZU
+            order by DATA_SPR
+        ) as prev_wymog_do_aktywow,
+        lag(wymog_do_najlepszego_oszacowania_netto) over (
+            partition by KOD_ZU
+            order by DATA_SPR
+        ) as prev_wymog_netto
+    from calkowity_wymog_bez_przyrostow
+    where TYP_OKRESU = 'K'
+)
+
 select
-    DATA_SPR,
-    TYP_OKRESU,
-    KOD_ZU,
-    wymog_do_aktywow,
-    wymog_do_najlepszego_oszacowania_netto,
+    t.DATA_SPR,
+    t.TYP_OKRESU,
+    t.KOD_ZU,
+    t.wymog_do_aktywow,
+    t.wymog_do_najlepszego_oszacowania_netto,
 
     case 
-        when TYP_OKRESU = 'K' then
-            wymog_do_aktywow /
-            lag(wymog_do_aktywow) over (
-                partition by KOD_ZU
-                order by DATA_SPR
-            ) - 1
+        when t.TYP_OKRESU = 'K'
+        then t.wymog_do_aktywow / k.prev_wymog_do_aktywow - 1
     end as wymog_do_aktywow_kwartalnie,
 
     case 
-        when TYP_OKRESU = 'K' then
-            wymog_do_najlepszego_oszacowania_netto /
-            lag(wymog_do_najlepszego_oszacowania_netto) over (
-                partition by KOD_ZU
-                order by DATA_SPR
-            ) - 1
+        when t.TYP_OKRESU = 'K'
+        then t.wymog_do_najlepszego_oszacowania_netto / k.prev_wymog_netto - 1
     end as wymog_do_najlepszego_oszacowania_netto_kwartalnie
 
-from (
-    select *
-    from calkowity_wymog_bez_przyrostow
-    where TYP_OKRESU = 'K'
-) t
-order by KOD_ZU, DATA_SPR;
+from calkowity_wymog_bez_przyrostow t
+left join kwartalne k
+    on t.DATA_SPR = k.DATA_SPR
+   and t.KOD_ZU = k.KOD_ZU
+
+order by t.KOD_ZU, t.DATA_SPR;
