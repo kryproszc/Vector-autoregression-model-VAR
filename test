@@ -13,17 +13,7 @@ with kwartalne as (
         lag(wymog_do_najlepszego_oszacowania_netto) over (
             partition by KOD_ZU
             order by DATA_SPR
-        ) as prev_kw_netto,
-
-        lag(wymog_do_aktywow,4) over (
-            partition by KOD_ZU
-            order by DATA_SPR
-        ) as prev_year_aktywa,
-
-        lag(wymog_do_najlepszego_oszacowania_netto,4) over (
-            partition by KOD_ZU
-            order by DATA_SPR
-        ) as prev_year_netto
+        ) as prev_kw_netto
 
     from calkowity_wymog_bez_przyrostow
     where TYP_OKRESU = 'K'
@@ -36,6 +26,7 @@ select
     t.wymog_do_aktywow,
     t.wymog_do_najlepszego_oszacowania_netto,
 
+    -- QoQ tylko dla K
     case
         when t.TYP_OKRESU = 'K'
         then t.wymog_do_aktywow / k.prev_kw_aktywa - 1
@@ -46,33 +37,24 @@ select
         then t.wymog_do_najlepszego_oszacowania_netto / k.prev_kw_netto - 1
     end as wymog_do_najlepszego_oszacowania_netto_kwartalnie,
 
-    -- YOY dla K
-    case
-        when t.TYP_OKRESU = 'K'
-        then t.wymog_do_aktywow / k.prev_year_aktywa - 1
-    -- YOY dla R
-        when t.TYP_OKRESU = 'R'
-        then t.wymog_do_aktywow /
-             lag(t.wymog_do_aktywow) over (
-                 partition by t.KOD_ZU, t.TYP_OKRESU
-                 order by t.DATA_SPR
-             ) - 1
-    end as wymog_do_aktywow_yoy,
+    -- YoY dla K i R
+    t.wymog_do_aktywow / y.wymog_do_aktywow - 1
+        as wymog_do_aktywow_yoy,
 
-    case
-        when t.TYP_OKRESU = 'K'
-        then t.wymog_do_najlepszego_oszacowania_netto / k.prev_year_netto - 1
-        when t.TYP_OKRESU = 'R'
-        then t.wymog_do_najlepszego_oszacowania_netto /
-             lag(t.wymog_do_najlepszego_oszacowania_netto) over (
-                 partition by t.KOD_ZU, t.TYP_OKRESU
-                 order by t.DATA_SPR
-             ) - 1
-    end as wymog_do_najlepszego_oszacowania_netto_yoy
+    t.wymog_do_najlepszego_oszacowania_netto /
+        y.wymog_do_najlepszego_oszacowania_netto - 1
+        as wymog_do_najlepszego_oszacowania_netto_yoy
 
 from calkowity_wymog_bez_przyrostow t
+
 left join kwartalne k
     on t.DATA_SPR = k.DATA_SPR
    and t.KOD_ZU = k.KOD_ZU
+
+-- rekord rok wcześniej
+left join calkowity_wymog_bez_przyrostow y
+    on y.KOD_ZU = t.KOD_ZU
+   and y.TYP_OKRESU = t.TYP_OKRESU
+   and y.DATA_SPR = t.DATA_SPR - interval '1 year'
 
 order by t.KOD_ZU, t.DATA_SPR;
