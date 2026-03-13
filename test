@@ -26,7 +26,6 @@ select
     t.wymog_do_aktywow,
     t.wymog_do_najlepszego_oszacowania_netto,
 
-    -- QoQ tylko dla K
     case
         when t.TYP_OKRESU = 'K'
         then t.wymog_do_aktywow / k.prev_kw_aktywa - 1
@@ -37,7 +36,6 @@ select
         then t.wymog_do_najlepszego_oszacowania_netto / k.prev_kw_netto - 1
     end as wymog_do_najlepszego_oszacowania_netto_kwartalnie,
 
-    -- YoY dla K i R
     t.wymog_do_aktywow / y.wymog_do_aktywow - 1
         as wymog_do_aktywow_yoy,
 
@@ -51,10 +49,9 @@ left join kwartalne k
     on t.DATA_SPR = k.DATA_SPR
    and t.KOD_ZU = k.KOD_ZU
 
--- rekord rok wcześniej
 left join calkowity_wymog_bez_przyrostow y
     on y.KOD_ZU = t.KOD_ZU
    and y.TYP_OKRESU = t.TYP_OKRESU
-   and y.DATA_SPR = t.DATA_SPR - interval '1 year'
+   and y.DATA_SPR = date(t.DATA_SPR, '-1 year')
 
 order by t.KOD_ZU, t.DATA_SPR;
