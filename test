@@ -1,36 +1,35 @@
-WITH irr_table AS (
+DROP TABLE IF EXISTS duration_aktywow;
+
+WITH q AS (
     SELECT
-        b.DATA_SPR,
-        b.KOD_ZU,
-        b.tenor,
-        b.pasywa_przeplywy,
-        b.dyskonto,
-        b.CFv,
-        b.CFv_do_t,
-        CASE
-            WHEN b.tenor = 1 THEN irr_calc.irr
-        END AS irr
-    FROM base_irr b
-    LEFT JOIN irr_calc
-        ON b.DATA_SPR = irr_calc.DATA_SPR
-       AND b.KOD_ZU = irr_calc.KOD_ZU
+        t1.[DATA_SPR],
+        t1.[DZIAL],
+        t1.[KOD_ZU],
+        t1.[KOD_POZYCJI],
+        t1.[KOD_MACIERZY_DANYCH],
+        t1.[C0040_2],
+        t1.[c0170],
+        IFNULL(t2.[c0360], 0) AS c0360,
+        t1.[c0170] * IFNULL(t2.[c0360], 0) AS c0360_c0170
+    FROM [V_S_06_02_01_01_DTU] t1
+    LEFT JOIN [SNU_ANA].[dbo].[V_S_06_02_01_02_DTU] t2
+        ON t1.[C0040_2] = t2.[C0040_2]
+        AND t1.[DATA_SPR] = t2.[DATA_SPR]
+        AND t1.[KOD_ZU] = t2.[KOD_ZU]
+    WHERE SUBSTRING(CAST(t1.DATA_SPR AS varchar(10)),6,2) = '12'
 )
 
-
+CREATE TABLE duration_aktywow AS
 SELECT
-    DATA_SPR,
-    KOD_ZU,
-
-    SUM(CFv) AS suma_CFv,
-    SUM(CFv_do_t) AS suma_CFv_do_t,
-
-    MAX(irr) AS irr,
-
-    SUM(CFv_do_t) / SUM(CFv) /
-    (1 + MAX(irr)) AS duration_aktywow
-
-FROM irr_table
-
+    q.DATA_SPR,
+    q.KOD_ZU,
+    SUM(q.c0360_c0170) AS SUMA_C0360_C0170,
+    SUM(q.c0170) AS suma_c0170,
+    SUM(q.c0360_c0170) / SUM(q.c0170) AS duration_aktywow
+FROM q
 GROUP BY
-    DATA_SPR,
-    KOD_ZU;
+    q.DATA_SPR,
+    q.KOD_ZU
+ORDER BY
+    q.DATA_SPR,
+    q.KOD_ZU;
