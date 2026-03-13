@@ -4,14 +4,27 @@ with kwartalne as (
         KOD_ZU,
         wymog_do_aktywow,
         wymog_do_najlepszego_oszacowania_netto,
+
         lag(wymog_do_aktywow) over (
             partition by KOD_ZU
             order by DATA_SPR
-        ) as prev_wymog_do_aktywow,
+        ) as prev_kw_aktywa,
+
         lag(wymog_do_najlepszego_oszacowania_netto) over (
             partition by KOD_ZU
             order by DATA_SPR
-        ) as prev_wymog_netto
+        ) as prev_kw_netto,
+
+        lag(wymog_do_aktywow,4) over (
+            partition by KOD_ZU
+            order by DATA_SPR
+        ) as prev_year_aktywa,
+
+        lag(wymog_do_najlepszego_oszacowania_netto,4) over (
+            partition by KOD_ZU
+            order by DATA_SPR
+        ) as prev_year_netto
+
     from calkowity_wymog_bez_przyrostow
     where TYP_OKRESU = 'K'
 )
@@ -23,15 +36,25 @@ select
     t.wymog_do_aktywow,
     t.wymog_do_najlepszego_oszacowania_netto,
 
-    case 
+    case
         when t.TYP_OKRESU = 'K'
-        then t.wymog_do_aktywow / k.prev_wymog_do_aktywow - 1
+        then t.wymog_do_aktywow / k.prev_kw_aktywa - 1
     end as wymog_do_aktywow_kwartalnie,
 
-    case 
+    case
         when t.TYP_OKRESU = 'K'
-        then t.wymog_do_najlepszego_oszacowania_netto / k.prev_wymog_netto - 1
-    end as wymog_do_najlepszego_oszacowania_netto_kwartalnie
+        then t.wymog_do_najlepszego_oszacowania_netto / k.prev_kw_netto - 1
+    end as wymog_do_najlepszego_oszacowania_netto_kwartalnie,
+
+    case
+        when t.TYP_OKRESU = 'K'
+        then t.wymog_do_aktywow / k.prev_year_aktywa - 1
+    end as wymog_do_aktywow_yoy,
+
+    case
+        when t.TYP_OKRESU = 'K'
+        then t.wymog_do_najlepszego_oszacowania_netto / k.prev_year_netto - 1
+    end as wymog_do_najlepszego_oszacowania_netto_yoy
 
 from calkowity_wymog_bez_przyrostow t
 left join kwartalne k
