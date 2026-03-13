@@ -1,12 +1,17 @@
 DROP TABLE IF EXISTS rynkowe_i_kredytowe;
 
-SELECT 
+CREATE TABLE rynkowe_i_kredytowe AS
+SELECT
     t1.*,
-    ISNULL(t2.C0010,0) AS Kredytowe
-INTO rynkowe_i_kredytowe
-FROM rynkowe_i_kredytowe_dodatkowe_wyniki t1
-LEFT JOIN [SNU_ANA].[dbo].[V_S_26_08_01_01_DIU] t2
-    ON t1.DATA_SPR = t2.DATA_SPR
-    AND t1.TYP_OKRESU = t2.TYP_OKRESU
-    AND t1.KOD_ZU = t2.KOD_ZU
-    AND t2.KOD_POZYCJI = 'R0170';
+    COALESCE(
+        (
+            SELECT t2.C0010
+            FROM V_S_26_08_01_01_DIU t2
+            WHERE t2.DATA_SPR = t1.DATA_SPR
+            AND t2.TYP_OKRESU = t1.TYP_OKRESU
+            AND t2.KOD_ZU = t1.KOD_ZU
+            AND t2.KOD_POZYCJI = 'R0170'
+            LIMIT 1
+        ),0
+    ) AS kredytowe
+FROM rynkowe_i_kredytowe_dodatkowe_wyniki t1;
