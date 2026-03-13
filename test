@@ -2,16 +2,20 @@ DROP TABLE IF EXISTS rynkowe_i_kredytowe;
 
 CREATE TABLE rynkowe_i_kredytowe AS
 SELECT
-    t1.*,
+    t1.DATA_SPR,
+    t1.TYP_OKRESU,
+    t1.KOD_ZU,
+    t1.Rynkowe,
     COALESCE(
         (
             SELECT t2.C0010
             FROM V_S_26_08_01_01_DIU t2
             WHERE t2.DATA_SPR = t1.DATA_SPR
-            AND t2.TYP_OKRESU = t1.TYP_OKRESU
-            AND t2.KOD_ZU = t1.KOD_ZU
-            AND t2.KOD_POZYCJI = 'R0170'
+              AND t2.TYP_OKRESU = t1.TYP_OKRESU
+              AND t2.KOD_ZU = t1.KOD_ZU
+              AND t2.KOD_POZYCJI = 'R0170'
             LIMIT 1
-        ),0
-    ) AS kredytowe
+        ),
+        t1.Kredytowe
+    ) AS Kredytowe
 FROM rynkowe_i_kredytowe_dodatkowe_wyniki t1;
