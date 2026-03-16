@@ -3,100 +3,45 @@ select
     t.TYP_OKRESU,
     t.KOD_ZU,
 
-    t.wymog_rynkowego_do_aktywow,
-    t.wymog_cen_akcji_do_funduszy,
-    t.wymog_nieruchm_do_nieruchm,
-    t.wymog_st_proc_do_eksp,
-    t.duration_aktywow,
-    t.duration_pasywow,
-    t.duration_portfela,
-    t.wymog_st_proc_do_wart_nar_przez_dur,
+    t.wymog_ope_do_akt,
+    t.wymog_ope_do_naj_oszac,
+    t.wymog_ope_do_skladki_zarobionej_netto,
 
     -- kwartalnie
     case
-        when t.TYP_OKRESU = 'K' and q.wymog_rynkowego_do_aktywow is not null
-        then t.wymog_rynkowego_do_aktywow / q.wymog_rynkowego_do_aktywow - 1
-    end as wymog_rynkowego_do_aktywow_kwartalnie,
+        when t.TYP_OKRESU = 'K' and q.wymog_ope_do_akt is not null
+        then t.wymog_ope_do_akt / q.wymog_ope_do_akt - 1
+    end as wymog_ope_do_akt_kwartalnie,
 
     case
-        when t.TYP_OKRESU = 'K' and q.wymog_cen_akcji_do_funduszy is not null
-        then t.wymog_cen_akcji_do_funduszy / q.wymog_cen_akcji_do_funduszy - 1
-    end as wymog_cen_akcji_do_funduszy_kwartalnie,
+        when t.TYP_OKRESU = 'K' and q.wymog_ope_do_naj_oszac is not null
+        then t.wymog_ope_do_naj_oszac / q.wymog_ope_do_naj_oszac - 1
+    end as wymog_ope_do_naj_oszac_kwartalnie,
 
     case
-        when t.TYP_OKRESU = 'K' and q.wymog_nieruchm_do_nieruchm is not null
-        then t.wymog_nieruchm_do_nieruchm / q.wymog_nieruchm_do_nieruchm - 1
-    end as wymog_nieruchm_do_nieruchm_kwartalnie,
-
-    case
-        when t.TYP_OKRESU = 'K' and q.wymog_st_proc_do_eksp is not null
-        then t.wymog_st_proc_do_eksp / q.wymog_st_proc_do_eksp - 1
-    end as wymog_st_proc_do_eksp_kwartalnie,
-
-    case
-        when t.TYP_OKRESU = 'K' and q.duration_aktywow is not null
-        then t.duration_aktywow / q.duration_aktywow - 1
-    end as duration_aktywow_kwartalnie,
-
-    case
-        when t.TYP_OKRESU = 'K' and q.duration_pasywow is not null
-        then t.duration_pasywow / q.duration_pasywow - 1
-    end as duration_pasywow_kwartalnie,
-
-    case
-        when t.TYP_OKRESU = 'K' and q.duration_portfela is not null
-        then t.duration_portfela / q.duration_portfela - 1
-    end as duration_portfela_kwartalnie,
-
-    case
-        when t.TYP_OKRESU = 'K' and q.wymog_st_proc_do_wart_nar_przez_dur is not null
-        then t.wymog_st_proc_do_wart_nar_przez_dur / q.wymog_st_proc_do_wart_nar_przez_dur - 1
-    end as wymog_st_proc_do_wart_nar_przez_dur_kwartalnie,
+        when t.TYP_OKRESU = 'K' and q.wymog_ope_do_skladki_zarobionej_netto is not null
+        then t.wymog_ope_do_skladki_zarobionej_netto / q.wymog_ope_do_skladki_zarobionej_netto - 1
+    end as wymog_ope_do_skladki_zarobionej_netto_kwartalnie,
 
     -- rok do roku
     case
-        when y.wymog_rynkowego_do_aktywow is not null
-        then t.wymog_rynkowego_do_aktywow / y.wymog_rynkowego_do_aktywow - 1
-    end as wymog_rynkowego_do_aktywow_yoy,
+        when y.wymog_ope_do_akt is not null
+        then t.wymog_ope_do_akt / y.wymog_ope_do_akt - 1
+    end as wymog_ope_do_akt_yoy,
 
     case
-        when y.wymog_cen_akcji_do_funduszy is not null
-        then t.wymog_cen_akcji_do_funduszy / y.wymog_cen_akcji_do_funduszy - 1
-    end as wymog_cen_akcji_do_funduszy_yoy,
+        when y.wymog_ope_do_naj_oszac is not null
+        then t.wymog_ope_do_naj_oszac / y.wymog_ope_do_naj_oszac - 1
+    end as wymog_ope_do_naj_oszac_yoy,
 
     case
-        when y.wymog_nieruchm_do_nieruchm is not null
-        then t.wymog_nieruchm_do_nieruchm / y.wymog_nieruchm_do_nieruchm - 1
-    end as wymog_nieruchm_do_nieruchm_yoy,
+        when y.wymog_ope_do_skladki_zarobionej_netto is not null
+        then t.wymog_ope_do_skladki_zarobionej_netto / y.wymog_ope_do_skladki_zarobionej_netto - 1
+    end as wymog_ope_do_skladki_zarobionej_netto_yoy
 
-    case
-        when y.wymog_st_proc_do_eksp is not null
-        then t.wymog_st_proc_do_eksp / y.wymog_st_proc_do_eksp - 1
-    end as wymog_st_proc_do_eksp_yoy,
+from twoja_tabela_bez_przyrostow t
 
-    case
-        when y.duration_aktywow is not null
-        then t.duration_aktywow / y.duration_aktywow - 1
-    end as duration_aktywow_yoy,
-
-    case
-        when y.duration_pasywow is not null
-        then t.duration_pasywow / y.duration_pasywow - 1
-    end as duration_pasywow_yoy,
-
-    case
-        when y.duration_portfela is not null
-        then t.duration_portfela / y.duration_portfela - 1
-    end as duration_portfela_yoy,
-
-    case
-        when y.wymog_st_proc_do_wart_nar_przez_dur is not null
-        then t.wymog_st_proc_do_wart_nar_przez_dur / y.wymog_st_proc_do_wart_nar_przez_dur - 1
-    end as wymog_st_proc_do_wart_nar_przez_dur_yoy
-
-from ryzyko_rynkowe_bez_przyrostow t
-
-left join ryzyko_rynkowe_bez_przyrostow q
+left join twoja_tabela_bez_przyrostow q
     on q.KOD_ZU = t.KOD_ZU
    and q.TYP_OKRESU = 'K'
    and t.TYP_OKRESU = 'K'
@@ -111,7 +56,7 @@ left join ryzyko_rynkowe_bez_przyrostow q
            then substr(t.DATA_SPR, 1, 4) || '-09-30'
    end
 
-left join ryzyko_rynkowe_bez_przyrostow y
+left join twoja_tabela_bez_przyrostow y
     on y.KOD_ZU = t.KOD_ZU
    and y.TYP_OKRESU = t.TYP_OKRESU
    and y.DATA_SPR = date(t.DATA_SPR, '-1 year')
