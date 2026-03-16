@@ -1,64 +1,15 @@
-select
-    t.DATA_SPR,
-    t.TYP_OKRESU,
-    t.KOD_ZU,
+DROP TABLE IF EXISTS struktura_podmodulow;
 
-    t.wymog_ope_do_akt,
-    t.wymog_ope_do_naj_oszac,
-    t.wymog_ope_do_skladki_zarobionej_netto,
-
-    -- kwartalnie
-    case
-        when t.TYP_OKRESU = 'K' and q.wymog_ope_do_akt is not null
-        then t.wymog_ope_do_akt / q.wymog_ope_do_akt - 1
-    end as wymog_ope_do_akt_kwartalnie,
-
-    case
-        when t.TYP_OKRESU = 'K' and q.wymog_ope_do_naj_oszac is not null
-        then t.wymog_ope_do_naj_oszac / q.wymog_ope_do_naj_oszac - 1
-    end as wymog_ope_do_naj_oszac_kwartalnie,
-
-    case
-        when t.TYP_OKRESU = 'K' and q.wymog_ope_do_skladki_zarobionej_netto is not null
-        then t.wymog_ope_do_skladki_zarobionej_netto / q.wymog_ope_do_skladki_zarobionej_netto - 1
-    end as wymog_ope_do_skladki_zarobionej_netto_kwartalnie,
-
-    -- rok do roku
-    case
-        when y.wymog_ope_do_akt is not null
-        then t.wymog_ope_do_akt / y.wymog_ope_do_akt - 1
-    end as wymog_ope_do_akt_yoy,
-
-    case
-        when y.wymog_ope_do_naj_oszac is not null
-        then t.wymog_ope_do_naj_oszac / y.wymog_ope_do_naj_oszac - 1
-    end as wymog_ope_do_naj_oszac_yoy,
-
-    case
-        when y.wymog_ope_do_skladki_zarobionej_netto is not null
-        then t.wymog_ope_do_skladki_zarobionej_netto / y.wymog_ope_do_skladki_zarobionej_netto - 1
-    end as wymog_ope_do_skladki_zarobionej_netto_yoy
-
-from twoja_tabela_bez_przyrostow t
-
-left join twoja_tabela_bez_przyrostow q
-    on q.KOD_ZU = t.KOD_ZU
-   and q.TYP_OKRESU = 'K'
-   and t.TYP_OKRESU = 'K'
-   and q.DATA_SPR = case
-       when strftime('%m-%d', t.DATA_SPR) = '03-31'
-           then date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
-       when strftime('%m-%d', t.DATA_SPR) = '06-30'
-           then substr(t.DATA_SPR, 1, 4) || '-03-31'
-       when strftime('%m-%d', t.DATA_SPR) = '09-30'
-           then substr(t.DATA_SPR, 1, 4) || '-06-30'
-       when strftime('%m-%d', t.DATA_SPR) = '12-31'
-           then substr(t.DATA_SPR, 1, 4) || '-09-30'
-   end
-
-left join twoja_tabela_bez_przyrostow y
-    on y.KOD_ZU = t.KOD_ZU
-   and y.TYP_OKRESU = t.TYP_OKRESU
-   and y.DATA_SPR = date(t.DATA_SPR, '-1 year')
-
-order by t.KOD_ZU, t.DATA_SPR, t.TYP_OKRESU;
+CREATE TABLE struktura_podmodulow AS
+SELECT
+    rynk_i_kred.*,
+    MAX(CASE WHEN v25.Kod_pozycji = 'R0320' THEN v25.wartosc END) AS NonLife,
+    MAX(CASE WHEN v25.Kod_pozycji = 'R0410' THEN v25.wartosc END) AS Life,
+    MAX(CASE WHEN v25.Kod_pozycji = 'R0490' THEN v25.wartosc END) AS Operation
+FROM rynkowe_i_kredytowe rynk_i_kred
+LEFT JOIN V_S_25_05_01_01_DIU v25
+    ON v25.DATA_SPR = rynk_i_kred.DATA_SPR
+   AND v25.TYP_OKRESU = rynk_i_kred.TYP_OKRESU
+   AND v25.KOD_ZU = rynk_i_kred.KOD_ZU
+GROUP BY
+    rynk_i_kred.*;
