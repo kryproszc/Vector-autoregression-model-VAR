@@ -8,54 +8,46 @@ select
     t.roczne_odejscia_w_rentach,
     t.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia,
 
-    -- QoQ
+    -- kwartalnie
     case
         when t.TYP_OKRESU = 'K' and q.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania is not null
-        then t.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania /
-             q.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania - 1
+        then t.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania / q.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania - 1
     end as SCR_ryzyka_zyciowego_do_najlepszego_oszacowania_kwartalnie,
 
     case
         when t.TYP_OKRESU = 'K' and q.wymog_wydatki_do_wydatki is not null
-        then t.wymog_wydatki_do_wydatki /
-             q.wymog_wydatki_do_wydatki - 1
+        then t.wymog_wydatki_do_wydatki / q.wymog_wydatki_do_wydatki - 1
     end as wymog_wydatki_do_wydatki_kwartalnie,
 
     case
         when t.TYP_OKRESU = 'K' and q.roczne_odejscia_w_rentach is not null
-        then t.roczne_odejscia_w_rentach /
-             q.roczne_odejscia_w_rentach - 1
+        then t.roczne_odejscia_w_rentach / q.roczne_odejscia_w_rentach - 1
     end as roczne_odejscia_w_rentach_kwartalnie,
 
     case
         when t.TYP_OKRESU = 'K' and q.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia is not null
-        then t.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia /
-             q.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia - 1
+        then t.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia / q.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia - 1
     end as Wymog_zyciowego_do_najlepszego_oszac_i_odejscia_kwartalnie,
 
-    -- YoY
+    -- rok do roku
     case
         when y.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania is not null
-        then t.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania /
-             y.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania - 1
+        then t.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania / y.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania - 1
     end as SCR_ryzyka_zyciowego_do_najlepszego_oszacowania_yoy,
 
     case
         when y.wymog_wydatki_do_wydatki is not null
-        then t.wymog_wydatki_do_wydatki /
-             y.wymog_wydatki_do_wydatki - 1
+        then t.wymog_wydatki_do_wydatki / y.wymog_wydatki_do_wydatki - 1
     end as wymog_wydatki_do_wydatki_yoy,
 
     case
         when y.roczne_odejscia_w_rentach is not null
-        then t.roczne_odejscia_w_rentach /
-             y.roczne_odejscia_w_rentach - 1
+        then t.roczne_odejscia_w_rentach / y.roczne_odejscia_w_rentach - 1
     end as roczne_odejscia_w_rentach_yoy,
 
     case
         when y.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia is not null
-        then t.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia /
-             y.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia - 1
+        then t.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia / y.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia - 1
     end as Wymog_zyciowego_do_najlepszego_oszac_i_odejscia_yoy
 
 from ryzyko_zyciowe_bez_przyrostow t
@@ -66,18 +58,18 @@ left join ryzyko_zyciowe_bez_przyrostow q
    and t.TYP_OKRESU = 'K'
    and q.DATA_SPR = case
        when strftime('%m-%d', t.DATA_SPR) = '03-31'
-           then date(substr(t.DATA_SPR,1,4) || '-01-01','-1 day')
+           then date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
        when strftime('%m-%d', t.DATA_SPR) = '06-30'
-           then substr(t.DATA_SPR,1,4) || '-03-31'
+           then substr(t.DATA_SPR, 1, 4) || '-03-31'
        when strftime('%m-%d', t.DATA_SPR) = '09-30'
-           then substr(t.DATA_SPR,1,4) || '-06-30'
+           then substr(t.DATA_SPR, 1, 4) || '-06-30'
        when strftime('%m-%d', t.DATA_SPR) = '12-31'
-           then substr(t.DATA_SPR,1,4) || '-09-30'
+           then substr(t.DATA_SPR, 1, 4) || '-09-30'
    end
 
 left join ryzyko_zyciowe_bez_przyrostow y
     on y.KOD_ZU = t.KOD_ZU
    and y.TYP_OKRESU = t.TYP_OKRESU
-   and y.DATA_SPR = date(t.DATA_SPR,'-1 year')
+   and y.DATA_SPR = date(t.DATA_SPR, '-1 year')
 
 order by t.KOD_ZU, t.DATA_SPR, t.TYP_OKRESU;
