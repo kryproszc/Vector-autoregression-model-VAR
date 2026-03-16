@@ -2,75 +2,82 @@ select
     t.DATA_SPR,
     t.TYP_OKRESU,
     t.KOD_ZU,
-    t.KOD_POZYCJI,
 
-    t.wymog_do_naj_oszac_maj,
-    t.wymog_do_skladki_zar_net,
-    t.wymog_skladki_naj_oszac_rez_skl,
-    t.wymog_rezerw_naj_oszac_rez_na_niewyplacone,
+    t.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania,
+    t.wymog_wydatki_do_wydatki,
+    t.roczne_odejscia_w_rentach,
+    t.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia,
 
-    -- kwartalnie
+    -- QoQ
     case
-        when t.TYP_OKRESU = 'K' and q.wymog_do_naj_oszac_maj is not null
-        then t.wymog_do_naj_oszac_maj / q.wymog_do_naj_oszac_maj - 1
-    end as wymog_do_naj_oszac_maj_kwartalnie,
-
-    case
-        when t.TYP_OKRESU = 'K' and q.wymog_do_skladki_zar_net is not null
-        then t.wymog_do_skladki_zar_net / q.wymog_do_skladki_zar_net - 1
-    end as wymog_do_skladki_zar_net_kwartalnie,
+        when t.TYP_OKRESU = 'K' and q.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania is not null
+        then t.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania /
+             q.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania - 1
+    end as SCR_ryzyka_zyciowego_do_najlepszego_oszacowania_kwartalnie,
 
     case
-        when t.TYP_OKRESU = 'K' and q.wymog_skladki_naj_oszac_rez_skl is not null
-        then t.wymog_skladki_naj_oszac_rez_skl / q.wymog_skladki_naj_oszac_rez_skl - 1
-    end as wymog_skladki_naj_oszac_rez_skl_kwartalnie,
+        when t.TYP_OKRESU = 'K' and q.wymog_wydatki_do_wydatki is not null
+        then t.wymog_wydatki_do_wydatki /
+             q.wymog_wydatki_do_wydatki - 1
+    end as wymog_wydatki_do_wydatki_kwartalnie,
 
     case
-        when t.TYP_OKRESU = 'K' and q.wymog_rezerw_naj_oszac_rez_na_niewyplacone is not null
-        then t.wymog_rezerw_naj_oszac_rez_na_niewyplacone / q.wymog_rezerw_naj_oszac_rez_na_niewyplacone - 1
-    end as wymog_rezerw_naj_oszac_rez_na_niewyplacone_kwartalnie,
-
-    -- rok do roku
-    case
-        when y.wymog_do_naj_oszac_maj is not null
-        then t.wymog_do_naj_oszac_maj / y.wymog_do_naj_oszac_maj - 1
-    end as wymog_do_naj_oszac_maj_yoy,
+        when t.TYP_OKRESU = 'K' and q.roczne_odejscia_w_rentach is not null
+        then t.roczne_odejscia_w_rentach /
+             q.roczne_odejscia_w_rentach - 1
+    end as roczne_odejscia_w_rentach_kwartalnie,
 
     case
-        when y.wymog_do_skladki_zar_net is not null
-        then t.wymog_do_skladki_zar_net / y.wymog_do_skladki_zar_net - 1
-    end as wymog_do_skladki_zar_net_yoy,
+        when t.TYP_OKRESU = 'K' and q.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia is not null
+        then t.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia /
+             q.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia - 1
+    end as Wymog_zyciowego_do_najlepszego_oszac_i_odejscia_kwartalnie,
+
+    -- YoY
+    case
+        when y.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania is not null
+        then t.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania /
+             y.SCR_ryzyka_zyciowego_do_najlepszego_oszacowania - 1
+    end as SCR_ryzyka_zyciowego_do_najlepszego_oszacowania_yoy,
 
     case
-        when y.wymog_skladki_naj_oszac_rez_skl is not null
-        then t.wymog_skladki_naj_oszac_rez_skl / y.wymog_skladki_naj_oszac_rez_skl - 1
-    end as wymog_skladki_naj_oszac_rez_skl_yoy,
+        when y.wymog_wydatki_do_wydatki is not null
+        then t.wymog_wydatki_do_wydatki /
+             y.wymog_wydatki_do_wydatki - 1
+    end as wymog_wydatki_do_wydatki_yoy,
 
     case
-        when y.wymog_rezerw_naj_oszac_rez_na_niewyplacone is not null
-        then t.wymog_rezerw_naj_oszac_rez_na_niewyplacone / y.wymog_rezerw_naj_oszac_rez_na_niewyplacone - 1
-    end as wymog_rezerw_naj_oszac_rez_na_niewyplacone_yoy
+        when y.roczne_odejscia_w_rentach is not null
+        then t.roczne_odejscia_w_rentach /
+             y.roczne_odejscia_w_rentach - 1
+    end as roczne_odejscia_w_rentach_yoy,
 
-from ryzyko_majatkowe_bez_przyrostow t
+    case
+        when y.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia is not null
+        then t.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia /
+             y.Wymog_zyciowego_do_najlepszego_oszac_i_odejscia - 1
+    end as Wymog_zyciowego_do_najlepszego_oszac_i_odejscia_yoy
 
-left join ryzyko_majatkowe_bez_przyrostow q
+from ryzyko_zyciowe_bez_przyrostow t
+
+left join ryzyko_zyciowe_bez_przyrostow q
     on q.KOD_ZU = t.KOD_ZU
    and q.TYP_OKRESU = 'K'
    and t.TYP_OKRESU = 'K'
    and q.DATA_SPR = case
        when strftime('%m-%d', t.DATA_SPR) = '03-31'
-           then date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+           then date(substr(t.DATA_SPR,1,4) || '-01-01','-1 day')
        when strftime('%m-%d', t.DATA_SPR) = '06-30'
-           then substr(t.DATA_SPR, 1, 4) || '-03-31'
+           then substr(t.DATA_SPR,1,4) || '-03-31'
        when strftime('%m-%d', t.DATA_SPR) = '09-30'
-           then substr(t.DATA_SPR, 1, 4) || '-06-30'
+           then substr(t.DATA_SPR,1,4) || '-06-30'
        when strftime('%m-%d', t.DATA_SPR) = '12-31'
-           then substr(t.DATA_SPR, 1, 4) || '-09-30'
+           then substr(t.DATA_SPR,1,4) || '-09-30'
    end
 
-left join ryzyko_majatkowe_bez_przyrostow y
+left join ryzyko_zyciowe_bez_przyrostow y
     on y.KOD_ZU = t.KOD_ZU
    and y.TYP_OKRESU = t.TYP_OKRESU
-   and y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+   and y.DATA_SPR = date(t.DATA_SPR,'-1 year')
 
 order by t.KOD_ZU, t.DATA_SPR, t.TYP_OKRESU;
