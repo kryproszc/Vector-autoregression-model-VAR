@@ -24,7 +24,7 @@ SELECT
             COALESCE(v0410.C0010, 0) +
             COALESCE(v0490.C0010, 0)
         ) = 0 THEN NULL
-        ELSE COALESCE(rynk_i_kred.Rynkowe, 0) / (
+        ELSE 1.0 * COALESCE(rynk_i_kred.Rynkowe, 0) / (
             COALESCE(rynk_i_kred.Rynkowe, 0) +
             COALESCE(rynk_i_kred.Kredytowe, 0) +
             COALESCE(v0320.C0010, 0) +
@@ -41,7 +41,7 @@ SELECT
             COALESCE(v0410.C0010, 0) +
             COALESCE(v0490.C0010, 0)
         ) = 0 THEN NULL
-        ELSE COALESCE(rynk_i_kred.Kredytowe, 0) / (
+        ELSE 1.0 * COALESCE(rynk_i_kred.Kredytowe, 0) / (
             COALESCE(rynk_i_kred.Rynkowe, 0) +
             COALESCE(rynk_i_kred.Kredytowe, 0) +
             COALESCE(v0320.C0010, 0) +
@@ -58,7 +58,7 @@ SELECT
             COALESCE(v0410.C0010, 0) +
             COALESCE(v0490.C0010, 0)
         ) = 0 THEN NULL
-        ELSE COALESCE(v0320.C0010, 0) / (
+        ELSE 1.0 * COALESCE(v0320.C0010, 0) / (
             COALESCE(rynk_i_kred.Rynkowe, 0) +
             COALESCE(rynk_i_kred.Kredytowe, 0) +
             COALESCE(v0320.C0010, 0) +
@@ -75,7 +75,7 @@ SELECT
             COALESCE(v0410.C0010, 0) +
             COALESCE(v0490.C0010, 0)
         ) = 0 THEN NULL
-        ELSE COALESCE(v0410.C0010, 0) / (
+        ELSE 1.0 * COALESCE(v0410.C0010, 0) / (
             COALESCE(rynk_i_kred.Rynkowe, 0) +
             COALESCE(rynk_i_kred.Kredytowe, 0) +
             COALESCE(v0320.C0010, 0) +
@@ -92,7 +92,7 @@ SELECT
             COALESCE(v0410.C0010, 0) +
             COALESCE(v0490.C0010, 0)
         ) = 0 THEN NULL
-        ELSE COALESCE(v0490.C0010, 0) / (
+        ELSE 1.0 * COALESCE(v0490.C0010, 0) / (
             COALESCE(rynk_i_kred.Rynkowe, 0) +
             COALESCE(rynk_i_kred.Kredytowe, 0) +
             COALESCE(v0320.C0010, 0) +
@@ -122,95 +122,192 @@ LEFT JOIN V_S_25_05_01_01_DIU v0490
    AND v0490.Kod_pozycji = 'R0490';
 
 
-DROP TABLE IF EXISTS struktura_podmodulow_z_przyrostami;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_rynkowe_kwartalnie REAL;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_kredytowe_kwartalnie REAL;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_majatkowe_kwartalnie REAL;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_zyciowe_kwartalnie REAL;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_operacyjne_kwartalnie REAL;
 
-CREATE TABLE struktura_podmodulow_z_przyrostami AS
-SELECT
-    t.*,
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_rynkowe_yoy REAL;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_kredytowe_yoy REAL;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_majatkowe_yoy REAL;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_zyciowe_yoy REAL;
+ALTER TABLE struktura_podmodulow ADD COLUMN udzial_operacyjne_yoy REAL;
 
-    CASE
-        WHEN t.TYP_OKRESU = 'K'
-         AND q.udzial_rynkowe IS NOT NULL
-         AND q.udzial_rynkowe <> 0
-        THEN t.udzial_rynkowe / q.udzial_rynkowe - 1
-    END AS udzial_rynkowe_kwartalnie,
 
-    CASE
-        WHEN t.TYP_OKRESU = 'K'
-         AND q.udzial_kredytowe IS NOT NULL
-         AND q.udzial_kredytowe <> 0
-        THEN t.udzial_kredytowe / q.udzial_kredytowe - 1
-    END AS udzial_kredytowe_kwartalnie,
+UPDATE struktura_podmodulow AS t
+SET
+    udzial_rynkowe_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.udzial_rynkowe IS NOT NULL
+             AND q.udzial_rynkowe <> 0
+            THEN 1.0 * t.udzial_rynkowe / q.udzial_rynkowe - 1
+        END
+        FROM struktura_podmodulow q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
 
-    CASE
-        WHEN t.TYP_OKRESU = 'K'
-         AND q.udzial_majatkowe IS NOT NULL
-         AND q.udzial_majatkowe <> 0
-        THEN t.udzial_majatkowe / q.udzial_majatkowe - 1
-    END AS udzial_majatkowe_kwartalnie,
+    udzial_kredytowe_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.udzial_kredytowe IS NOT NULL
+             AND q.udzial_kredytowe <> 0
+            THEN 1.0 * t.udzial_kredytowe / q.udzial_kredytowe - 1
+        END
+        FROM struktura_podmodulow q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
 
-    CASE
-        WHEN t.TYP_OKRESU = 'K'
-         AND q.udzial_zyciowe IS NOT NULL
-         AND q.udzial_zyciowe <> 0
-        THEN t.udzial_zyciowe / q.udzial_zyciowe - 1
-    END AS udzial_zyciowe_kwartalnie,
+    udzial_majatkowe_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.udzial_majatkowe IS NOT NULL
+             AND q.udzial_majatkowe <> 0
+            THEN 1.0 * t.udzial_majatkowe / q.udzial_majatkowe - 1
+        END
+        FROM struktura_podmodulow q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
 
-    CASE
-        WHEN t.TYP_OKRESU = 'K'
-         AND q.udzial_operacyjne IS NOT NULL
-         AND q.udzial_operacyjne <> 0
-        THEN t.udzial_operacyjne / q.udzial_operacyjne - 1
-    END AS udzial_operacyjne_kwartalnie,
+    udzial_zyciowe_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.udzial_zyciowe IS NOT NULL
+             AND q.udzial_zyciowe <> 0
+            THEN 1.0 * t.udzial_zyciowe / q.udzial_zyciowe - 1
+        END
+        FROM struktura_podmodulow q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
 
-    CASE
-        WHEN y.udzial_rynkowe IS NOT NULL
-         AND y.udzial_rynkowe <> 0
-        THEN t.udzial_rynkowe / y.udzial_rynkowe - 1
-    END AS udzial_rynkowe_yoy,
+    udzial_operacyjne_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.udzial_operacyjne IS NOT NULL
+             AND q.udzial_operacyjne <> 0
+            THEN 1.0 * t.udzial_operacyjne / q.udzial_operacyjne - 1
+        END
+        FROM struktura_podmodulow q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
 
-    CASE
-        WHEN y.udzial_kredytowe IS NOT NULL
-         AND y.udzial_kredytowe <> 0
-        THEN t.udzial_kredytowe / y.udzial_kredytowe - 1
-    END AS udzial_kredytowe_yoy,
+    udzial_rynkowe_yoy = (
+        SELECT CASE
+            WHEN y.udzial_rynkowe IS NOT NULL
+             AND y.udzial_rynkowe <> 0
+            THEN 1.0 * t.udzial_rynkowe / y.udzial_rynkowe - 1
+        END
+        FROM struktura_podmodulow y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
 
-    CASE
-        WHEN y.udzial_majatkowe IS NOT NULL
-         AND y.udzial_majatkowe <> 0
-        THEN t.udzial_majatkowe / y.udzial_majatkowe - 1
-    END AS udzial_majatkowe_yoy,
+    udzial_kredytowe_yoy = (
+        SELECT CASE
+            WHEN y.udzial_kredytowe IS NOT NULL
+             AND y.udzial_kredytowe <> 0
+            THEN 1.0 * t.udzial_kredytowe / y.udzial_kredytowe - 1
+        END
+        FROM struktura_podmodulow y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
 
-    CASE
-        WHEN y.udzial_zyciowe IS NOT NULL
-         AND y.udzial_zyciowe <> 0
-        THEN t.udzial_zyciowe / y.udzial_zyciowe - 1
-    END AS udzial_zyciowe_yoy,
+    udzial_majatkowe_yoy = (
+        SELECT CASE
+            WHEN y.udzial_majatkowe IS NOT NULL
+             AND y.udzial_majatkowe <> 0
+            THEN 1.0 * t.udzial_majatkowe / y.udzial_majatkowe - 1
+        END
+        FROM struktura_podmodulow y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
 
-    CASE
-        WHEN y.udzial_operacyjne IS NOT NULL
-         AND y.udzial_operacyjne <> 0
-        THEN t.udzial_operacyjne / y.udzial_operacyjne - 1
-    END AS udzial_operacyjne_yoy
+    udzial_zyciowe_yoy = (
+        SELECT CASE
+            WHEN y.udzial_zyciowe IS NOT NULL
+             AND y.udzial_zyciowe <> 0
+            THEN 1.0 * t.udzial_zyciowe / y.udzial_zyciowe - 1
+        END
+        FROM struktura_podmodulow y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
 
-FROM struktura_podmodulow t
-
-LEFT JOIN struktura_podmodulow q
-    ON q.KOD_ZU = t.KOD_ZU
-   AND q.TYP_OKRESU = 'K'
-   AND t.TYP_OKRESU = 'K'
-   AND q.DATA_SPR = CASE
-       WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
-           THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
-       WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
-           THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
-       WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
-           THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
-       WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
-           THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
-   END
-
-LEFT JOIN struktura_podmodulow y
-    ON y.KOD_ZU = t.KOD_ZU
-   AND y.TYP_OKRESU = t.TYP_OKRESU
-   AND y.DATA_SPR = date(t.DATA_SPR, '-1 year');
+    udzial_operacyjne_yoy = (
+        SELECT CASE
+            WHEN y.udzial_operacyjne IS NOT NULL
+             AND y.udzial_operacyjne <> 0
+            THEN 1.0 * t.udzial_operacyjne / y.udzial_operacyjne - 1
+        END
+        FROM struktura_podmodulow y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    );
