@@ -3,13 +3,25 @@ DROP TABLE IF EXISTS struktura_podmodulow;
 CREATE TABLE struktura_podmodulow AS
 SELECT
     rynk_i_kred.*,
-    MAX(CASE WHEN v25.Kod_pozycji = 'R0320' THEN v25.wartosc END) AS NonLife,
-    MAX(CASE WHEN v25.Kod_pozycji = 'R0410' THEN v25.wartosc END) AS Life,
-    MAX(CASE WHEN v25.Kod_pozycji = 'R0490' THEN v25.wartosc END) AS Operation
+    v0320.C0010 AS NonLife,
+    v0410.C0010 AS Life,
+    v0490.C0010 AS Operation
 FROM rynkowe_i_kredytowe rynk_i_kred
-LEFT JOIN V_S_25_05_01_01_DIU v25
-    ON v25.DATA_SPR = rynk_i_kred.DATA_SPR
-   AND v25.TYP_OKRESU = rynk_i_kred.TYP_OKRESU
-   AND v25.KOD_ZU = rynk_i_kred.KOD_ZU
-GROUP BY
-    rynk_i_kred.*;
+
+LEFT JOIN V_S_25_05_01_01_DIU v0320
+    ON v0320.DATA_SPR = rynk_i_kred.DATA_SPR
+   AND v0320.TYP_OKRESU = rynk_i_kred.TYP_OKRESU
+   AND v0320.KOD_ZU = rynk_i_kred.KOD_ZU
+   AND v0320.Kod_pozycji = 'R0320'
+
+LEFT JOIN V_S_25_05_01_01_DIU v0410
+    ON v0410.DATA_SPR = rynk_i_kred.DATA_SPR
+   AND v0410.TYP_OKRESU = rynk_i_kred.TYP_OKRESU
+   AND v0410.KOD_ZU = rynk_i_kred.KOD_ZU
+   AND v0410.Kod_pozycji = 'R0410'
+
+LEFT JOIN V_S_25_05_01_01_DIU v0490
+    ON v0490.DATA_SPR = rynk_i_kred.DATA_SPR
+   AND v0490.TYP_OKRESU = rynk_i_kred.TYP_OKRESU
+   AND v0490.KOD_ZU = rynk_i_kred.KOD_ZU
+   AND v0490.Kod_pozycji = 'R0490';
