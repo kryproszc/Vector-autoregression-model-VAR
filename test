@@ -120,3 +120,97 @@ LEFT JOIN V_S_25_05_01_01_DIU v0490
    AND v0490.TYP_OKRESU = rynk_i_kred.TYP_OKRESU
    AND v0490.KOD_ZU = rynk_i_kred.KOD_ZU
    AND v0490.Kod_pozycji = 'R0490';
+
+
+DROP TABLE IF EXISTS struktura_podmodulow_z_przyrostami;
+
+CREATE TABLE struktura_podmodulow_z_przyrostami AS
+SELECT
+    t.*,
+
+    CASE
+        WHEN t.TYP_OKRESU = 'K'
+         AND q.udzial_rynkowe IS NOT NULL
+         AND q.udzial_rynkowe <> 0
+        THEN t.udzial_rynkowe / q.udzial_rynkowe - 1
+    END AS udzial_rynkowe_kwartalnie,
+
+    CASE
+        WHEN t.TYP_OKRESU = 'K'
+         AND q.udzial_kredytowe IS NOT NULL
+         AND q.udzial_kredytowe <> 0
+        THEN t.udzial_kredytowe / q.udzial_kredytowe - 1
+    END AS udzial_kredytowe_kwartalnie,
+
+    CASE
+        WHEN t.TYP_OKRESU = 'K'
+         AND q.udzial_majatkowe IS NOT NULL
+         AND q.udzial_majatkowe <> 0
+        THEN t.udzial_majatkowe / q.udzial_majatkowe - 1
+    END AS udzial_majatkowe_kwartalnie,
+
+    CASE
+        WHEN t.TYP_OKRESU = 'K'
+         AND q.udzial_zyciowe IS NOT NULL
+         AND q.udzial_zyciowe <> 0
+        THEN t.udzial_zyciowe / q.udzial_zyciowe - 1
+    END AS udzial_zyciowe_kwartalnie,
+
+    CASE
+        WHEN t.TYP_OKRESU = 'K'
+         AND q.udzial_operacyjne IS NOT NULL
+         AND q.udzial_operacyjne <> 0
+        THEN t.udzial_operacyjne / q.udzial_operacyjne - 1
+    END AS udzial_operacyjne_kwartalnie,
+
+    CASE
+        WHEN y.udzial_rynkowe IS NOT NULL
+         AND y.udzial_rynkowe <> 0
+        THEN t.udzial_rynkowe / y.udzial_rynkowe - 1
+    END AS udzial_rynkowe_yoy,
+
+    CASE
+        WHEN y.udzial_kredytowe IS NOT NULL
+         AND y.udzial_kredytowe <> 0
+        THEN t.udzial_kredytowe / y.udzial_kredytowe - 1
+    END AS udzial_kredytowe_yoy,
+
+    CASE
+        WHEN y.udzial_majatkowe IS NOT NULL
+         AND y.udzial_majatkowe <> 0
+        THEN t.udzial_majatkowe / y.udzial_majatkowe - 1
+    END AS udzial_majatkowe_yoy,
+
+    CASE
+        WHEN y.udzial_zyciowe IS NOT NULL
+         AND y.udzial_zyciowe <> 0
+        THEN t.udzial_zyciowe / y.udzial_zyciowe - 1
+    END AS udzial_zyciowe_yoy,
+
+    CASE
+        WHEN y.udzial_operacyjne IS NOT NULL
+         AND y.udzial_operacyjne <> 0
+        THEN t.udzial_operacyjne / y.udzial_operacyjne - 1
+    END AS udzial_operacyjne_yoy
+
+FROM struktura_podmodulow t
+
+LEFT JOIN struktura_podmodulow q
+    ON q.KOD_ZU = t.KOD_ZU
+   AND q.TYP_OKRESU = 'K'
+   AND t.TYP_OKRESU = 'K'
+   AND q.DATA_SPR = CASE
+       WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+           THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+       WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+           THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+       WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+           THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+       WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+           THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+   END
+
+LEFT JOIN struktura_podmodulow y
+    ON y.KOD_ZU = t.KOD_ZU
+   AND y.TYP_OKRESU = t.TYP_OKRESU
+   AND y.DATA_SPR = date(t.DATA_SPR, '-1 year');
