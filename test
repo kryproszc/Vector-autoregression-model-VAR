@@ -3,9 +3,104 @@ DROP TABLE IF EXISTS struktura_podmodulow;
 CREATE TABLE struktura_podmodulow AS
 SELECT
     rynk_i_kred.*,
-    v0320.C0010 AS NonLife,
-    v0410.C0010 AS Life,
-    v0490.C0010 AS Operation
+    
+    v0320.C0010 AS majatkowe,
+    v0410.C0010 AS zyciowe,
+    v0490.C0010 AS operacyjne,
+
+    (
+        COALESCE(rynk_i_kred.Rynkowe, 0) +
+        COALESCE(rynk_i_kred.Kredytowe, 0) +
+        COALESCE(v0320.C0010, 0) +
+        COALESCE(v0410.C0010, 0) +
+        COALESCE(v0490.C0010, 0)
+    ) AS suma,
+
+    CASE 
+        WHEN (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        ) = 0 THEN NULL
+        ELSE COALESCE(rynk_i_kred.Rynkowe, 0) / (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        )
+    END AS udzial_rynkowe,
+
+    CASE 
+        WHEN (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        ) = 0 THEN NULL
+        ELSE COALESCE(rynk_i_kred.Kredytowe, 0) / (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        )
+    END AS udzial_kredytowe,
+
+    CASE 
+        WHEN (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        ) = 0 THEN NULL
+        ELSE COALESCE(v0320.C0010, 0) / (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        )
+    END AS udzial_majatkowe,
+
+    CASE 
+        WHEN (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        ) = 0 THEN NULL
+        ELSE COALESCE(v0410.C0010, 0) / (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        )
+    END AS udzial_zyciowe,
+
+    CASE 
+        WHEN (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        ) = 0 THEN NULL
+        ELSE COALESCE(v0490.C0010, 0) / (
+            COALESCE(rynk_i_kred.Rynkowe, 0) +
+            COALESCE(rynk_i_kred.Kredytowe, 0) +
+            COALESCE(v0320.C0010, 0) +
+            COALESCE(v0410.C0010, 0) +
+            COALESCE(v0490.C0010, 0)
+        )
+    END AS udzial_operacyjne
+
 FROM rynkowe_i_kredytowe rynk_i_kred
 
 LEFT JOIN V_S_25_05_01_01_DIU v0320
