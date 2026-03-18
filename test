@@ -1,8 +1,46 @@
-deactivate
-Remove-Item .venv -Recurse -Force
-py -m venv .venv
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m uvicorn backend:app --reload --port 8000
+WITH baza AS (
+    SELECT
+        [DATA_SPR],
+        [TYP_OKRESU],
+        [KOD_ZU],
+        SUM(CASE WHEN [KOD_POZYCJI] = 'R0040' THEN [C0020] ELSE 0 END) AS ceny_akcji,
+        SUM(CASE WHEN [KOD_POZYCJI] = 'R0060' THEN [C0020] ELSE 0 END) AS stopa_procentowa,
+        SUM(CASE WHEN [KOD_POZYCJI] = 'R0130' THEN [C0020] ELSE 0 END) AS cen_nieruchomosci,
+        SUM(CASE WHEN [KOD_POZYCJI] = 'R0140' THEN [C0020] ELSE 0 END) AS walutowe
+    FROM [SNU_ANA].[dbo].[V_S_26_09_01_02_DIU]
+    WHERE [KOD_POZYCJI] IN ('R0040', 'R0060', 'R0130', 'R0140')
+    GROUP BY
+        [DATA_SPR],
+        [TYP_OKRESU],
+        [KOD_ZU]
+)
+SELECT
+    [DATA_SPR],
+    [TYP_OKRESU],
+    [KOD_ZU],
+
+    CASE 
+        WHEN (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe) = 0 THEN NULL
+        ELSE ceny_akcji * 1.0 / (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe)
+    END AS udzial_cen_akcji,
+
+    CASE 
+        WHEN (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe) = 0 THEN NULL
+        ELSE stopa_procentowa * 1.0 / (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe)
+    END AS udzial_stopa_procentowa,
+
+    CASE 
+        WHEN (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe) = 0 THEN NULL
+        ELSE cen_nieruchomosci * 1.0 / (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe)
+    END AS udzial_cen_nieruchomosci,
+
+    CASE 
+        WHEN (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe) = 0 THEN NULL
+        ELSE walutowe * 1.0 / (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe)
+    END AS udzial_walutowe
+
+FROM baza
+ORDER BY
+    [DATA_SPR],
+    [TYP_OKRESU],
+    [KOD_ZU];
