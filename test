@@ -1,46 +1,57 @@
+DROP TABLE IF EXISTS struktura_rynkowe_roczne;
+
+CREATE TABLE struktura_rynkowe_roczne AS
 WITH baza AS (
     SELECT
-        [DATA_SPR],
-        [TYP_OKRESU],
-        [KOD_ZU],
-        SUM(CASE WHEN [KOD_POZYCJI] = 'R0040' THEN [C0020] ELSE 0 END) AS ceny_akcji,
-        SUM(CASE WHEN [KOD_POZYCJI] = 'R0060' THEN [C0020] ELSE 0 END) AS stopa_procentowa,
-        SUM(CASE WHEN [KOD_POZYCJI] = 'R0130' THEN [C0020] ELSE 0 END) AS cen_nieruchomosci,
-        SUM(CASE WHEN [KOD_POZYCJI] = 'R0140' THEN [C0020] ELSE 0 END) AS walutowe
-    FROM [SNU_ANA].[dbo].[V_S_26_09_01_02_DIU]
-    WHERE [KOD_POZYCJI] IN ('R0040', 'R0060', 'R0130', 'R0140')
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0090' THEN C0020 ELSE 0 END) AS ceny_akcji,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0060' THEN C0020 ELSE 0 END) AS stopa_procentowa,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0130' THEN C0020 ELSE 0 END) AS cen_nieruchomosci,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0140' THEN C0020 ELSE 0 END) AS walutowe
+    FROM V_S_26_09_01_02_DIU
+    WHERE KOD_POZYCJI IN ('R0090', 'R0060', 'R0130', 'R0140')
     GROUP BY
-        [DATA_SPR],
-        [TYP_OKRESU],
-        [KOD_ZU]
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU
 )
 SELECT
-    [DATA_SPR],
-    [TYP_OKRESU],
-    [KOD_ZU],
+    DATA_SPR,
+    TYP_OKRESU,
+    KOD_ZU,
 
-    CASE 
-        WHEN (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe) = 0 THEN NULL
-        ELSE ceny_akcji * 1.0 / (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe)
-    END AS udzial_cen_akcji,
+    ceny_akcji,
+    stopa_procentowa,
+    cen_nieruchomosci,
+    walutowe,
 
-    CASE 
-        WHEN (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe) = 0 THEN NULL
-        ELSE stopa_procentowa * 1.0 / (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe)
-    END AS udzial_stopa_procentowa,
+    (COALESCE(ceny_akcji, 0) + COALESCE(stopa_procentowa, 0) + COALESCE(cen_nieruchomosci, 0) + COALESCE(walutowe, 0)) AS suma,
 
-    CASE 
-        WHEN (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe) = 0 THEN NULL
-        ELSE cen_nieruchomosci * 1.0 / (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe)
-    END AS udzial_cen_nieruchomosci,
+    1.0 * ceny_akcji / NULLIF(ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe, 0) AS udzial_cen_akcji,
+    1.0 * stopa_procentowa / NULLIF(ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe, 0) AS udzial_stopa_procentowa,
+    1.0 * cen_nieruchomosci / NULLIF(ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe, 0) AS udzial_cen_nieruchomosci,
+    1.0 * walutowe / NULLIF(ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe, 0) AS udzial_walutowe
+FROM baza;
 
-    CASE 
-        WHEN (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe) = 0 THEN NULL
-        ELSE walutowe * 1.0 / (ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe)
-    END AS udzial_walutowe
+ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_cen_akcji_kwartalnie REAL;
+ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_stopa_procentowa_kwartalnie REAL;
+ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_cen_nieruchomosci_kwartalnie REAL;
+ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_walutowe_kwartalnie REAL;
 
-FROM baza
-ORDER BY
-    [DATA_SPR],
-    [TYP_OKRESU],
-    [KOD_ZU];
+ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_cen_akcji_yoy REAL;
+ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_stopa_procentowa_yoy REAL;
+ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_cen_nieruchomosci_yoy REAL;
+ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_walutowe_yoy REAL;
+
+UPDATE struktura_rynkowe_roczne
+SET
+    udzial_cen_akcji_kwartalnie = NULL,
+    udzial_stopa_procentowa_kwartalnie = NULL,
+    udzial_cen_nieruchomosci_kwartalnie = NULL,
+    udzial_walutowe_kwartalnie = NULL,
+    udzial_cen_akcji_yoy = NULL,
+    udzial_stopa_procentowa_yoy = NULL,
+    udzial_cen_nieruchomosci_yoy = NULL,
+    udzial_walutowe_yoy = NULL;
