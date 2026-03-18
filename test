@@ -35,6 +35,7 @@ SELECT
     1.0 * walutowe / NULLIF(ceny_akcji + stopa_procentowa + cen_nieruchomosci + walutowe, 0) AS udzial_walutowe
 FROM baza;
 
+
 ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_cen_akcji_kwartalnie REAL;
 ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_stopa_procentowa_kwartalnie REAL;
 ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_cen_nieruchomosci_kwartalnie REAL;
@@ -45,13 +46,61 @@ ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_stopa_procentowa_yoy REAL
 ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_cen_nieruchomosci_yoy REAL;
 ALTER TABLE struktura_rynkowe_roczne ADD COLUMN udzial_walutowe_yoy REAL;
 
+
 UPDATE struktura_rynkowe_roczne
 SET
     udzial_cen_akcji_kwartalnie = NULL,
     udzial_stopa_procentowa_kwartalnie = NULL,
     udzial_cen_nieruchomosci_kwartalnie = NULL,
-    udzial_walutowe_kwartalnie = NULL,
-    udzial_cen_akcji_yoy = NULL,
-    udzial_stopa_procentowa_yoy = NULL,
-    udzial_cen_nieruchomosci_yoy = NULL,
-    udzial_walutowe_yoy = NULL;
+    udzial_walutowe_kwartalnie = NULL;
+
+
+UPDATE struktura_rynkowe_roczne AS t
+SET
+    udzial_cen_akcji_yoy = (
+        SELECT CASE
+            WHEN y.udzial_cen_akcji IS NOT NULL
+             AND y.udzial_cen_akcji <> 0
+            THEN 1.0 * t.udzial_cen_akcji / y.udzial_cen_akcji - 1
+        END
+        FROM struktura_rynkowe_roczne y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    udzial_stopa_procentowa_yoy = (
+        SELECT CASE
+            WHEN y.udzial_stopa_procentowa IS NOT NULL
+             AND y.udzial_stopa_procentowa <> 0
+            THEN 1.0 * t.udzial_stopa_procentowa / y.udzial_stopa_procentowa - 1
+        END
+        FROM struktura_rynkowe_roczne y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    udzial_cen_nieruchomosci_yoy = (
+        SELECT CASE
+            WHEN y.udzial_cen_nieruchomosci IS NOT NULL
+             AND y.udzial_cen_nieruchomosci <> 0
+            THEN 1.0 * t.udzial_cen_nieruchomosci / y.udzial_cen_nieruchomosci - 1
+        END
+        FROM struktura_rynkowe_roczne y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    udzial_walutowe_yoy = (
+        SELECT CASE
+            WHEN y.udzial_walutowe IS NOT NULL
+             AND y.udzial_walutowe <> 0
+            THEN 1.0 * t.udzial_walutowe / y.udzial_walutowe - 1
+        END
+        FROM struktura_rynkowe_roczne y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    );
