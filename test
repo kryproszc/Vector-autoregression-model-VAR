@@ -1,60 +1,13 @@
-from pathlib import Path
-import openpyxl
-import pandas as pd
+sciezka_bazy = r"C:\twoj\folder\baza_danych.db"
+nazwa_tabeli = "dane_raportowe"
 
-# =========================
-# dane wejściowe
-# =========================
-sciezka_do_folderu = r"C:\twoj\folder"
-nazwa_pliku = "plik.xlsx"
-nazwa_arkusza = "Arkusz1"
+conn = sqlite3.connect(sciezka_bazy)
 
-DATA_SPR = "2026-03-19"
-TYP_OKRESU = "M"
-KOD_ZU = "ZU123"
+df.to_sql(
+    nazwa_tabeli,
+    conn,
+    if_exists="append",   # dopisuje dane do istniejącej tabeli
+    index=False
+)
 
-# lista dla każdego wiersza osobno
-KOD_POZYCJI = [
-    "POZ1",
-    "POZ2",
-    "POZ3",
-    "POZ4",
-    "POZ5",
-    "POZ6",
-    "POZ7",
-    "POZ8",
-]
-
-# =========================
-# wczytanie excela
-# =========================
-pelna_sciezka = Path(sciezka_do_folderu) / nazwa_pliku
-
-wb = openpyxl.load_workbook(pelna_sciezka, data_only=True)
-ws = wb[nazwa_arkusza]
-
-# pobranie danych z D4:D11
-wczytane_dane = []
-for wiersz in range(4, 12):
-    wartosc = ws[f"D{wiersz}"].value
-    wczytane_dane.append(wartosc)
-
-# kontrola długości listy KOD_POZYCJI
-if len(KOD_POZYCJI) != len(wczytane_dane):
-    raise ValueError(
-        f"Lista KOD_POZYCJI ma długość {len(KOD_POZYCJI)}, "
-        f"a wczytanych wierszy jest {len(wczytane_dane)}"
-    )
-
-# =========================
-# budowa tabeli wynikowej
-# =========================
-df = pd.DataFrame({
-    "DATA_SPR": [DATA_SPR] * len(wczytane_dane),
-    "TYP_OKRESU": [TYP_OKRESU] * len(wczytane_dane),
-    "KOD_ZU": [KOD_ZU] * len(wczytane_dane),
-    "KOD_POZYCJI": KOD_POZYCJI,
-    "C0030": wczytane_dane
-})
-
-print(df)
+conn.close()
