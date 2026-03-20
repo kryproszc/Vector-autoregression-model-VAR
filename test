@@ -1,144 +1,144 @@
-DROP TABLE IF EXISTS {target_table};
+from pathlib import Path
+import sqlite3
 
-CREATE TABLE {target_table} AS
-WITH base AS (
-    SELECT
-        {source_date_col}   AS DATA_SPR,
-        {source_period_col} AS TYP_OKRESU,
-        {source_entity_col} AS KOD_ZU,
-        {source_code_col}   AS KOD_POZYCJI,
-        CAST({source_value_col} AS REAL) AS wartosc
-    FROM {source_table}
-    WHERE {source_code_col} IN ({source_codes_sql})
-),
-ref AS (
-    SELECT
-        {reference_date_col}   AS DATA_SPR,
-        {reference_period_col} AS TYP_OKRESU,
-        {reference_entity_col} AS KOD_ZU,
-        MAX(CAST({reference_value_col} AS REAL)) AS wartosc_ref
-    FROM {reference_table}
-    {reference_where_clause}
-    GROUP BY
-        {reference_date_col},
-        {reference_period_col},
-        {reference_entity_col}
-),
-aggr AS (
-    SELECT
-        b.DATA_SPR,
-        b.TYP_OKRESU,
-        b.KOD_ZU,
-        COUNT(*) AS n,
-        SUM(b.wartosc) AS suma_scr,
-        SUM(b.wartosc * b.wartosc) AS suma_kwadratow
-    FROM base b
-    GROUP BY
-        b.DATA_SPR,
-        b.TYP_OKRESU,
-        b.KOD_ZU
-),
-gini_base AS (
-    SELECT
-        b.DATA_SPR,
-        b.TYP_OKRESU,
-        b.KOD_ZU,
-        b.wartosc,
-        ROW_NUMBER() OVER (
-            PARTITION BY b.DATA_SPR, b.TYP_OKRESU, b.KOD_ZU
-            ORDER BY b.wartosc
-        ) AS i
-    FROM base b
-),
-gini_aggr AS (
-    SELECT
-        g.DATA_SPR,
-        g.TYP_OKRESU,
-        g.KOD_ZU,
-        SUM(g.i * g.wartosc) AS suma_i_x
-    FROM gini_base g
-    GROUP BY
-        g.DATA_SPR,
-        g.TYP_OKRESU,
-        g.KOD_ZU
-),
-udzialy AS (
-    SELECT
-        b.DATA_SPR,
-        b.TYP_OKRESU,
-        b.KOD_ZU,
-        b.KOD_POZYCJI,
-        b.wartosc,
-        a.suma_scr,
-        CASE
-            WHEN a.suma_scr = 0 THEN NULL
-            ELSE b.wartosc / a.suma_scr
-        END AS udzial
-    FROM base b
-    JOIN aggr a
-      ON b.DATA_SPR = a.DATA_SPR
-     AND b.TYP_OKRESU = a.TYP_OKRESU
-     AND b.KOD_ZU = a.KOD_ZU
-),
-udzialy_avg AS (
-    SELECT
-        u.DATA_SPR,
-        u.TYP_OKRESU,
-        u.KOD_ZU,
-        COUNT(*) AS n_udzialow,
-        AVG(u.udzial) AS srednia_udzialow
-    FROM udzialy u
-    GROUP BY
-        u.DATA_SPR,
-        u.TYP_OKRESU,
-        u.KOD_ZU
-),
-stddev_pop_aggr AS (
-    SELECT
-        u.DATA_SPR,
-        u.TYP_OKRESU,
-        u.KOD_ZU,
-        SQRT(
-            SUM((u.udzial - ua.srednia_udzialow) * (u.udzial - ua.srednia_udzialow))
-            / ua.n_udzialow
-        ) AS odch_stand_pop
-    FROM udzialy u
-    JOIN udzialy_avg ua
-      ON u.DATA_SPR = ua.DATA_SPR
-     AND u.TYP_OKRESU = ua.TYP_OKRESU
-     AND u.KOD_ZU = ua.KOD_ZU
-    GROUP BY
-        u.DATA_SPR,
-        u.TYP_OKRESU,
-        u.KOD_ZU
-)
-SELECT
-    a.DATA_SPR,
-    a.TYP_OKRESU,
-    a.KOD_ZU,
-    a.suma_scr,
-    ref.wartosc_ref,
-    1 - (a.suma_scr - ref.wartosc_ref) AS efekt_dywersyfikacji,
-    CASE
-        WHEN a.n = 0 OR a.suma_scr = 0 THEN NULL
-        ELSE (2.0 * ga.suma_i_x) / (a.n * a.suma_scr) - ((a.n + 1.0) / a.n)
-    END AS gini,
-    CASE
-        WHEN (a.suma_scr - SQRT(a.suma_kwadratow)) = 0 THEN NULL
-        ELSE (a.suma_scr - ref.wartosc_ref)
-             / (a.suma_scr - SQRT(a.suma_kwadratow))
-    END AS eiopa_diversification_score,
-    sp.odch_stand_pop
-FROM aggr a
-LEFT JOIN ref
-  ON a.DATA_SPR = ref.DATA_SPR
- AND a.TYP_OKRESU = ref.TYP_OKRESU
- AND a.KOD_ZU = ref.KOD_ZU
-LEFT JOIN gini_aggr ga
-  ON a.DATA_SPR = ga.DATA_SPR
- AND a.TYP_OKRESU = ga.TYP_OKRESU
- AND a.KOD_ZU = ga.KOD_ZU
-LEFT JOIN stddev_pop_aggr sp
-  ON a.DATA_SPR = sp.DATA_SPR
- AND a.TYP_OKRESU = sp.TYP_OKRESU
- AND a.KOD_ZU = sp.KOD_ZU;
+
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR.parent / "Bazalocal_snu_ana.db"
+SQL_TEMPLATE_PATH = BASE_DIR / "template_dywersyfikacja.sql"
+
+
+CONFIGS = {
+    "dyw_ryzyko_rynkowe": {
+        "target_table": "dyw_ryzyko_rynkowe",
+
+        "source_table": "V_S_26_09_01_02_DIU",
+        "source_value_col": "C0020",
+        "source_code_col": "KOD_POZYCJI",
+        "source_codes": ["R0110", "R0130", "R0060", "R0140"],
+        "source_date_col": "DATA_SPR",
+        "source_period_col": "TYP_OKRESU",
+        "source_entity_col": "KOD_ZU",
+
+        "reference_table": "rynkowe_i_kredytowe",
+        "reference_value_col": "Rynkowe",
+        "reference_code_col": "KOD_POZYCJI",
+        "reference_code": None,
+        "reference_date_col": "DATA_SPR",
+        "reference_period_col": "TYP_OKRESU",
+        "reference_entity_col": "KOD_ZU",
+    },
+
+    "dyw_calkowity_wymog": {
+        "target_table": "dyw_calkowity_wymog",
+
+        "source_table": "V_S_26_09_01_02_DIU",
+        "source_value_col": "C0020",
+        "source_code_col": "KOD_POZYCJI",
+        "source_codes": ["R0110", "R0130", "R0060", "R0140"],
+        "source_date_col": "DATA_SPR",
+        "source_period_col": "TYP_OKRESU",
+        "source_entity_col": "KOD_ZU",
+
+        "reference_table": "rynkowe_i_kredytowe",
+        "reference_value_col": "Rynkowe",
+        "reference_code_col": "KOD_POZYCJI",
+        "reference_code": None,
+        "reference_date_col": "DATA_SPR",
+        "reference_period_col": "TYP_OKRESU",
+        "reference_entity_col": "KOD_ZU",
+    },
+}
+
+
+def quote_sql_value(value: str) -> str:
+    """Bezpieczne opakowanie stringa do SQL."""
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
+
+
+def build_source_codes_sql(source_codes: list[str]) -> str:
+    if not source_codes:
+        raise ValueError("Lista source_codes nie może być pusta.")
+    return ", ".join(quote_sql_value(code) for code in source_codes)
+
+
+def build_reference_where_clause(config: dict) -> str:
+    reference_code = config.get("reference_code")
+    reference_code_col = config.get("reference_code_col")
+
+    if reference_code is None or reference_code == "":
+        return ""
+
+    if not reference_code_col:
+        raise ValueError("Podano reference_code, ale brak reference_code_col.")
+
+    return f"WHERE {reference_code_col} = {quote_sql_value(reference_code)}"
+
+
+def validate_config(config: dict) -> None:
+    required_fields = [
+        "target_table",
+        "source_table",
+        "source_value_col",
+        "source_code_col",
+        "source_codes",
+        "source_date_col",
+        "source_period_col",
+        "source_entity_col",
+        "reference_table",
+        "reference_value_col",
+        "reference_date_col",
+        "reference_period_col",
+        "reference_entity_col",
+    ]
+
+    missing = [field for field in required_fields if field not in config]
+    if missing:
+        raise ValueError(f"Brakuje pól w configu: {missing}")
+
+    if not isinstance(config["source_codes"], list) or not config["source_codes"]:
+        raise ValueError("source_codes musi być niepustą listą.")
+
+
+def build_sql(config: dict) -> str:
+    validate_config(config)
+
+    template = SQL_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    sql_params = {
+        **config,
+        "source_codes_sql": build_source_codes_sql(config["source_codes"]),
+        "reference_where_clause": build_reference_where_clause(config),
+    }
+
+    return template.format(**sql_params)
+
+
+def run_sql(db_path: Path, sql: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.executescript(sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def run_case(case_name: str) -> None:
+    if case_name not in CONFIGS:
+        available = ", ".join(CONFIGS.keys())
+        raise ValueError(f"Nieznany case: {case_name}. Dostępne: {available}")
+
+    config = CONFIGS[case_name]
+    sql = build_sql(config)
+
+    print(f"Uruchamiam case: {case_name}")
+    print(f"Tworzę tabelę: {config['target_table']}")
+    run_sql(DB_PATH, sql)
+    print("Gotowe.")
+
+
+if __name__ == "__main__":
+    # tutaj wybierasz, co chcesz uruchomić
+    run_case("dyw_ryzyko_rynkowe")
+    # run_case("dyw_calkowity_wymog")
