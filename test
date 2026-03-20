@@ -11,33 +11,22 @@ WITH base AS (
     FROM {source_table}
     {base_where_clause}
 ),
-aggr AS (
-    SELECT
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU,
-        {series_col},
-        SUM({value_col}) AS {value_col}
-    FROM base
-    GROUP BY
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU,
-        {series_col}
-),
 wynik_bazowy AS (
     SELECT
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU,
-        {series_col},
-        {value_col},
+        b.DATA_SPR,
+        b.TYP_OKRESU,
+        b.KOD_ZU,
+        b.{series_col},
+        b.{value_col},
         CASE
-            WHEN SUM({value_col}) OVER (PARTITION BY DATA_SPR, KOD_ZU) = 0 THEN NULL
-            ELSE {value_col} * 1.0
-                 / SUM({value_col}) OVER (PARTITION BY DATA_SPR, KOD_ZU)
+            WHEN SUM(b.{value_col}) OVER (
+                PARTITION BY b.DATA_SPR, b.KOD_ZU
+            ) = 0 THEN NULL
+            ELSE 1.0 * b.{value_col} / SUM(b.{value_col}) OVER (
+                PARTITION BY b.DATA_SPR, b.KOD_ZU
+            )
         END AS {share_col}
-    FROM aggr
+    FROM base b
 )
 SELECT
     wb.DATA_SPR,
