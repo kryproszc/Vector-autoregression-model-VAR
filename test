@@ -1,5 +1,6 @@
 DROP TABLE IF EXISTS dyw_calkowity_wymog;
 
+CREATE TABLE dyw_calkowity_wymog AS
 WITH s26_aggr AS (
     SELECT
         v26.DATA_SPR,
@@ -12,7 +13,7 @@ WITH s26_aggr AS (
                 ELSE 0
             END
         ) AS suma_s26
-    FROM [SNU_ANA].[dbo].[V_S_26_09_01_02_DIU] v26
+    FROM V_S_26_09_01_02_DIU v26
     GROUP BY
         v26.DATA_SPR,
         v26.TYP_OKRESU,
@@ -33,7 +34,6 @@ SELECT
     s.suma_s26,
     rk.Kredytowe,
     1 - (s.suma_s26 - rk.Kredytowe) AS efekt_dywersyfikacji
-INTO dyw_calkowity_wymog
 FROM s26_aggr s
 LEFT JOIN rk
     ON s.DATA_SPR = rk.DATA_SPR
