@@ -1,1 +1,232 @@
-s
+from pathlib import Path
+import sqlite3
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR.parent / "Bazalocal_snu_ana.db"
+SQL_TEMPLATE_PATH = BASE_DIR / "template_ratio_z_przyrostami.sql"
+
+
+CONFIGS = {
+    "premium_risk_ratio": {
+        "target_table": "premium_risk_ratio",
+
+        "source_table": "V_S_26_13_01_08_DIU",
+        "source_date_col": "DATA_SPR",
+        "source_period_col": "TYP_OKRESU",
+        "source_entity_col": "KOD_ZU",
+
+        "series_col": "Z0010",
+
+        # [KOD_ZU, value1_col, value2_col]
+        "kod_zu_value_cols": [
+            ("01", "R0960", "R0970"),
+            ("02", "R0980", "R0990"),
+            ("03", "R1100", "R1110"),
+        ],
+
+        "base_where_clause": "",
+    },
+}
+
+
+def validate_config(config: dict) -> None:
+    required_fields = [
+        "target_table",
+        "source_table",
+        "source_date_col",
+        "source_period_col",
+        "source_entity_col",
+        "series_col",
+        "kod_zu_value_cols",
+        "base_where_clause",
+    ]
+
+    missing = [field for field in required_fields if field not in config]
+    if missing:
+        raise ValueError(f"Brakuje pól w configu: {missing}")
+
+    rows = config["kod_zu_value_cols"]
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("kod_zu_value_cols musi być niepustą listą")
+
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) != 3:
+            raise ValueError(
+                "Każdy wpis w kod_zu_value_cols musi mieć postać: "
+                "(KOD_ZU, value1_col, value2_col)"
+            )
+
+
+def sql_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def build_case_expr(entity_col: str, mappings: list, which: int) -> str:
+    lines = ["CASE"]
+    for kod_zu, value1_col, value2_col in mappings:
+        selected_col = value1_col if which == 1 else value2_col
+        lines.append(
+            f"    WHEN {entity_col} = {sql_quote(kod_zu)} THEN CAST({selected_col} AS REAL)"
+        )
+    lines.append("    ELSE NULL")
+    lines.append("END")
+    return "\n".join(lines)
+
+
+def build_sql(config: dict) -> str:
+    validate_config(config)
+
+    template = SQL_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    ratio_col = "ratio_value1_value2"
+    ratio_qoq_col = f"{ratio_col}_qoq"
+    ratio_yoy_col = f"{ratio_col}_yoy"
+
+    sql_params = {
+        **config,
+        "value1_expr": build_case_expr(
+            config["source_entity_col"],
+            config["kod_zu_value_cols"],
+            which=1,
+        ),
+        "value2_expr": build_case_expr(
+            config["source_entity_col"],
+            config["kod_zu_value_cols"],
+            which=2,
+        ),
+        "value1_alias": "VALUE_1",
+        "value2_alias": "VALUE_2",
+        "ratio_col": ratio_col,
+        "ratio_qoq_col": ratio_qoq_col,
+        "ratio_yoy_col": ratio_yoy_col,
+    }
+
+    return template.format(**sql_params)
+
+
+def run_sql(db_path: Path, sql: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def run_case(case_name: str) -> None:
+    if case_name not in CONFIGS:
+        available = ", ".join(CONFIGS.keys())
+        raise ValueError(f"Nieznany case: {case_name}. Dostępne: {available}")
+
+    config = CONFIGS[case_name]
+    sql = build_sql(config)
+
+    print(f"Uruchamiam case: {case_name}")
+    print(f"Tworzę tabelę: {config['target_table']}")
+    run_sql(DB_PATH, sql)
+    print("Gotowe.")
+
+
+if __name__ == "__main__":
+    run_case("premium_risk_ratio")
+
+
+##########################
+
+
+
+DROP TABLE IF EXISTS {target_table};
+
+CREATE TABLE {target_table} AS
+WITH base AS (
+    SELECT
+        {source_date_col}   AS DATA_SPR,
+        {source_period_col} AS TYP_OKRESU,
+        {source_entity_col} AS KOD_ZU,
+        {series_col}        AS {series_col},
+        {value1_expr}       AS {value1_alias},
+        {value2_expr}       AS {value2_alias}
+    FROM {source_table}
+    {base_where_clause}
+),
+aggr AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        {series_col},
+        SUM({value1_alias}) AS {value1_alias},
+        SUM({value2_alias}) AS {value2_alias}
+    FROM base
+    GROUP BY
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        {series_col}
+),
+wynik_bazowy AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        {series_col},
+        {value1_alias},
+        {value2_alias},
+        CASE
+            WHEN {value2_alias} IS NULL OR {value2_alias} = 0 THEN NULL
+            ELSE 1.0 * {value1_alias} / {value2_alias}
+        END AS {ratio_col}
+    FROM aggr
+)
+SELECT
+    wb.DATA_SPR,
+    wb.TYP_OKRESU,
+    wb.KOD_ZU,
+    wb.{series_col},
+    wb.{value1_alias},
+    wb.{value2_alias},
+    wb.{ratio_col},
+
+    (
+        SELECT CASE
+            WHEN wb.TYP_OKRESU = 'K'
+             AND q.{ratio_col} IS NOT NULL
+             AND q.{ratio_col} <> 0
+            THEN 1.0 * wb.{ratio_col} / q.{ratio_col} - 1
+        END
+        FROM wynik_bazowy q
+        WHERE q.KOD_ZU = wb.KOD_ZU
+          AND q.{series_col} = wb.{series_col}
+          AND q.TYP_OKRESU = 'K'
+          AND wb.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '03-31'
+                  THEN date(substr(wb.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '06-30'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '09-30'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '12-31'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ) AS {ratio_qoq_col},
+
+    (
+        SELECT CASE
+            WHEN y.{ratio_col} IS NOT NULL
+             AND y.{ratio_col} <> 0
+            THEN 1.0 * wb.{ratio_col} / y.{ratio_col} - 1
+        END
+        FROM wynik_bazowy y
+        WHERE y.KOD_ZU = wb.KOD_ZU
+          AND y.{series_col} = wb.{series_col}
+          AND y.TYP_OKRESU = wb.TYP_OKRESU
+          AND y.DATA_SPR = date(wb.DATA_SPR, '-1 year')
+    ) AS {ratio_yoy_col}
+
+FROM wynik_bazowy wb;
+
+
+
+
