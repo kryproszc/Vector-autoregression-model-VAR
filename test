@@ -1,1 +1,41 @@
-d
+DROP TABLE IF EXISTS dyw_calkowity_wymog;
+
+WITH s26_aggr AS (
+    SELECT
+        v26.DATA_SPR,
+        v26.TYP_OKRESU,
+        v26.KOD_ZU,
+        SUM(
+            CASE
+                WHEN v26.KOD_POZYCJI IN ('R0110', 'R0130', 'R0060', 'R0140')
+                THEN v26.C0020
+                ELSE 0
+            END
+        ) AS suma_s26
+    FROM [SNU_ANA].[dbo].[V_S_26_09_01_02_DIU] v26
+    GROUP BY
+        v26.DATA_SPR,
+        v26.TYP_OKRESU,
+        v26.KOD_ZU
+),
+rk AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        Kredytowe
+    FROM rynkowe_i_kredytowe
+)
+SELECT
+    s.DATA_SPR,
+    s.TYP_OKRESU,
+    s.KOD_ZU,
+    s.suma_s26,
+    rk.Kredytowe,
+    1 - (s.suma_s26 - rk.Kredytowe) AS efekt_dywersyfikacji
+INTO dyw_calkowity_wymog
+FROM s26_aggr s
+LEFT JOIN rk
+    ON s.DATA_SPR = rk.DATA_SPR
+   AND s.TYP_OKRESU = rk.TYP_OKRESU
+   AND s.KOD_ZU = rk.KOD_ZU;
