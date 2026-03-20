@@ -1,13 +1,42 @@
-sciezka_bazy = r"C:\twoj\folder\baza_danych.db"
-nazwa_tabeli = "dane_raportowe"
+ryzyko_rynkowe_bez_przyrostow as
+(
+    SELECT
+        aktywa_ogolem.DATA_SPR,
+        aktywa_ogolem.TYP_OKRESU,
+        aktywa_ogolem.KOD_ZU,
 
-conn = sqlite3.connect(sciezka_bazy)
+        CASE
+            WHEN aktywa_ogolem.KOD_ZU = 16 THEN
+                rynk_i_kred.Rynkowe / NULLIF(aktywa_ogolem.Aktywa, 0)
+            WHEN aktywa_ogolem.KOD_ZU = 21 THEN
+                diu.C0010 / NULLIF(aktywa_ogolem.Aktywa, 0)
+            ELSE
+                NULL
+        END as wymog_rynkowego_do_aktywow,
 
-df.to_sql(
-    nazwa_tabeli,
-    conn,
-    if_exists="append",   # dopisuje dane do istniejącej tabeli
-    index=False
+        ryz_rynk_roczne.wymog_cen_akcji_do_funduszy,
+        ryz_rynk_roczne.wymog_nieruchm_do_nieruchm,
+        ryz_rynk_roczne.wymog_st_proc_do_eksp,
+        ryz_rynk_roczne.duration_aktywow,
+        ryz_rynk_roczne.duration_pasywow,
+        ryz_rynk_roczne.duration_portfela,
+        ryz_rynk_roczne.wymog_st_proc_do_wart_nar_przez_dur
+
+    FROM aktywa_ogolem aktywa_ogolem
+
+    LEFT JOIN rynkowe_i_kredytowe rynk_i_kred
+        ON aktywa_ogolem.DATA_SPR   = rynk_i_kred.DATA_SPR
+       AND aktywa_ogolem.TYP_OKRESU = rynk_i_kred.TYP_OKRESU
+       AND aktywa_ogolem.KOD_ZU     = rynk_i_kred.KOD_ZU
+
+    LEFT JOIN ryzyko_rynkowe_roczne_dane ryz_rynk_roczne
+        ON aktywa_ogolem.DATA_SPR   = ryz_rynk_roczne.DATA_SPR
+       AND aktywa_ogolem.TYP_OKRESU = ryz_rynk_roczne.TYP_OKRESU
+       AND aktywa_ogolem.KOD_ZU     = ryz_rynk_roczne.KOD_ZU
+
+    LEFT JOIN SNU_ANA.dbo.V_S_25_05_01_01_DIU diu
+        ON aktywa_ogolem.DATA_SPR   = diu.DATA_SPR
+       AND aktywa_ogolem.TYP_OKRESU = diu.TYP_OKRESU
+       AND aktywa_ogolem.KOD_ZU     = diu.KOD_ZU
+       AND diu.KOD_POZYCJI = 'R0080'
 )
-
-conn.close()
