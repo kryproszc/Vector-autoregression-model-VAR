@@ -48,5 +48,52 @@ SELECT
     wb.{series_col},
     wb.{value1_alias},
     wb.{value2_alias},
-    wb.{ratio_col}
+    wb.{ratio_col},
+
+    (
+        SELECT CASE
+            WHEN wb.TYP_OKRESU = 'K'
+             AND q.{ratio_col} IS NOT NULL
+             AND q.{ratio_col} <> 0
+            THEN 1.0 * wb.{ratio_col} / q.{ratio_col} - 1
+        END
+        FROM wynik_bazowy q
+        WHERE q.KOD_ZU = wb.KOD_ZU
+          AND q.{series_col} = wb.{series_col}
+          AND q.TYP_OKRESU = 'K'
+          AND wb.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '03-31'
+                  THEN date(substr(wb.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '06-30'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '09-30'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '12-31'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ) AS {ratio_qoq_col},
+
+    (
+        SELECT CASE
+            WHEN y.{ratio_col} IS NOT NULL
+             AND y.{ratio_col} <> 0
+            THEN 1.0 * wb.{ratio_col} / y.{ratio_col} - 1
+        END
+        FROM wynik_bazowy y
+        WHERE y.KOD_ZU = wb.KOD_ZU
+          AND y.{series_col} = wb.{series_col}
+          AND y.TYP_OKRESU = wb.TYP_OKRESU
+          AND y.DATA_SPR = date(wb.DATA_SPR, '-1 year')
+    ) AS {ratio_yoy_col}
+
 FROM wynik_bazowy wb;
+
+
+=====================
+
+
+
+
+
+
