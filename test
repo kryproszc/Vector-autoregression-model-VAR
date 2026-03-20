@@ -1,1 +1,87 @@
-d
+DROP TABLE IF EXISTS {target_table};
+
+CREATE TABLE {target_table} AS
+WITH base AS (
+    SELECT
+        {source_date_col}   AS DATA_SPR,
+        {source_period_col} AS TYP_OKRESU,
+        {source_entity_col} AS KOD_ZU,
+        {series_col}        AS {series_col},
+        CAST({value_col} AS REAL) AS {value_col}
+    FROM {source_table}
+    {base_where_clause}
+),
+aggr AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        {series_col},
+        SUM({value_col}) AS {value_col}
+    FROM base
+    GROUP BY
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        {series_col}
+),
+wynik_bazowy AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        {series_col},
+        {value_col},
+        CASE
+            WHEN SUM({value_col}) OVER (PARTITION BY DATA_SPR, KOD_ZU) = 0 THEN NULL
+            ELSE {value_col} * 1.0
+                 / SUM({value_col}) OVER (PARTITION BY DATA_SPR, KOD_ZU)
+        END AS {share_col}
+    FROM aggr
+)
+SELECT
+    wb.DATA_SPR,
+    wb.TYP_OKRESU,
+    wb.KOD_ZU,
+    wb.{series_col},
+    wb.{value_col},
+    wb.{share_col},
+
+    (
+        SELECT CASE
+            WHEN wb.TYP_OKRESU = 'K'
+             AND q.{share_col} IS NOT NULL
+             AND q.{share_col} <> 0
+            THEN 1.0 * wb.{share_col} / q.{share_col} - 1
+        END
+        FROM wynik_bazowy q
+        WHERE q.KOD_ZU = wb.KOD_ZU
+          AND q.{series_col} = wb.{series_col}
+          AND q.TYP_OKRESU = 'K'
+          AND wb.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '03-31'
+                  THEN date(substr(wb.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '06-30'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '09-30'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', wb.DATA_SPR) = '12-31'
+                  THEN substr(wb.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ) AS {share_qoq_col},
+
+    (
+        SELECT CASE
+            WHEN y.{share_col} IS NOT NULL
+             AND y.{share_col} <> 0
+            THEN 1.0 * wb.{share_col} / y.{share_col} - 1
+        END
+        FROM wynik_bazowy y
+        WHERE y.KOD_ZU = wb.KOD_ZU
+          AND y.{series_col} = wb.{series_col}
+          AND y.TYP_OKRESU = wb.TYP_OKRESU
+          AND y.DATA_SPR = date(wb.DATA_SPR, '-1 year')
+    ) AS {share_yoy_col}
+
+FROM wynik_bazowy wb;
