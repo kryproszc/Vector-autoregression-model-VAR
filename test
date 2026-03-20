@@ -1,27 +1,28 @@
-DROP TABLE IF EXISTS dyw_calkowity_wymog;
+DROP TABLE IF EXISTS {target_table};
 
-CREATE TABLE dyw_calkowity_wymog AS
+CREATE TABLE {target_table} AS
 WITH base AS (
     SELECT
-        v26.DATA_SPR,
-        v26.TYP_OKRESU,
-        v26.KOD_ZU,
-        v26.KOD_POZYCJI,
-        CAST(v26.C0020 AS REAL) AS wartosc
-    FROM V_S_26_09_01_02_DIU v26
-    WHERE v26.KOD_POZYCJI IN ('R0110', 'R0130', 'R0060', 'R0140')
+        {source_date_col}   AS DATA_SPR,
+        {source_period_col} AS TYP_OKRESU,
+        {source_entity_col} AS KOD_ZU,
+        {source_code_col}   AS KOD_POZYCJI,
+        CAST({source_value_col} AS REAL) AS wartosc
+    FROM {source_table}
+    WHERE {source_code_col} IN ({source_codes_sql})
 ),
-rk AS (
+ref AS (
     SELECT
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU,
-        MAX(CAST(Rynkowe AS REAL)) AS Rynkowe
-    FROM rynkowe_i_kredytowe
+        {reference_date_col}   AS DATA_SPR,
+        {reference_period_col} AS TYP_OKRESU,
+        {reference_entity_col} AS KOD_ZU,
+        MAX(CAST({reference_value_col} AS REAL)) AS wartosc_ref
+    FROM {reference_table}
+    {reference_where_clause}
     GROUP BY
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU
+        {reference_date_col},
+        {reference_period_col},
+        {reference_entity_col}
 ),
 aggr AS (
     SELECT
@@ -116,23 +117,23 @@ SELECT
     a.TYP_OKRESU,
     a.KOD_ZU,
     a.suma_scr,
-    rk.Rynkowe,
-    1 - (a.suma_scr - rk.Rynkowe) AS efekt_dywersyfikacji,
+    ref.wartosc_ref,
+    1 - (a.suma_scr - ref.wartosc_ref) AS efekt_dywersyfikacji,
     CASE
         WHEN a.n = 0 OR a.suma_scr = 0 THEN NULL
         ELSE (2.0 * ga.suma_i_x) / (a.n * a.suma_scr) - ((a.n + 1.0) / a.n)
     END AS gini,
     CASE
         WHEN (a.suma_scr - SQRT(a.suma_kwadratow)) = 0 THEN NULL
-        ELSE (a.suma_scr - rk.Rynkowe)
+        ELSE (a.suma_scr - ref.wartosc_ref)
              / (a.suma_scr - SQRT(a.suma_kwadratow))
     END AS eiopa_diversification_score,
     sp.odch_stand_pop
 FROM aggr a
-LEFT JOIN rk
-  ON a.DATA_SPR = rk.DATA_SPR
- AND a.TYP_OKRESU = rk.TYP_OKRESU
- AND a.KOD_ZU = rk.KOD_ZU
+LEFT JOIN ref
+  ON a.DATA_SPR = ref.DATA_SPR
+ AND a.TYP_OKRESU = ref.TYP_OKRESU
+ AND a.KOD_ZU = ref.KOD_ZU
 LEFT JOIN gini_aggr ga
   ON a.DATA_SPR = ga.DATA_SPR
  AND a.TYP_OKRESU = ga.TYP_OKRESU
