@@ -1,25 +1,141 @@
-config = [
-    {
-        "folder": r"C:\raporty\2024",
-        "file_name": "raport_grudzien.xlsx",
-        "sheet_name": "Sheet1",
-        "data_spr": "2024-12-31",
-        "kod_zu": "ZU001",
-        "tables": [
-            {"identyfikator": "MOD_F", "table_range": "C11:L13"},
-            {"identyfikator": "MOD_G", "table_range": "C20:L25"},
-            {"identyfikator": "MOD_H", "table_range": "C30:L35"},
-        ]
-    },
-    {
-        "folder": r"C:\raporty\2024",
-        "file_name": "inny_plik.xlsx",
-        "sheet_name": "ArkuszA",
-        "data_spr": "2024-12-31",
-        "kod_zu": "ZU002",
-        "tables": [
-            {"identyfikator": "MOD_X", "table_range": "D10:M15"},
-            {"identyfikator": "MOD_Y", "table_range": "D20:M28"},
-        ]
-    }
-]
+from pathlib import Path
+from openpyxl import load_workbook
+import pandas as pd
+
+
+COLUMN_MAP = {
+    "Scenario name": "SCENARIO_NAME",
+    'Solvency capital requirement before reinsurance ("adjusted gross")': "SCR_BEFORE_REINSURANCE",
+    "Solvency capital requirement after reinsurance": "SCR_AFTER_REINSURANCE",
+    "50y-OEP": "OEP_50Y",
+    "200y-OEP": "OEP_200Y",
+    "500y-OEP": "OEP_500Y",
+    "50y-AEP": "AEP_50Y",
+    "200y-AEP": "AEP_200Y",
+    "500y-AEP": "AEP_500Y",
+    "AAL gross": "AAL_GROSS"
+}
+
+
+def clean_headers(headers: list) -> list:
+    cleaned = []
+    for h in headers:
+        if h is None:
+            cleaned.append(None)
+        else:
+            cleaned.append(str(h).strip().replace("\n", " "))
+    return cleaned
+
+
+def read_single_table(ws, table_cfg: dict, data_spr: str, kod_zu: str, file_name: str, sheet_name: str) -> pd.DataFrame:
+    table_range = table_cfg["table_range"]
+    identyfikator = table_cfg["identyfikator"]
+
+    rows = ws[table_range]
+    values = [[cell.value for cell in row] for row in rows]
+
+    if not values or len(values) < 2:
+        raise ValueError(f"Zakres {table_range} nie zawiera poprawnej tabeli.")
+
+    headers = clean_headers(values[0])
+    data_rows = values[1:]
+
+    df = pd.DataFrame(data_rows, columns=headers)
+
+    # usuń całkowicie puste wiersze
+    df = df.dropna(how="all").reset_index(drop=True)
+
+    # zmień nazwy kolumn na techniczne
+    df = df.rename(columns=COLUMN_MAP)
+
+    # dodaj kolumny techniczne
+    df.insert(0, "DATA_SPR", data_spr)
+    df.insert(1, "KOD_ZU", kod_zu)
+    df.insert(2, "IDENTYFIKATOR", identyfikator)
+    df.insert(3, "PLIK_ZRODLOWY", file_name)
+    df.insert(4, "ARKUSZ", sheet_name)
+
+    return df
+
+
+def read_tables_from_file_cfg(file_cfg: dict) -> pd.DataFrame:
+    file_path = Path(file_cfg["folder"]) / file_cfg["file_name"]
+    sheet_name = file_cfg["sheet_name"]
+    data_spr = file_cfg["data_spr"]
+    kod_zu = file_cfg["kod_zu"]
+    tables = file_cfg["tables"]
+
+    wb = load_workbook(file_path, data_only=True)
+    ws = wb[sheet_name]
+
+    dfs = []
+
+    for table_cfg in tables:
+        try:
+            df = read_single_table(
+                ws=ws,
+                table_cfg=table_cfg,
+                data_spr=data_spr,
+                kod_zu=kod_zu,
+                file_name=file_cfg["file_name"],
+                sheet_name=sheet_name
+            )
+            dfs.append(df)
+        except Exception as e:
+            print(
+                f"Błąd w pliku {file_cfg['file_name']}, arkusz {sheet_name}, "
+                f"identyfikator {table_cfg.get('identyfikator')}, "
+                f"zakres {table_cfg.get('table_range')}: {e}"
+            )
+
+    if not dfs:
+        return pd.DataFrame()
+
+    return pd.concat(dfs, ignore_index=True)
+
+
+def read_all_configs(config: list[dict]) -> pd.DataFrame:
+    all_dfs = []
+
+    for file_cfg in config:
+        df = read_tables_from_file_cfg(file_cfg)
+        if not df.empty:
+            all_dfs.append(df)
+
+    if not all_dfs:
+        return pd.DataFrame()
+
+    return pd.concat(all_dfs, ignore_index=True)
+
+
+if __name__ == "__main__":
+    config = [
+        {
+            "folder": r"C:\raporty\2024",
+            "file_name": "raport_grudzien.xlsx",
+            "sheet_name": "Sheet1",
+            "data_spr": "2024-12-31",
+            "kod_zu": "ZU001",
+            "tables": [
+                {"identyfikator": "MOD_F", "table_range": "C11:L13"},
+                {"identyfikator": "MOD_G", "table_range": "C20:L25"},
+                {"identyfikator": "MOD_H", "table_range": "C30:L35"},
+            ]
+        },
+        {
+            "folder": r"C:\raporty\2024",
+            "file_name": "inny_plik.xlsx",
+            "sheet_name": "ArkuszA",
+            "data_spr": "2024-12-31",
+            "kod_zu": "ZU002",
+            "tables": [
+                {"identyfikator": "MOD_X", "table_range": "D10:M15"},
+                {"identyfikator": "MOD_Y", "table_range": "D20:M28"},
+            ]
+        }
+    ]
+
+    df_all = read_all_configs(config)
+
+    print(df_all)
+    print(df_all.columns.tolist())
