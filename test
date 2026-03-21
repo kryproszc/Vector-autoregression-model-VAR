@@ -1,118 +1,25 @@
-from pathlib import Path
-from openpyxl import load_workbook
-import pandas as pd
-
-
-COLUMN_MAP = {
-    "Scenario name": "SCENARIO_NAME",
-    'Solvency capital requirement before reinsurance ("adjusted gross")': "SCR_BEFORE_REINSURANCE",
-    "Solvency capital requirement after reinsurance": "SCR_AFTER_REINSURANCE",
-    "50y-OEP": "OEP_50Y",
-    "200y-OEP": "OEP_200Y",
-    "500y-OEP": "OEP_500Y",
-    "50y-AEP": "AEP_50Y",
-    "200y-AEP": "AEP_200Y",
-    "500y-AEP": "AEP_500Y",
-    "AAL gross": "AAL_GROSS"
-}
-
-
-def clean_headers(headers: list) -> list:
-    cleaned = []
-    for h in headers:
-        if h is None:
-            cleaned.append(None)
-        else:
-            cleaned.append(str(h).strip().replace("\n", " "))
-    return cleaned
-
-
-def read_table_from_config(cfg: dict) -> pd.DataFrame:
-    file_path = Path(cfg["folder"]) / cfg["file_name"]
-
-    wb = load_workbook(file_path, data_only=True)
-    ws = wb[cfg["sheet_name"]]
-
-    rows = ws[cfg["table_range"]]
-    values = [[cell.value for cell in row] for row in rows]
-
-    if not values or len(values) < 2:
-        raise ValueError(
-            f"Zakres {cfg['table_range']} w pliku {file_path} nie zawiera poprawnej tabeli."
-        )
-
-    headers = clean_headers(values[0])
-    data_rows = values[1:]
-
-    df = pd.DataFrame(data_rows, columns=headers)
-
-    # usuwamy całkowicie puste wiersze
-    df = df.dropna(how="all").reset_index(drop=True)
-
-    # zmiana nazw kolumn na techniczne
-    df = df.rename(columns=COLUMN_MAP)
-
-    # dodajemy kolumny techniczne
-    df.insert(0, "DATA_SPR", cfg["data_spr"])
-    df.insert(1, "KOD_ZU", cfg["kod_zu"])
-    df.insert(2, "IDENTYFIKATOR", cfg["identyfikator"])
-    df.insert(3, "PLIK_ZRODLOWY", cfg["file_name"])
-    df.insert(4, "ARKUSZ", cfg["sheet_name"])
-
-    return df
-
-
-def read_many_tables(tables_config: list[dict]) -> pd.DataFrame:
-    all_dfs = []
-
-    for cfg in tables_config:
-        try:
-            df = read_table_from_config(cfg)
-            all_dfs.append(df)
-        except Exception as e:
-            print(
-                f"Błąd dla identyfikatora {cfg.get('identyfikator')} "
-                f"w pliku {cfg.get('file_name')}, arkusz {cfg.get('sheet_name')}: {e}"
-            )
-
-    if not all_dfs:
-        return pd.DataFrame()
-
-    return pd.concat(all_dfs, ignore_index=True)
-
-
-if __name__ == "__main__":
-    tables_config = [
-        {
-            "folder": r"C:\raporty\2024",
-            "file_name": "raport_grudzien.xlsx",
-            "sheet_name": "Sheet1",
-            "identyfikator": "MOD_F",
-            "table_range": "C11:L13",
-            "data_spr": "2024-12-31",
-            "kod_zu": "ZU001"
-        },
-        {
-            "folder": r"C:\raporty\2024",
-            "file_name": "raport_grudzien.xlsx",
-            "sheet_name": "Sheet1",
-            "identyfikator": "MOD_G",
-            "table_range": "C20:L25",
-            "data_spr": "2024-12-31",
-            "kod_zu": "ZU001"
-        },
-        {
-            "folder": r"C:\raporty\2024",
-            "file_name": "inny_plik.xlsx",
-            "sheet_name": "ArkuszA",
-            "identyfikator": "MOD_X",
-            "table_range": "D10:M15",
-            "data_spr": "2024-12-31",
-            "kod_zu": "ZU002"
-        }
-    ]
-
-    df_all = read_many_tables(tables_config)
-
-    print(df_all)
-    print(df_all.columns.tolist())
+config = [
+    {
+        "folder": r"C:\raporty\2024",
+        "file_name": "raport_grudzien.xlsx",
+        "sheet_name": "Sheet1",
+        "data_spr": "2024-12-31",
+        "kod_zu": "ZU001",
+        "tables": [
+            {"identyfikator": "MOD_F", "table_range": "C11:L13"},
+            {"identyfikator": "MOD_G", "table_range": "C20:L25"},
+            {"identyfikator": "MOD_H", "table_range": "C30:L35"},
+        ]
+    },
+    {
+        "folder": r"C:\raporty\2024",
+        "file_name": "inny_plik.xlsx",
+        "sheet_name": "ArkuszA",
+        "data_spr": "2024-12-31",
+        "kod_zu": "ZU002",
+        "tables": [
+            {"identyfikator": "MOD_X", "table_range": "D10:M15"},
+            {"identyfikator": "MOD_Y", "table_range": "D20:M28"},
+        ]
+    }
+]
