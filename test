@@ -16,7 +16,31 @@ SELECT
         - MAX(CASE WHEN fs.KOD_POZYCJI = 'R0150' THEN fs.[C0030] END),
         0
     )
-    AS kdsw_do_wymogu_fs_pre_tax
+    AS kdsw_do_wymogu_fs_pre_tax,
+
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0050' THEN fs.[C0030] END), 0)
+    AS kdsw_do_majatkowy,
+
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0030' THEN fs.[C0030] END), 0)
+    AS kdsw_do_zycie,
+
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0040' THEN fs.[C0030] END), 0)
+    AS kdsw_do_zdrowotnych,
+
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0010' THEN fs.[C0030] END), 0)
+    AS kdsw_do_rynkowe,
+
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0020' THEN fs.[C0030] END), 0)
+    AS kdsw_do_kontrahenta,
+
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0130' THEN fs.[C0030] END), 0)
+    AS kdsw_do_operacyjnego
 
 FROM formula_standardowa fs
 LEFT JOIN [SNU_ANA].[dbo].[V_S_23_01_01_01_DIU] v23
