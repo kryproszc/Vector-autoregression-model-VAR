@@ -1,128 +1,36 @@
-from pathlib import Path
-import openpyxl
-import pandas as pd
+SELECT
+    fs.DATA_SPR,
+    fs.TYP_OKRESU,
+    fs.KOD_ZU,
 
-# =========================
-# dane wejściowe
-# =========================
-sciezka_do_folderu = r"C:\twoj\folder"
-nazwa_pliku = "plik.xlsx"
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] ELSE 0 END) AS licznik,
+    MAX(CASE WHEN fs.KOD_POZYCJI = 'R0200' THEN fs.[C0030] ELSE 0 END) AS r0200,
+    MAX(CASE WHEN fs.KOD_POZYCJI = 'R0150' THEN fs.[C0030] ELSE 0 END) AS r0150,
 
-nazwa_arkusza_1 = "Arkusz1"
-nazwa_arkusza_2 = "Arkusz2"
+    MAX(CASE WHEN fs.KOD_POZYCJI = 'R0200' THEN fs.[C0030] ELSE 0 END)
+    - MAX(CASE WHEN fs.KOD_POZYCJI = 'R0150' THEN fs.[C0030] ELSE 0 END)
+    AS mianownik_pre_tax,
 
-DATA_SPR = "2026-03-19"
-TYP_OKRESU = "M"
-KOD_ZU = "ZU123"
+    CAST(MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] ELSE 0 END) AS DECIMAL(20,10))
+    / NULLIF(CAST(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0200' THEN fs.[C0030] ELSE 0 END) AS DECIMAL(20,10)), 0)
+    AS kdsw_do_wymogu_fs,
 
-# osobne listy R / KOD_POZYCJI dla każdego arkusza
-KOD_POZYCJI_ARKUSZ_1 = [
-    "R1",
-    "R2",
-    "R3",
-    "R4",
-]
-
-KOD_POZYCJI_ARKUSZ_2 = [
-    "R10",
-    "R11",
-    "R12",
-    "R13",
-    "R14",
-]
-
-# kolumny
-kolumna_z_R_arkusz_1 = "B"
-kolumna_z_R_arkusz_2 = "B"
-
-kolumna_z_danymi_arkusz_1 = "D"
-kolumna_z_danymi_arkusz_2 = "D"
-
-# zakresy
-wiersz_od_1 = 4
-wiersz_do_1 = 11
-
-wiersz_od_2 = 6
-wiersz_do_2 = 27
-
-# =========================
-# otwarcie pliku
-# =========================
-pelna_sciezka = Path(sciezka_do_folderu) / nazwa_pliku
-
-wb = openpyxl.load_workbook(pelna_sciezka, data_only=True)
-ws1 = wb[nazwa_arkusza_1]
-ws2 = wb[nazwa_arkusza_2]
-
-wyniki = []
-
-# =========================
-# arkusz 1
-# =========================
-for kod in KOD_POZYCJI_ARKUSZ_1:
-    znaleziono = False
-
-    for wiersz in range(wiersz_od_1, wiersz_do_1 + 1):
-        wartosc_r = ws1[f"{kolumna_z_R_arkusz_1}{wiersz}"].value
-
-        if wartosc_r == kod:
-            wartosc_dane = ws1[f"{kolumna_z_danymi_arkusz_1}{wiersz}"].value
-
-            wyniki.append({
-                "DATA_SPR": DATA_SPR,
-                "TYP_OKRESU": TYP_OKRESU,
-                "KOD_ZU": KOD_ZU,
-                "KOD_POZYCJI": kod,
-                "C0030": wartosc_dane
-            })
-
-            znaleziono = True
-            break
-
-    if not znaleziono:
-        wyniki.append({
-            "DATA_SPR": DATA_SPR,
-            "TYP_OKRESU": TYP_OKRESU,
-            "KOD_ZU": KOD_ZU,
-            "KOD_POZYCJI": kod,
-            "C0030": None
-        })
-
-# =========================
-# arkusz 2
-# =========================
-for kod in KOD_POZYCJI_ARKUSZ_2:
-    znaleziono = False
-
-    for wiersz in range(wiersz_od_2, wiersz_do_2 + 1):
-        wartosc_r = ws2[f"{kolumna_z_R_arkusz_2}{wiersz}"].value
-
-        if wartosc_r == kod:
-            wartosc_dane = ws2[f"{kolumna_z_danymi_arkusz_2}{wiersz}"].value
-
-            wyniki.append({
-                "DATA_SPR": DATA_SPR,
-                "TYP_OKRESU": TYP_OKRESU,
-                "KOD_ZU": KOD_ZU,
-                "KOD_POZYCJI": kod,
-                "C0030": wartosc_dane
-            })
-
-            znaleziono = True
-            break
-
-    if not znaleziono:
-        wyniki.append({
-            "DATA_SPR": DATA_SPR,
-            "TYP_OKRESU": TYP_OKRESU,
-            "KOD_ZU": KOD_ZU,
-            "KOD_POZYCJI": kod,
-            "C0030": None
-        })
-
-# =========================
-# wynik
-# =========================
-df = pd.DataFrame(wyniki)
-
-print(df)
+    CAST(MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] ELSE 0 END) AS DECIMAL(20,10))
+    / NULLIF(
+        CAST(
+            MAX(CASE WHEN fs.KOD_POZYCJI = 'R0200' THEN fs.[C0030] ELSE 0 END)
+            - MAX(CASE WHEN fs.KOD_POZYCJI = 'R0150' THEN fs.[C0030] ELSE 0 END)
+            AS DECIMAL(20,10)
+        ),
+        0
+    )
+    AS kdsw_do_wymogu_fs_pre_tax
+FROM formula_standardowa fs
+LEFT JOIN [SNU_ANA].[dbo].[V_S_23_01_01_01_DIU] v23
+    ON v23.DATA_SPR = fs.DATA_SPR
+   AND v23.TYP_OKRESU = fs.TYP_OKRESU
+   AND v23.KOD_ZU = fs.KOD_ZU
+GROUP BY
+    fs.DATA_SPR,
+    fs.TYP_OKRESU,
+    fs.KOD_ZU;
