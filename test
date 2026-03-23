@@ -6,44 +6,44 @@ SELECT
     fs.TYP_OKRESU,
     fs.KOD_ZU,
 
-    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
-    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0200' THEN fs.[C0030] END), 0)
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.C0010 END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0200' THEN fs.C0030 END), 0)
     AS kdsw_do_wymogu_fs,
 
-    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.C0010 END)
     / NULLIF(
-        MAX(CASE WHEN fs.KOD_POZYCJI = 'R0200' THEN fs.[C0030] END)
-        - MAX(CASE WHEN fs.KOD_POZYCJI = 'R0150' THEN fs.[C0030] END),
+        MAX(CASE WHEN fs.KOD_POZYCJI = 'R0200' THEN fs.C0030 END)
+        - MAX(CASE WHEN fs.KOD_POZYCJI = 'R0150' THEN fs.C0030 END),
         0
     )
     AS kdsw_do_wymogu_fs_pre_tax,
 
-    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
-    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0050' THEN fs.[C0030] END), 0)
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.C0010 END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0050' THEN fs.C0030 END), 0)
     AS kdsw_do_majatkowy,
 
-    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
-    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0030' THEN fs.[C0030] END), 0)
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.C0010 END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0030' THEN fs.C0030 END), 0)
     AS kdsw_do_zycie,
 
-    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
-    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0040' THEN fs.[C0030] END), 0)
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.C0010 END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0040' THEN fs.C0030 END), 0)
     AS kdsw_do_zdrowotnych,
 
-    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
-    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0010' THEN fs.[C0030] END), 0)
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.C0010 END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0010' THEN fs.C0030 END), 0)
     AS kdsw_do_rynkowe,
 
-    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
-    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0020' THEN fs.[C0030] END), 0)
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.C0010 END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0020' THEN fs.C0030 END), 0)
     AS kdsw_do_kontrahenta,
 
-    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.[C0010] END)
-    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0130' THEN fs.[C0030] END), 0)
+    MAX(CASE WHEN v23.KOD_POZYCJI = 'R0540' THEN v23.C0010 END)
+    / NULLIF(MAX(CASE WHEN fs.KOD_POZYCJI = 'R0130' THEN fs.C0030 END), 0)
     AS kdsw_do_operacyjnego
 
 FROM formula_standardowa fs
-LEFT JOIN [SNU_ANA].[dbo].[V_S_23_01_01_01_DIU] v23
+LEFT JOIN V_S_23_01_01_01_DIU v23
     ON v23.DATA_SPR = fs.DATA_SPR
    AND v23.TYP_OKRESU = fs.TYP_OKRESU
    AND v23.KOD_ZU = fs.KOD_ZU
@@ -51,3 +51,120 @@ GROUP BY
     fs.DATA_SPR,
     fs.TYP_OKRESU,
     fs.KOD_ZU;
+
+
+ALTER TABLE pokrycie_fs ADD COLUMN kdsw_do_wymogu_fs_yoy REAL;
+ALTER TABLE pokrycie_fs ADD COLUMN kdsw_do_wymogu_fs_pre_tax_yoy REAL;
+ALTER TABLE pokrycie_fs ADD COLUMN kdsw_do_majatkowy_yoy REAL;
+ALTER TABLE pokrycie_fs ADD COLUMN kdsw_do_zycie_yoy REAL;
+ALTER TABLE pokrycie_fs ADD COLUMN kdsw_do_zdrowotnych_yoy REAL;
+ALTER TABLE pokrycie_fs ADD COLUMN kdsw_do_rynkowe_yoy REAL;
+ALTER TABLE pokrycie_fs ADD COLUMN kdsw_do_kontrahenta_yoy REAL;
+ALTER TABLE pokrycie_fs ADD COLUMN kdsw_do_operacyjnego_yoy REAL;
+
+
+UPDATE pokrycie_fs AS t
+SET
+    kdsw_do_wymogu_fs_yoy = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'R'
+             AND y.kdsw_do_wymogu_fs IS NOT NULL
+             AND y.kdsw_do_wymogu_fs <> 0
+            THEN 1.0 * t.kdsw_do_wymogu_fs / y.kdsw_do_wymogu_fs - 1
+        END
+        FROM pokrycie_fs y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    kdsw_do_wymogu_fs_pre_tax_yoy = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'R'
+             AND y.kdsw_do_wymogu_fs_pre_tax IS NOT NULL
+             AND y.kdsw_do_wymogu_fs_pre_tax <> 0
+            THEN 1.0 * t.kdsw_do_wymogu_fs_pre_tax / y.kdsw_do_wymogu_fs_pre_tax - 1
+        END
+        FROM pokrycie_fs y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    kdsw_do_majatkowy_yoy = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'R'
+             AND y.kdsw_do_majatkowy IS NOT NULL
+             AND y.kdsw_do_majatkowy <> 0
+            THEN 1.0 * t.kdsw_do_majatkowy / y.kdsw_do_majatkowy - 1
+        END
+        FROM pokrycie_fs y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    kdsw_do_zycie_yoy = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'R'
+             AND y.kdsw_do_zycie IS NOT NULL
+             AND y.kdsw_do_zycie <> 0
+            THEN 1.0 * t.kdsw_do_zycie / y.kdsw_do_zycie - 1
+        END
+        FROM pokrycie_fs y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    kdsw_do_zdrowotnych_yoy = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'R'
+             AND y.kdsw_do_zdrowotnych IS NOT NULL
+             AND y.kdsw_do_zdrowotnych <> 0
+            THEN 1.0 * t.kdsw_do_zdrowotnych / y.kdsw_do_zdrowotnych - 1
+        END
+        FROM pokrycie_fs y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    kdsw_do_rynkowe_yoy = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'R'
+             AND y.kdsw_do_rynkowe IS NOT NULL
+             AND y.kdsw_do_rynkowe <> 0
+            THEN 1.0 * t.kdsw_do_rynkowe / y.kdsw_do_rynkowe - 1
+        END
+        FROM pokrycie_fs y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    kdsw_do_kontrahenta_yoy = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'R'
+             AND y.kdsw_do_kontrahenta IS NOT NULL
+             AND y.kdsw_do_kontrahenta <> 0
+            THEN 1.0 * t.kdsw_do_kontrahenta / y.kdsw_do_kontrahenta - 1
+        END
+        FROM pokrycie_fs y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    kdsw_do_operacyjnego_yoy = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'R'
+             AND y.kdsw_do_operacyjnego IS NOT NULL
+             AND y.kdsw_do_operacyjnego <> 0
+            THEN 1.0 * t.kdsw_do_operacyjnego / y.kdsw_do_operacyjnego - 1
+        END
+        FROM pokrycie_fs y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    );
