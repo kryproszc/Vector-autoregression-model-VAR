@@ -1,23 +1,7 @@
-import pyodbc
-
-conn = pyodbc.connect(
-    "DRIVER={ODBC Driver 17 for SQL Server};"
-    "SERVER=dtc-newm5-snu;"
-    "DATABASE=SNU_ANA;"
-    "Trusted_Connection=yes;"
-    "TrustServerCertificate=yes;"
-)
-
-cursor = conn.cursor()
-
-print("=== TABELE ===")
-cursor.execute("SELECT name FROM sys.tables")
-for row in cursor.fetchall():
-    print(row[0])
-
-print("\n=== WIDOKI ===")
-cursor.execute("SELECT name FROM sys.views")
-for row in cursor.fetchall():
-    print(row[0])
-
-conn.close()
+"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -m pip install pyodbc pandas
+"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -m pip install pyodbc pandas
+"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -c "import pyodbc; import pandas; print('ok')"
+"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -c "import pyodbc; import pandas; print('ok')"
+runas /user:it\ss_snu_qrt cmd
+"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -c "import pyodbc; conn = pyodbc.connect('DRIVER={ODBC Driver 17 for SQL Server};SERVER=dtc-newm5-snu;DATABASE=SNU_ANA;Trusted_Connection=yes;TrustServerCertificate=yes;'); print('polaczenie ok'); conn.close()"
+"C:\Python311\python.exe" -c "import pyodbc; conn = pyodbc.connect('DRIVER={ODBC Driver 17 for SQL Server};SERVER=dtc-newm5-snu;DATABASE=SNU_ANA;Trusted_Connection=yes;TrustServerCertificate=yes;'); print('polaczenie ok'); conn.close()"
