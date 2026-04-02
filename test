@@ -1,7 +1,1 @@
-"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -m pip install pyodbc pandas
-"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -m pip install pyodbc pandas
-"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -c "import pyodbc; import pandas; print('ok')"
-"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -c "import pyodbc; import pandas; print('ok')"
-runas /user:it\ss_snu_qrt cmd
-"C:\Users\szczkr\AppData\Local\Programs\Python\Python313\python.exe" -c "import pyodbc; conn = pyodbc.connect('DRIVER={ODBC Driver 17 for SQL Server};SERVER=dtc-newm5-snu;DATABASE=SNU_ANA;Trusted_Connection=yes;TrustServerCertificate=yes;'); print('polaczenie ok'); conn.close()"
-"C:\Python311\python.exe" -c "import pyodbc; conn = pyodbc.connect('DRIVER={ODBC Driver 17 for SQL Server};SERVER=dtc-newm5-snu;DATABASE=SNU_ANA;Trusted_Connection=yes;TrustServerCertificate=yes;'); print('polaczenie ok'); conn.close()"
+"C:\Python311\python.exe" "C:\temp\python_download_all_views.py"
