@@ -1,68 +1,46 @@
 import pyodbc
-from sqlalchemy import create_engine, inspect
 
-# ====================================
-# DANE POŁĄCZENIA
-# ====================================
-SERVER = "dtc-newmf-snu"
+SERVER = "dtc-newm5-snu"   # sprawdź dokładnie nazwę!
 DATABASE = "SNU_ANA"
 USERNAME = "TWOJ_LOGIN"
 PASSWORD = "TWOJE_HASLO"
 
-# ====================================
-# WYBÓR STEROWNIKA ODBC
-# ====================================
-# Najpierw sprawdzamy, jakie sterowniki są dostępne
-drivers = pyodbc.drivers()
-print("Dostępne sterowniki ODBC:")
-for d in drivers:
-    print(" -", d)
-
-# Preferowany driver
-if "ODBC Driver 17 for SQL Server" in drivers:
-    DRIVER = "ODBC Driver 17 for SQL Server"
-elif "ODBC Driver 18 for SQL Server" in drivers:
-    DRIVER = "ODBC Driver 18 for SQL Server"
-elif "SQL Server" in drivers:
-    DRIVER = "SQL Server"
-else:
-    raise Exception("Brak sterownika do SQL Server. Zainstaluj ODBC Driver.")
-
-print("\nUżywany driver:", DRIVER)
-
-# ====================================
-# CONNECTION STRING
-# ====================================
-connection_string = (
-    f"mssql+pyodbc://{USERNAME}:{PASSWORD}@{SERVER}/{DATABASE}"
-    f"?driver={DRIVER.replace(' ', '+')}"
+conn_str = (
+    "DRIVER={ODBC Driver 17 for SQL Server};"
+    f"SERVER={SERVER};"
+    f"DATABASE={DATABASE};"
+    f"UID={USERNAME};"
+    f"PWD={PASSWORD};"
+    "TrustServerCertificate=yes;"
 )
 
-# ====================================
-# POŁĄCZENIE I ODCZYT OBIEKTÓW
-# ====================================
 try:
-    engine = create_engine(connection_string)
-    inspector = inspect(engine)
+    conn = pyodbc.connect(conn_str, timeout=5)
+    print("Połączenie OK")
 
-    print("\nPołączenie OK")
+    cursor = conn.cursor()
 
     print("\n=== TABELE ===")
-    tables = inspector.get_table_names()
-    if tables:
-        for table in tables:
-            print(table)
-    else:
-        print("Brak tabel albo brak uprawnień.")
+    cursor.execute("""
+        SELECT TABLE_SCHEMA, TABLE_NAME
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE'
+        ORDER BY TABLE_SCHEMA, TABLE_NAME
+    """)
+    for row in cursor.fetchall():
+        print(f"{row.TABLE_SCHEMA}.{row.TABLE_NAME}")
 
     print("\n=== WIDOKI ===")
-    views = inspector.get_view_names()
-    if views:
-        for view in views:
-            print(view)
-    else:
-        print("Brak widoków albo brak uprawnień.")
+    cursor.execute("""
+        SELECT TABLE_SCHEMA, TABLE_NAME
+        FROM INFORMATION_SCHEMA.VIEWS
+        ORDER BY TABLE_SCHEMA, TABLE_NAME
+    """)
+    for row in cursor.fetchall():
+        print(f"{row.TABLE_SCHEMA}.{row.TABLE_NAME}")
+
+    conn.close()
 
 except Exception as e:
-    print("\nBŁĄD:")
+    print("BŁĄD:")
     print(e)
