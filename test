@@ -1,11 +1,68 @@
-Remove-Item .venv -Recurse -Force
-C:\Python311\python.exe -m venv .venv
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-python --version
-python -m ensurepip --upgrade
-python -m pip install --upgrade pip
-python -m pip install fastapi uvicorn
-python -m uvicorn main:app --reload
+import pyodbc
+from sqlalchemy import create_engine, inspect
 
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8002
+# ====================================
+# DANE POŁĄCZENIA
+# ====================================
+SERVER = "dtc-newmf-snu"
+DATABASE = "SNU_ANA"
+USERNAME = "TWOJ_LOGIN"
+PASSWORD = "TWOJE_HASLO"
+
+# ====================================
+# WYBÓR STEROWNIKA ODBC
+# ====================================
+# Najpierw sprawdzamy, jakie sterowniki są dostępne
+drivers = pyodbc.drivers()
+print("Dostępne sterowniki ODBC:")
+for d in drivers:
+    print(" -", d)
+
+# Preferowany driver
+if "ODBC Driver 17 for SQL Server" in drivers:
+    DRIVER = "ODBC Driver 17 for SQL Server"
+elif "ODBC Driver 18 for SQL Server" in drivers:
+    DRIVER = "ODBC Driver 18 for SQL Server"
+elif "SQL Server" in drivers:
+    DRIVER = "SQL Server"
+else:
+    raise Exception("Brak sterownika do SQL Server. Zainstaluj ODBC Driver.")
+
+print("\nUżywany driver:", DRIVER)
+
+# ====================================
+# CONNECTION STRING
+# ====================================
+connection_string = (
+    f"mssql+pyodbc://{USERNAME}:{PASSWORD}@{SERVER}/{DATABASE}"
+    f"?driver={DRIVER.replace(' ', '+')}"
+)
+
+# ====================================
+# POŁĄCZENIE I ODCZYT OBIEKTÓW
+# ====================================
+try:
+    engine = create_engine(connection_string)
+    inspector = inspect(engine)
+
+    print("\nPołączenie OK")
+
+    print("\n=== TABELE ===")
+    tables = inspector.get_table_names()
+    if tables:
+        for table in tables:
+            print(table)
+    else:
+        print("Brak tabel albo brak uprawnień.")
+
+    print("\n=== WIDOKI ===")
+    views = inspector.get_view_names()
+    if views:
+        for view in views:
+            print(view)
+    else:
+        print("Brak widoków albo brak uprawnień.")
+
+except Exception as e:
+    print("\nBŁĄD:")
+    print(e)
