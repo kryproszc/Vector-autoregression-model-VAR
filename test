@@ -1,1 +1,26 @@
-"C:\Python311\python.exe" "C:\temp\python_download_all_views.py"
+import sqlite3
+
+db1 = r"C:\temp\local_snu_ana.db"
+db2 = r"C:\temp\local_snu_ana2.db"
+
+def get_tables(db_path):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+    """)
+    tables = {row[0] for row in cur.fetchall()}
+    conn.close()
+    return tables
+
+tables1 = get_tables(db1)
+tables2 = get_tables(db2)
+
+roznica = sorted(tables2 - tables1)
+
+print("=== Tabele, które są w local_snu_ana2.db, a nie ma ich w local_snu_ana.db ===")
+for t in roznica:
+    print(t)
