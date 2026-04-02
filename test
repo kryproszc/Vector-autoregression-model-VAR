@@ -1,68 +1,19 @@
-import sqlite3
-
-db_target = r"C:\temp\local_snu_ana.db"
-db_source = r"C:\temp\local_snu_ana2.db"
-
-def get_tables(conn):
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name NOT LIKE 'sqlite_%'
-        ORDER BY name
-    """)
-    return [row[0] for row in cur.fetchall()]
-
-# łączymy się z bazą docelową
-conn_target = sqlite3.connect(db_target)
-cur_target = conn_target.cursor()
-
-# podpinamy bazę źródłową jako "src"
-cur_target.execute(f"ATTACH DATABASE '{db_source}' AS src")
-
-# listy tabel
-target_tables = set(get_tables(conn_target))
-
-cur_target.execute("""
-    SELECT name
-    FROM src.sqlite_master
-    WHERE type = 'table'
-      AND name NOT LIKE 'sqlite_%'
-    ORDER BY name
-""")
-source_tables = [row[0] for row in cur_target.fetchall()]
-
-# tabele do skopiowania
-tables_to_copy = [t for t in source_tables if t not in target_tables]
-
-print("=== Tabele do dodania do local_snu_ana.db ===")
-for t in tables_to_copy:
-    print(t)
-
-# kopiowanie
-for table_name in tables_to_copy:
-    print(f"\nKopiuję: {table_name}")
-
-    # pobranie CREATE TABLE z bazy źródłowej
-    cur_target.execute(f"""
-        SELECT sql
-        FROM src.sqlite_master
-        WHERE type = 'table' AND name = ?
-    """, (table_name,))
-    create_sql = cur_target.fetchone()[0]
-
-    # utworzenie tabeli w bazie docelowej
-    cur_target.execute(create_sql)
-
-    # skopiowanie danych
-    cur_target.execute(f'''
-        INSERT INTO "{table_name}"
-        SELECT * FROM src."{table_name}"
-    ''')
-
-conn_target.commit()
-cur_target.execute("DETACH DATABASE src")
-conn_target.close()
-
-print("\nGotowe. Brakujące tabele zostały dodane do local_snu_ana.db")
+SELECT
+    DATA_SPR,
+    TYP_OKRESU,
+    DZIAL,
+    KOD_ZU,
+    NAZWA_ZU,
+    C0020,
+    C0030,
+    C0080,
+    CASE
+        WHEN SUM(C0080) OVER (
+            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
+        ) = 0 THEN NULL
+        ELSE 1.0 * C0080 / SUM(C0080) OVER (
+            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
+        )
+    END AS udzial_c0020
+FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DIU]
+ORDER BY DATA_SPR, TYP_OKRESU, KOD_ZU, C0020;
