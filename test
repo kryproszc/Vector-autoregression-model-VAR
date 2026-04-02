@@ -1,26 +1,68 @@
 import sqlite3
 
-db1 = r"C:\temp\local_snu_ana.db"
-db2 = r"C:\temp\local_snu_ana2.db"
+db_target = r"C:\temp\local_snu_ana.db"
+db_source = r"C:\temp\local_snu_ana2.db"
 
-def get_tables(db_path):
-    conn = sqlite3.connect(db_path)
+def get_tables(conn):
     cur = conn.cursor()
     cur.execute("""
         SELECT name
         FROM sqlite_master
         WHERE type = 'table'
           AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
     """)
-    tables = {row[0] for row in cur.fetchall()}
-    conn.close()
-    return tables
+    return [row[0] for row in cur.fetchall()]
 
-tables1 = get_tables(db1)
-tables2 = get_tables(db2)
+# łączymy się z bazą docelową
+conn_target = sqlite3.connect(db_target)
+cur_target = conn_target.cursor()
 
-roznica = sorted(tables2 - tables1)
+# podpinamy bazę źródłową jako "src"
+cur_target.execute(f"ATTACH DATABASE '{db_source}' AS src")
 
-print("=== Tabele, które są w local_snu_ana2.db, a nie ma ich w local_snu_ana.db ===")
-for t in roznica:
+# listy tabel
+target_tables = set(get_tables(conn_target))
+
+cur_target.execute("""
+    SELECT name
+    FROM src.sqlite_master
+    WHERE type = 'table'
+      AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+""")
+source_tables = [row[0] for row in cur_target.fetchall()]
+
+# tabele do skopiowania
+tables_to_copy = [t for t in source_tables if t not in target_tables]
+
+print("=== Tabele do dodania do local_snu_ana.db ===")
+for t in tables_to_copy:
     print(t)
+
+# kopiowanie
+for table_name in tables_to_copy:
+    print(f"\nKopiuję: {table_name}")
+
+    # pobranie CREATE TABLE z bazy źródłowej
+    cur_target.execute(f"""
+        SELECT sql
+        FROM src.sqlite_master
+        WHERE type = 'table' AND name = ?
+    """, (table_name,))
+    create_sql = cur_target.fetchone()[0]
+
+    # utworzenie tabeli w bazie docelowej
+    cur_target.execute(create_sql)
+
+    # skopiowanie danych
+    cur_target.execute(f'''
+        INSERT INTO "{table_name}"
+        SELECT * FROM src."{table_name}"
+    ''')
+
+conn_target.commit()
+cur_target.execute("DETACH DATABASE src")
+conn_target.close()
+
+print("\nGotowe. Brakujące tabele zostały dodane do local_snu_ana.db")
