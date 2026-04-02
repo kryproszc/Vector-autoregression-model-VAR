@@ -1,46 +1,23 @@
 import pyodbc
 
-SERVER = "dtc-newm5-snu"   # sprawdź dokładnie nazwę!
-DATABASE = "SNU_ANA"
-USERNAME = "TWOJ_LOGIN"
-PASSWORD = "TWOJE_HASLO"
-
-conn_str = (
+conn = pyodbc.connect(
     "DRIVER={ODBC Driver 17 for SQL Server};"
-    f"SERVER={SERVER};"
-    f"DATABASE={DATABASE};"
-    f"UID={USERNAME};"
-    f"PWD={PASSWORD};"
+    "SERVER=dtc-newm5-snu;"
+    "DATABASE=SNU_ANA;"
+    "Trusted_Connection=yes;"
     "TrustServerCertificate=yes;"
 )
 
-try:
-    conn = pyodbc.connect(conn_str, timeout=5)
-    print("Połączenie OK")
+cursor = conn.cursor()
 
-    cursor = conn.cursor()
+print("=== TABELE ===")
+cursor.execute("SELECT name FROM sys.tables")
+for row in cursor.fetchall():
+    print(row[0])
 
-    print("\n=== TABELE ===")
-    cursor.execute("""
-        SELECT TABLE_SCHEMA, TABLE_NAME
-        FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_TYPE = 'BASE TABLE'
-        ORDER BY TABLE_SCHEMA, TABLE_NAME
-    """)
-    for row in cursor.fetchall():
-        print(f"{row.TABLE_SCHEMA}.{row.TABLE_NAME}")
+print("\n=== WIDOKI ===")
+cursor.execute("SELECT name FROM sys.views")
+for row in cursor.fetchall():
+    print(row[0])
 
-    print("\n=== WIDOKI ===")
-    cursor.execute("""
-        SELECT TABLE_SCHEMA, TABLE_NAME
-        FROM INFORMATION_SCHEMA.VIEWS
-        ORDER BY TABLE_SCHEMA, TABLE_NAME
-    """)
-    for row in cursor.fetchall():
-        print(f"{row.TABLE_SCHEMA}.{row.TABLE_NAME}")
-
-    conn.close()
-
-except Exception as e:
-    print("BŁĄD:")
-    print(e)
+conn.close()
