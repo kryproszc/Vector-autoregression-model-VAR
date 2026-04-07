@@ -1,19 +1,11 @@
-SELECT
-    DATA_SPR,
-    TYP_OKRESU,
-    DZIAL,
-    KOD_ZU,
-    NAZWA_ZU,
-    C0020,
-    C0030,
-    C0080,
-    CASE
-        WHEN SUM(C0080) OVER (
-            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
-        ) = 0 THEN NULL
-        ELSE 1.0 * C0080 / SUM(C0080) OVER (
-            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
-        )
-    END AS udzial_c0020
-FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DIU]
-ORDER BY DATA_SPR, TYP_OKRESU, KOD_ZU, C0020;
+import smtplib
+
+HOST = "w "
+PORT =  
+
+try:
+    with smtplib.SMTP(HOST, PORT, timeout=10) as server:
+        server.ehlo()
+        print("Połączenie OK")
+except Exception as e:
+    print("Błąd:", e)
