@@ -108,6 +108,15 @@ gini AS (
         DATA_SPR,
         TYP_OKRESU,
         KOD_ZU
+),
+r0490 AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        C0010 AS c0010_r0490
+    FROM [SNU_ANA].[dbo].[V_S_25_05_01_01_DIU]
+    WHERE KOD_POZYCJI = 'R0490'
 )
 SELECT
     w.DATA_SPR,
@@ -117,7 +126,9 @@ SELECT
     w.suma_c0080,
     w.suma_kwadratow_c0080,
     o.odchylenie_standardowe_udzialow,
-    g.gini_udzialow
+    g.gini_udzialow,
+    r.c0010_r0490,
+    (w.suma_c0080 - r.c0010_r0490) / NULLIF(w.suma_c0080, 0) AS efekt_dywersyfikacji
 FROM wartosci w
 LEFT JOIN odch o
     ON w.DATA_SPR = o.DATA_SPR
@@ -127,6 +138,10 @@ LEFT JOIN gini g
     ON w.DATA_SPR = g.DATA_SPR
    AND w.TYP_OKRESU = g.TYP_OKRESU
    AND w.KOD_ZU = g.KOD_ZU
+LEFT JOIN r0490 r
+    ON w.DATA_SPR = r.DATA_SPR
+   AND w.TYP_OKRESU = r.TYP_OKRESU
+   AND w.KOD_ZU = r.KOD_ZU
 ORDER BY
     w.DATA_SPR,
     w.TYP_OKRESU,
