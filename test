@@ -1,11 +1,13 @@
-import smtplib
-
-HOST = "w "
-PORT =  
-
-try:
-    with smtplib.SMTP(HOST, PORT, timeout=10) as server:
-        server.ehlo()
-        print("Połączenie OK")
-except Exception as e:
-    print("Błąd:", e)
+SELECT
+    DATA_SPR,
+    TYP_OKRESU,
+    KOD_ZU,
+    C0020,
+    C0030,
+    C0080,
+    CAST(C0080 AS decimal(18,2)) /
+    NULLIF(SUM(C0080) OVER (
+        PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
+    ), 0) AS UDZIAL_C0080
+FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DTU]
+ORDER BY DATA_SPR, TYP_OKRESU, KOD_ZU, C0030;
