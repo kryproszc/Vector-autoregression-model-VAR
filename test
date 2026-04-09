@@ -1,6 +1,6 @@
-DROP TABLE IF EXISTS udzialy_c0080_dtu;
+DROP TABLE IF EXISTS struktura_operacyjny;
 
-CREATE TABLE udzialy_c0080_dtu AS
+CREATE TABLE struktura_operacyjny AS
 SELECT
     DATA_SPR,
     TYP_OKRESU,
@@ -9,17 +9,20 @@ SELECT
     C0030,
     C0080,
     1.0 * C0080
-    / NULLIF(SUM(C0080) OVER (
-        PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
-    ), 0) AS udzial_c0080
+    / NULLIF(
+        SUM(C0080) OVER (
+            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
+        ),
+        0
+    ) AS udzial_c0080
 FROM V_S_26_15_01_02_DTU;
 
 
-ALTER TABLE udzialy_c0080_dtu ADD COLUMN udzial_c0080_kwartalnie REAL;
-ALTER TABLE udzialy_c0080_dtu ADD COLUMN udzial_c0080_yoy REAL;
+ALTER TABLE struktura_operacyjny ADD COLUMN udzial_c0080_kwartalnie REAL;
+ALTER TABLE struktura_operacyjny ADD COLUMN udzial_c0080_yoy REAL;
 
 
-UPDATE udzialy_c0080_dtu AS t
+UPDATE struktura_operacyjny AS t
 SET
     udzial_c0080_kwartalnie = (
         SELECT CASE
@@ -28,7 +31,7 @@ SET
              AND q.udzial_c0080 <> 0
             THEN 1.0 * t.udzial_c0080 / q.udzial_c0080 - 1
         END
-        FROM udzialy_c0080_dtu q
+        FROM struktura_operacyjny q
         WHERE q.KOD_ZU = t.KOD_ZU
           AND q.TYP_OKRESU = 'K'
           AND t.TYP_OKRESU = 'K'
@@ -52,7 +55,7 @@ SET
              AND y.udzial_c0080 <> 0
             THEN 1.0 * t.udzial_c0080 / y.udzial_c0080 - 1
         END
-        FROM udzialy_c0080_dtu y
+        FROM struktura_operacyjny y
         WHERE y.KOD_ZU = t.KOD_ZU
           AND y.TYP_OKRESU = t.TYP_OKRESU
           AND y.C0020 IS t.C0020
@@ -71,5 +74,5 @@ SELECT
     udzial_c0080,
     udzial_c0080_kwartalnie,
     udzial_c0080_yoy
-FROM udzialy_c0080_dtu
+FROM struktura_operacyjny
 ORDER BY DATA_SPR, TYP_OKRESU, KOD_ZU, C0030;
