@@ -128,7 +128,9 @@ SELECT
     o.odchylenie_standardowe_udzialow,
     g.gini_udzialow,
     r.c0010_r0490,
-    (w.suma_c0080 - r.c0010_r0490) / NULLIF(w.suma_c0080, 0) AS efekt_dywersyfikacji
+    (w.suma_c0080 - r.c0010_r0490) / NULLIF(w.suma_c0080, 0) AS efekt_dywersyfikacji,
+    (w.suma_c0080 - r.c0010_r0490)
+        / NULLIF(w.suma_c0080 - SQRT(w.suma_kwadratow_c0080), 0) AS efekt_dywersyfikacji_eiopa
 FROM wartosci w
 LEFT JOIN odch o
     ON w.DATA_SPR = o.DATA_SPR
