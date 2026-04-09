@@ -23,6 +23,75 @@ udzialy AS (
             ), 0
         ) AS x_i
     FROM baza
+),
+statystyki AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        COUNT(*) AS n,
+        SUM(x_i) AS suma_udzialow,
+        SUM(x_i * x_i) AS suma_kwadratow,
+        AVG(x_i) AS srednia_x,
+        SQRT(
+            SUM(POWER(x_i - AVG(x_i), 2)) / COUNT(*)
+        ) AS odchylenie_standardowe
+    FROM udzialy
+    GROUP BY
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU
+),
+pozycje_gini AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        x_i,
+        ROW_NUMBER() OVER (
+            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
+            ORDER BY x_i
+        ) AS i,
+        COUNT(*) OVER (
+            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
+        ) AS n,
+        SUM(x_i) OVER (
+            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
+        ) AS suma_x
+    FROM udzialy
+),
+gini AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        (
+            2.0 * SUM(i * x_i) / NULLIF(MAX(n) * MAX(suma_x), 0)
+        ) - (
+            (MAX(n) + 1.0) / MAX(n)
+        ) AS gini
+    FROM pozycje_gini
+    GROUP BY
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU
 )
-SELECT *
-FROM udzialy;
+SELECT
+    s.DATA_SPR,
+    s.TYP_OKRESU,
+    s.KOD_ZU,
+    s.n,
+    s.suma_udzialow,
+    s.suma_kwadratow,
+    s.srednia_x,
+    s.odchylenie_standardowe,
+    g.gini
+FROM statystyki s
+LEFT JOIN gini g
+    ON s.DATA_SPR = g.DATA_SPR
+   AND s.TYP_OKRESU = g.TYP_OKRESU
+   AND s.KOD_ZU = g.KOD_ZU
+ORDER BY
+    s.DATA_SPR,
+    s.TYP_OKRESU,
+    s.KOD_ZU;
