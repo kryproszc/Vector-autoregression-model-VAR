@@ -5,10 +5,13 @@ WITH baza AS (
         KOD_ZU,
         C0020,
         C0030,
-        C0080
+        C0080,
+        CASE
+            WHEN C0030 = 106 THEN 0.0
+            ELSE 1.0 * C0080
+        END AS C0080_TEST
     FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DIU]
-    WHERE C0030 <> 106
-      AND C0080 IS NOT NULL
+    WHERE C0080 IS NOT NULL
 ),
 wartosci AS (
     SELECT
@@ -16,8 +19,8 @@ wartosci AS (
         TYP_OKRESU,
         KOD_ZU,
         COUNT(*) AS n,
-        SUM(C0080) AS suma_c0080,
-        SUM(C0080 * C0080) AS suma_kwadratow_c0080
+        SUM(C0080_TEST) AS suma_c0080,
+        SUM(C0080_TEST * C0080_TEST) AS suma_kwadratow_c0080
     FROM baza
     GROUP BY
         DATA_SPR,
@@ -32,8 +35,9 @@ udzialy AS (
         C0020,
         C0030,
         C0080,
-        1.0 * C0080 / NULLIF(
-            SUM(C0080) OVER (
+        C0080_TEST,
+        1.0 * C0080_TEST / NULLIF(
+            SUM(C0080_TEST) OVER (
                 PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
             ), 0
         ) AS x_i
