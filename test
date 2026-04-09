@@ -8,6 +8,21 @@ WITH baza AS (
         C0080
     FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DIU]
     WHERE C0030 <> 106
+      AND C0080 IS NOT NULL
+),
+wartosci AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        COUNT(*) AS n,
+        SUM(C0080) AS suma_c0080,
+        SUM(C0080 * C0080) AS suma_kwadratow_c0080
+    FROM baza
+    GROUP BY
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU
 ),
 udzialy AS (
     SELECT
@@ -24,14 +39,12 @@ udzialy AS (
         ) AS x_i
     FROM baza
 ),
-srednie AS (
+srednie_udzialow AS (
     SELECT
         DATA_SPR,
         TYP_OKRESU,
         KOD_ZU,
         COUNT(*) AS n,
-        SUM(x_i) AS suma_udzialow,
-        SUM(x_i * x_i) AS suma_kwadratow,
         AVG(x_i) AS srednia_x
     FROM udzialy
     GROUP BY
@@ -46,9 +59,9 @@ odch AS (
         u.KOD_ZU,
         SQRT(
             SUM(POWER(u.x_i - s.srednia_x, 2)) * 1.0 / s.n
-        ) AS odchylenie_standardowe
+        ) AS odchylenie_standardowe_udzialow
     FROM udzialy u
-    INNER JOIN srednie s
+    INNER JOIN srednie_udzialow s
         ON u.DATA_SPR = s.DATA_SPR
        AND u.TYP_OKRESU = s.TYP_OKRESU
        AND u.KOD_ZU = s.KOD_ZU
@@ -85,7 +98,7 @@ gini AS (
             2.0 * SUM(i * x_i) / NULLIF(MAX(n) * MAX(suma_x), 0)
         ) - (
             (MAX(n) + 1.0) / MAX(n)
-        ) AS gini
+        ) AS gini_udzialow
     FROM pozycje_gini
     GROUP BY
         DATA_SPR,
@@ -93,25 +106,24 @@ gini AS (
         KOD_ZU
 )
 SELECT
-    s.DATA_SPR,
-    s.TYP_OKRESU,
-    s.KOD_ZU,
-    s.n,
-    s.suma_udzialow,
-    s.suma_kwadratow,
-    s.srednia_x,
-    o.odchylenie_standardowe,
-    g.gini
-FROM srednie s
+    w.DATA_SPR,
+    w.TYP_OKRESU,
+    w.KOD_ZU,
+    w.n,
+    w.suma_c0080,
+    w.suma_kwadratow_c0080,
+    o.odchylenie_standardowe_udzialow,
+    g.gini_udzialow
+FROM wartosci w
 LEFT JOIN odch o
-    ON s.DATA_SPR = o.DATA_SPR
-   AND s.TYP_OKRESU = o.TYP_OKRESU
-   AND s.KOD_ZU = o.KOD_ZU
+    ON w.DATA_SPR = o.DATA_SPR
+   AND w.TYP_OKRESU = o.TYP_OKRESU
+   AND w.KOD_ZU = o.KOD_ZU
 LEFT JOIN gini g
-    ON s.DATA_SPR = g.DATA_SPR
-   AND s.TYP_OKRESU = g.TYP_OKRESU
-   AND s.KOD_ZU = g.KOD_ZU
+    ON w.DATA_SPR = g.DATA_SPR
+   AND w.TYP_OKRESU = g.TYP_OKRESU
+   AND w.KOD_ZU = g.KOD_ZU
 ORDER BY
-    s.DATA_SPR,
-    s.TYP_OKRESU,
-    s.KOD_ZU;
+    w.DATA_SPR,
+    w.TYP_OKRESU,
+    w.KOD_ZU;
