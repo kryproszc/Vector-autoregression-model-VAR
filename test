@@ -24,7 +24,7 @@ udzialy AS (
         ) AS x_i
     FROM baza
 ),
-statystyki AS (
+srednie AS (
     SELECT
         DATA_SPR,
         TYP_OKRESU,
@@ -32,15 +32,31 @@ statystyki AS (
         COUNT(*) AS n,
         SUM(x_i) AS suma_udzialow,
         SUM(x_i * x_i) AS suma_kwadratow,
-        AVG(x_i) AS srednia_x,
-        SQRT(
-            SUM(POWER(x_i - AVG(x_i), 2)) / COUNT(*)
-        ) AS odchylenie_standardowe
+        AVG(x_i) AS srednia_x
     FROM udzialy
     GROUP BY
         DATA_SPR,
         TYP_OKRESU,
         KOD_ZU
+),
+odch AS (
+    SELECT
+        u.DATA_SPR,
+        u.TYP_OKRESU,
+        u.KOD_ZU,
+        SQRT(
+            SUM(POWER(u.x_i - s.srednia_x, 2)) * 1.0 / s.n
+        ) AS odchylenie_standardowe
+    FROM udzialy u
+    INNER JOIN srednie s
+        ON u.DATA_SPR = s.DATA_SPR
+       AND u.TYP_OKRESU = s.TYP_OKRESU
+       AND u.KOD_ZU = s.KOD_ZU
+    GROUP BY
+        u.DATA_SPR,
+        u.TYP_OKRESU,
+        u.KOD_ZU,
+        s.n
 ),
 pozycje_gini AS (
     SELECT
@@ -84,9 +100,13 @@ SELECT
     s.suma_udzialow,
     s.suma_kwadratow,
     s.srednia_x,
-    s.odchylenie_standardowe,
+    o.odchylenie_standardowe,
     g.gini
-FROM statystyki s
+FROM srednie s
+LEFT JOIN odch o
+    ON s.DATA_SPR = o.DATA_SPR
+   AND s.TYP_OKRESU = o.TYP_OKRESU
+   AND s.KOD_ZU = o.KOD_ZU
 LEFT JOIN gini g
     ON s.DATA_SPR = g.DATA_SPR
    AND s.TYP_OKRESU = g.TYP_OKRESU
