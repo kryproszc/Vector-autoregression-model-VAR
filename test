@@ -1,3 +1,6 @@
+DROP TABLE IF EXISTS udzialy_c0080_dtu;
+
+CREATE TABLE udzialy_c0080_dtu AS
 SELECT
     DATA_SPR,
     TYP_OKRESU,
@@ -5,9 +8,68 @@ SELECT
     C0020,
     C0030,
     C0080,
-    CAST(C0080 AS decimal(18,2)) /
-    NULLIF(SUM(C0080) OVER (
+    1.0 * C0080
+    / NULLIF(SUM(C0080) OVER (
         PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
-    ), 0) AS UDZIAL_C0080
-FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DTU]
+    ), 0) AS udzial_c0080
+FROM V_S_26_15_01_02_DTU;
+
+
+ALTER TABLE udzialy_c0080_dtu ADD COLUMN udzial_c0080_kwartalnie REAL;
+ALTER TABLE udzialy_c0080_dtu ADD COLUMN udzial_c0080_yoy REAL;
+
+
+UPDATE udzialy_c0080_dtu AS t
+SET
+    udzial_c0080_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.udzial_c0080 IS NOT NULL
+             AND q.udzial_c0080 <> 0
+            THEN 1.0 * t.udzial_c0080 / q.udzial_c0080 - 1
+        END
+        FROM udzialy_c0080_dtu q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.C0020 IS t.C0020
+          AND q.C0030 IS t.C0030
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
+
+    udzial_c0080_yoy = (
+        SELECT CASE
+            WHEN y.udzial_c0080 IS NOT NULL
+             AND y.udzial_c0080 <> 0
+            THEN 1.0 * t.udzial_c0080 / y.udzial_c0080 - 1
+        END
+        FROM udzialy_c0080_dtu y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.C0020 IS t.C0020
+          AND y.C0030 IS t.C0030
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    );
+
+
+SELECT
+    DATA_SPR,
+    TYP_OKRESU,
+    KOD_ZU,
+    C0020,
+    C0030,
+    C0080,
+    udzial_c0080,
+    udzial_c0080_kwartalnie,
+    udzial_c0080_yoy
+FROM udzialy_c0080_dtu
 ORDER BY DATA_SPR, TYP_OKRESU, KOD_ZU, C0030;
