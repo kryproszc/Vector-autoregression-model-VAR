@@ -1,3 +1,6 @@
+DROP TABLE IF EXISTS dywersyfikacja_diu;
+
+CREATE TABLE dywersyfikacja_diu AS
 WITH baza AS (
     SELECT
         DATA_SPR,
@@ -10,7 +13,7 @@ WITH baza AS (
             WHEN C0030 = 106 THEN 0.0
             ELSE 1.0 * C0080
         END AS C0080_TEST
-    FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DIU]
+    FROM V_S_26_15_01_02_DIU
     WHERE C0080 IS NOT NULL
 ),
 wartosci AS (
@@ -62,7 +65,7 @@ odch AS (
         u.TYP_OKRESU,
         u.KOD_ZU,
         SQRT(
-            SUM(POWER(u.x_i - s.srednia_x, 2)) * 1.0 / s.n
+            SUM((u.x_i - s.srednia_x) * (u.x_i - s.srednia_x)) * 1.0 / s.n
         ) AS odchylenie_standardowe_udzialow
     FROM udzialy u
     INNER JOIN srednie_udzialow s
@@ -115,21 +118,20 @@ r0490 AS (
         TYP_OKRESU,
         KOD_ZU,
         C0010 AS c0010_r0490
-    FROM [SNU_ANA].[dbo].[V_S_25_05_01_01_DIU]
+    FROM V_S_25_05_01_01_DIU
     WHERE KOD_POZYCJI = 'R0490'
 )
 SELECT
     w.DATA_SPR,
     w.TYP_OKRESU,
     w.KOD_ZU,
-    w.n,
-    w.suma_c0080,
-    w.suma_kwadratow_c0080,
+
     o.odchylenie_standardowe_udzialow,
     g.gini_udzialow,
-    r.c0010_r0490,
-    (w.suma_c0080 - r.c0010_r0490) / NULLIF(w.suma_c0080, 0) AS efekt_dywersyfikacji,
-    (w.suma_c0080 - r.c0010_r0490)
+
+    1.0 * (w.suma_c0080 - r.c0010_r0490) / NULLIF(w.suma_c0080, 0) AS efekt_dywersyfikacji,
+
+    1.0 * (w.suma_c0080 - r.c0010_r0490)
         / NULLIF(w.suma_c0080 - SQRT(w.suma_kwadratow_c0080), 0) AS efekt_dywersyfikacji_eiopa
 FROM wartosci w
 LEFT JOIN odch o
@@ -143,8 +145,181 @@ LEFT JOIN gini g
 LEFT JOIN r0490 r
     ON w.DATA_SPR = r.DATA_SPR
    AND w.TYP_OKRESU = r.TYP_OKRESU
-   AND w.KOD_ZU = r.KOD_ZU
+   AND w.KOD_ZU = r.KOD_ZU;
+
+
+ALTER TABLE dywersyfikacja_diu ADD COLUMN odchylenie_standardowe_udzialow_kwartalnie REAL;
+ALTER TABLE dywersyfikacja_diu ADD COLUMN gini_udzialow_kwartalnie REAL;
+ALTER TABLE dywersyfikacja_diu ADD COLUMN efekt_dywersyfikacji_kwartalnie REAL;
+ALTER TABLE dywersyfikacja_diu ADD COLUMN efekt_dywersyfikacji_eiopa_kwartalnie REAL;
+
+ALTER TABLE dywersyfikacja_diu ADD COLUMN odchylenie_standardowe_udzialow_yoy REAL;
+ALTER TABLE dywersyfikacja_diu ADD COLUMN gini_udzialow_yoy REAL;
+ALTER TABLE dywersyfikacja_diu ADD COLUMN efekt_dywersyfikacji_yoy REAL;
+ALTER TABLE dywersyfikacja_diu ADD COLUMN efekt_dywersyfikacji_eiopa_yoy REAL;
+
+
+UPDATE dywersyfikacja_diu AS t
+SET
+    odchylenie_standardowe_udzialow_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.odchylenie_standardowe_udzialow IS NOT NULL
+             AND q.odchylenie_standardowe_udzialow <> 0
+            THEN 1.0 * t.odchylenie_standardowe_udzialow / q.odchylenie_standardowe_udzialow - 1
+        END
+        FROM dywersyfikacja_diu q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
+
+    gini_udzialow_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.gini_udzialow IS NOT NULL
+             AND q.gini_udzialow <> 0
+            THEN 1.0 * t.gini_udzialow / q.gini_udzialow - 1
+        END
+        FROM dywersyfikacja_diu q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
+
+    efekt_dywersyfikacji_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.efekt_dywersyfikacji IS NOT NULL
+             AND q.efekt_dywersyfikacji <> 0
+            THEN 1.0 * t.efekt_dywersyfikacji / q.efekt_dywersyfikacji - 1
+        END
+        FROM dywersyfikacja_diu q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
+
+    efekt_dywersyfikacji_eiopa_kwartalnie = (
+        SELECT CASE
+            WHEN t.TYP_OKRESU = 'K'
+             AND q.efekt_dywersyfikacji_eiopa IS NOT NULL
+             AND q.efekt_dywersyfikacji_eiopa <> 0
+            THEN 1.0 * t.efekt_dywersyfikacji_eiopa / q.efekt_dywersyfikacji_eiopa - 1
+        END
+        FROM dywersyfikacja_diu q
+        WHERE q.KOD_ZU = t.KOD_ZU
+          AND q.TYP_OKRESU = 'K'
+          AND t.TYP_OKRESU = 'K'
+          AND q.DATA_SPR = CASE
+              WHEN strftime('%m-%d', t.DATA_SPR) = '03-31'
+                  THEN date(substr(t.DATA_SPR, 1, 4) || '-01-01', '-1 day')
+              WHEN strftime('%m-%d', t.DATA_SPR) = '06-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-03-31'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '09-30'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-06-30'
+              WHEN strftime('%m-%d', t.DATA_SPR) = '12-31'
+                  THEN substr(t.DATA_SPR, 1, 4) || '-09-30'
+          END
+    ),
+
+    odchylenie_standardowe_udzialow_yoy = (
+        SELECT CASE
+            WHEN y.odchylenie_standardowe_udzialow IS NOT NULL
+             AND y.odchylenie_standardowe_udzialow <> 0
+            THEN 1.0 * t.odchylenie_standardowe_udzialow / y.odchylenie_standardowe_udzialow - 1
+        END
+        FROM dywersyfikacja_diu y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    gini_udzialow_yoy = (
+        SELECT CASE
+            WHEN y.gini_udzialow IS NOT NULL
+             AND y.gini_udzialow <> 0
+            THEN 1.0 * t.gini_udzialow / y.gini_udzialow - 1
+        END
+        FROM dywersyfikacja_diu y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    efekt_dywersyfikacji_yoy = (
+        SELECT CASE
+            WHEN y.efekt_dywersyfikacji IS NOT NULL
+             AND y.efekt_dywersyfikacji <> 0
+            THEN 1.0 * t.efekt_dywersyfikacji / y.efekt_dywersyfikacji - 1
+        END
+        FROM dywersyfikacja_diu y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    ),
+
+    efekt_dywersyfikacji_eiopa_yoy = (
+        SELECT CASE
+            WHEN y.efekt_dywersyfikacji_eiopa IS NOT NULL
+             AND y.efekt_dywersyfikacji_eiopa <> 0
+            THEN 1.0 * t.efekt_dywersyfikacji_eiopa / y.efekt_dywersyfikacji_eiopa - 1
+        END
+        FROM dywersyfikacja_diu y
+        WHERE y.KOD_ZU = t.KOD_ZU
+          AND y.TYP_OKRESU = t.TYP_OKRESU
+          AND y.DATA_SPR = date(t.DATA_SPR, '-1 year')
+    );
+
+
+SELECT
+    DATA_SPR,
+    TYP_OKRESU,
+    KOD_ZU,
+    odchylenie_standardowe_udzialow,
+    gini_udzialow,
+    efekt_dywersyfikacji,
+    efekt_dywersyfikacji_eiopa,
+    odchylenie_standardowe_udzialow_kwartalnie,
+    gini_udzialow_kwartalnie,
+    efekt_dywersyfikacji_kwartalnie,
+    efekt_dywersyfikacji_eiopa_kwartalnie,
+    odchylenie_standardowe_udzialow_yoy,
+    gini_udzialow_yoy,
+    efekt_dywersyfikacji_yoy,
+    efekt_dywersyfikacji_eiopa_yoy
+FROM dywersyfikacja_diu
 ORDER BY
-    w.DATA_SPR,
-    w.TYP_OKRESU,
-    w.KOD_ZU;
+    DATA_SPR,
+    TYP_OKRESU,
+    KOD_ZU;
