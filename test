@@ -1,4 +1,15 @@
-WITH udzialy AS (
+WITH baza AS (
+    SELECT
+        DATA_SPR,
+        TYP_OKRESU,
+        KOD_ZU,
+        C0020,
+        C0030,
+        C0080
+    FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DIU]
+    WHERE C0030 <> 106
+),
+udzialy AS (
     SELECT
         DATA_SPR,
         TYP_OKRESU,
@@ -11,70 +22,7 @@ WITH udzialy AS (
                 PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
             ), 0
         ) AS x_i
-    FROM [SNU_ANA].[dbo].[V_S_26_15_01_02_DTU]
-),
-odch AS (
-    SELECT
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU,
-        COUNT(*) AS n,
-        AVG(x_i) AS srednia_x,
-        SQRT(AVG(x_i * x_i) - AVG(x_i) * AVG(x_i)) AS odchylenie_standardowe_pop
-    FROM udzialy
-    GROUP BY
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU
-),
-posortowane AS (
-    SELECT
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU,
-        x_i,
-        ROW_NUMBER() OVER (
-            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
-            ORDER BY x_i
-        ) AS i,
-        COUNT(*) OVER (
-            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
-        ) AS n,
-        SUM(x_i) OVER (
-            PARTITION BY DATA_SPR, TYP_OKRESU, KOD_ZU
-        ) AS suma_x
-    FROM udzialy
-),
-gini AS (
-    SELECT
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU,
-        (
-            2.0 * SUM(i * x_i) / NULLIF(MAX(n) * MAX(suma_x), 0)
-        ) - (
-            (MAX(n) + 1.0) / MAX(n)
-        ) AS gini
-    FROM posortowane
-    GROUP BY
-        DATA_SPR,
-        TYP_OKRESU,
-        KOD_ZU
+    FROM baza
 )
-SELECT
-    o.DATA_SPR,
-    o.TYP_OKRESU,
-    o.KOD_ZU,
-    o.n,
-    o.srednia_x,
-    o.odchylenie_standardowe_pop,
-    g.gini
-FROM odch o
-LEFT JOIN gini g
-    ON o.DATA_SPR = g.DATA_SPR
-   AND o.TYP_OKRESU = g.TYP_OKRESU
-   AND o.KOD_ZU = g.KOD_ZU
-ORDER BY
-    o.DATA_SPR,
-    o.TYP_OKRESU,
-    o.KOD_ZU;
+SELECT *
+FROM udzialy;
