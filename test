@@ -3,11 +3,11 @@ WITH v25_kod_zu_21 AS (
         DATA_SPR,
         TYP_OKRESU,
         KOD_ZU,
-        SUM(CASE WHEN KOD_POZYCJI = 'R0080' THEN C0010 ELSE 0 END) AS wartosc_r0080,
-        SUM(CASE WHEN KOD_POZYCJI = 'R0200' THEN C0010 ELSE 0 END) AS wartosc_r0200,
-        SUM(CASE WHEN KOD_POZYCJI = 'R0490' THEN C0010 ELSE 0 END) AS wartosc_r0490,
-        SUM(CASE WHEN KOD_POZYCJI = 'R0320' THEN C0010 ELSE 0 END) AS wartosc_r0320,
-        SUM(CASE WHEN KOD_POZYCJI = 'R0400' THEN C0010 ELSE 0 END) AS wartosc_r0400
+        SUM(CASE WHEN KOD_POZYCJI = 'R0080' THEN C0010 ELSE 0 END) AS r0080,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0200' THEN C0010 ELSE 0 END) AS r0200,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0490' THEN C0010 ELSE 0 END) AS r0490,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0320' THEN C0010 ELSE 0 END) AS r0320,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0400' THEN C0010 ELSE 0 END) AS r0400
     FROM V_S_25_05_01_01_DIU
     WHERE KOD_ZU = 21
     GROUP BY
@@ -20,8 +20,8 @@ v26_kod_zu_21 AS (
         DATA_SPR,
         TYP_OKRESU,
         KOD_ZU,
-        SUM(CASE WHEN KOD_POZYCJI = 'R0900' THEN C0080 ELSE 0 END) AS wartosc_r0900,
-        SUM(CASE WHEN KOD_POZYCJI = 'R0800' THEN C0080 ELSE 0 END) AS wartosc_r0800
+        SUM(CASE WHEN KOD_POZYCJI = 'R0900' THEN C0080 ELSE 0 END) AS r0900,
+        SUM(CASE WHEN KOD_POZYCJI = 'R0800' THEN C0080 ELSE 0 END) AS r0800
     FROM V_S_26_03_01_04_DIU
     WHERE KOD_ZU = 21
     GROUP BY
@@ -29,35 +29,59 @@ v26_kod_zu_21 AS (
         TYP_OKRESU,
         KOD_ZU
 ),
-wynik_kod_zu_21 AS (
+baza_kod_zu_21 AS (
     SELECT
         v25.DATA_SPR,
         v25.TYP_OKRESU,
         v25.KOD_ZU,
-        v25.wartosc_r0080
-            + v25.wartosc_r0200
-            + v25.wartosc_r0490
-            + v25.wartosc_r0320
-            + (
-                v25.wartosc_r0400
-                - (
-                    COALESCE(v26.wartosc_r0900, 0)
-                    - COALESCE(v26.wartosc_r0800, 0)
-                )
-            ) AS suma_dla_kod_zu_21
+
+        -- składniki (zostają do dalszego użycia!)
+        v25.r0080,
+        v25.r0200,
+        v25.r0490,
+        v25.r0320,
+        v25.r0400,
+
+        COALESCE(v26.r0900, 0) AS r0900,
+        COALESCE(v26.r0800, 0) AS r0800,
+
+        -- pomocnicze
+        (COALESCE(v26.r0900, 0) - COALESCE(v26.r0800, 0)) AS roznica_r0900_r0800,
+
+        -- kluczowy składnik
+        v25.r0400 - (COALESCE(v26.r0900, 0) - COALESCE(v26.r0800, 0)) AS element_5
+
     FROM v25_kod_zu_21 v25
     LEFT JOIN v26_kod_zu_21 v26
         ON v25.DATA_SPR = v26.DATA_SPR
        AND v25.TYP_OKRESU = v26.TYP_OKRESU
        AND v25.KOD_ZU = v26.KOD_ZU
 )
+
 SELECT
     DATA_SPR,
     TYP_OKRESU,
     KOD_ZU,
-    suma_dla_kod_zu_21
-FROM wynik_kod_zu_21
+
+    -- wszystkie składniki dostępne dalej
+    r0080,
+    r0200,
+    r0490,
+    r0320,
+    element_5,
+    r0900,
+
+    -- FINALNA SUMA (już z dodanym R0900)
+    (
+        r0080
+        + r0200
+        + r0490
+        + r0320
+        + element_5
+        + r0900
+    ) AS suma_dla_kod_zu_21
+
+FROM baza_kod_zu_21
 ORDER BY
     DATA_SPR,
-    TYP_OKRESU,
-    KOD_ZU;
+    TYP_OKRESU;
