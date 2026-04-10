@@ -1,4 +1,2 @@
-Sys.getenv("http_proxy")
-Sys.getenv("https_proxy")
-Sys.getenv("HTTP_PROXY")
-Sys.getenv("HTTPS_PROXY")
+Sys.setenv(http_proxy  = "http://twoj-serwer:port")
+Sys.setenv(https_proxy = "http://twoj-serwer:port")
