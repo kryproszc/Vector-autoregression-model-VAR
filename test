@@ -1,2 +1,3 @@
-Sys.setenv(http_proxy  = "http://twoj-serwer:port")
-Sys.setenv(https_proxy = "http://twoj-serwer:port")
+d:\rejestr\backend\.venv\Scripts\activate.bat
+
+uvicorn app.main:app --reload --port 8002
