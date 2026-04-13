@@ -1,3 +1,37 @@
-d:\rejestr\backend\.venv\Scripts\activate.bat
+import smtplib
+from email.message import EmailMessage
 
-uvicorn app.main:app --reload --port 8002
+SMTP_HOST = "twoj_serwer_smtp"
+SMTP_PORT = 587
+SMTP_USER = "twoj_email@firma.pl"
+SMTP_PASS = "twoje_haslo"
+
+def send_mail(to_email: str, subject: str, body: str) -> None:
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_USER
+    msg["To"] = to_email
+    msg.set_content(body)
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+
+        print("Mail wysłany poprawnie")
+
+    except smtplib.SMTPAuthenticationError:
+        print("Błąd logowania do SMTP")
+    except smtplib.SMTPException as e:
+        print(f"Błąd SMTP: {e}")
+    except Exception as e:
+        print(f"Inny błąd: {e}")
+
+send_mail(
+    to_email="odbiorca@firma.pl",
+    subject="Test z Pythona",
+    body="To jest wiadomość testowa."
+)
