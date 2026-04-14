@@ -1,37 +1,702 @@
-import smtplib
-from email.message import EmailMessage
+from __future__ import annotations
 
-SMTP_HOST = "twoj_serwer_smtp"
-SMTP_PORT = 587
-SMTP_USER = "twoj_email@firma.pl"
-SMTP_PASS = "twoje_haslo"
+from collections import defaultdict
+from datetime import date
+import re
+from statistics import median
+from typing import Any
 
-def send_mail(to_email: str, subject: str, body: str) -> None:
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = SMTP_USER
-    msg["To"] = to_email
-    msg.set_content(body)
+from fastapi import APIRouter, Header, HTTPException, Query
+from pydantic import BaseModel
 
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
+from app.db import get_connection
 
-        print("Mail wysłany poprawnie")
 
-    except smtplib.SMTPAuthenticationError:
-        print("Błąd logowania do SMTP")
-    except smtplib.SMTPException as e:
-        print(f"Błąd SMTP: {e}")
-    except Exception as e:
-        print(f"Inny błąd: {e}")
+router = APIRouter()
 
-send_mail(
-    to_email="odbiorca@firma.pl",
-    subject="Test z Pythona",
-    body="To jest wiadomość testowa."
-)
+
+class InspectionsMatrixRow(BaseModel):
+	nazwa_podmiotu: str
+	wartosci: dict[str, str]
+
+
+class InspectionsMatrixResponse(BaseModel):
+	lata: list[str]
+	rows: list[InspectionsMatrixRow]
+
+
+class InspectionsDetailedRow(BaseModel):
+	kod_inspekcji: str
+	nazwa_podmiotu: str
+	inspekcja: str
+	typ_zakres_inspekcji: str
+	rok_poczatku: str
+	poczatek_inspekcji: str
+	koniec_inspekcji: str
+	osoba_kierujaca: str
+	zespol_osoby_kierujacej_kod: str
+	data_protokolu_sprawozdania: str | None = None
+	roznica_dni_miedzy_data_protokolu_a_koncem: int | None = None
+
+
+class InspectionsDetailedResponse(BaseModel):
+	rows: list[InspectionsDetailedRow]
+
+
+class InspectionsTimeAnalyticsResponse(BaseModel):
+	inspectionType: str
+	trendMode: str
+	selectedMetric: str
+	selectedMetricLabel: str
+	baseCount: int
+	filteredCount: int
+	teamOptions: list[str]
+	yearOptions: list[str]
+	detailRows: list[dict[str, Any]]
+	summaryColumns: list[dict[str, str]] = []
+	summaryRows: list[dict[str, Any]]
+	summaryPivotYears: list[str] = []
+	summaryPivotRows: list[dict[str, Any]] = []
+	trendRows: list[dict[str, Any]]
+	scatterRows: list[dict[str, Any]]
+	overallColumns: list[dict[str, str]] = []
+	overallRows: list[dict[str, Any]] = []
+
+
+def _resolve_operator(conn: Any, operator_login: str | None) -> dict[str, Any]:
+	login = (operator_login or "").strip()
+	if not login:
+		raise HTTPException(status_code=401, detail="Operator nie istnieje")
+
+	row = conn.execute(
+		"""
+		SELECT id, login, rola_id, zespol_id, aktywny
+		FROM users
+		WHERE lower(login)=lower(?)
+		LIMIT 1
+		""",
+		(login,),
+	).fetchone()
+	if row is None:
+		raise HTTPException(status_code=401, detail="Operator nie istnieje")
+
+	operator = dict(row)
+	if int(operator["aktywny"]) != 1:
+		raise HTTPException(status_code=403, detail="Operator jest nieaktywny")
+
+	return operator
+
+
+def _year_from_date(value: str | None) -> str | None:
+	if value is None:
+		return None
+	cleaned = value.strip()
+	if len(cleaned) < 4:
+		return None
+	year = cleaned[:4]
+	if not year.isdigit():
+		return None
+	return year
+
+
+def _matrix_cell_value(typ_inspekcji: str | None, zakres_inspekcji: str | None) -> str:
+	typ_clean = (typ_inspekcji or "").strip()
+	zakres_clean = (zakres_inspekcji or "").strip()
+
+	first_letter = typ_clean[:1].upper() if typ_clean else ""
+	if first_letter and zakres_clean:
+		parts = [part.strip() for part in re.split(r"[;,]", zakres_clean) if part.strip()]
+		if parts:
+			return ", ".join(f"{first_letter}_{part}" for part in parts)
+		return f"{first_letter}_{zakres_clean}"
+	return "-"
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+	if value is None:
+		return None
+	cleaned = value.strip()
+	if len(cleaned) < 10:
+		return None
+	try:
+		return date.fromisoformat(cleaned[:10])
+	except ValueError:
+		return None
+
+
+def _days_difference(date_from: str | None, date_to: str | None) -> int | None:
+	left = _parse_iso_date(date_from)
+	right = _parse_iso_date(date_to)
+	if left is None or right is None:
+		return None
+	return (left - right).days
+
+
+def _inspekcja_code(typ_inspekcji: str | None) -> str:
+	cleaned = (typ_inspekcji or "").strip().lower()
+	if cleaned.startswith("kontrola"):
+		return "K"
+	if cleaned.startswith("wizyta nadzorcza"):
+		return "W"
+	return "-"
+
+
+def _parse_csv_values(raw_value: str | None) -> list[str]:
+	if raw_value is None:
+		return []
+	parts = [part.strip() for part in raw_value.split(",") if part.strip()]
+	# Keep insertion order while removing duplicates.
+	return list(dict.fromkeys(parts))
+
+
+def _can_access_inspection_for_reports(conn: Any, inspection_row: dict[str, Any], operator: dict[str, Any]) -> bool:
+	if int(operator["rola_id"]) == 3:
+		return True
+
+	inspection_id = int(inspection_row["id"])
+
+	if int(operator["rola_id"]) == 2:
+		if operator["zespol_id"] is None:
+			return False
+		lead_team_id = inspection_row.get("lead_team_id")
+		if lead_team_id is not None and int(lead_team_id) == int(operator["zespol_id"]):
+			return True
+
+		member_team_row = conn.execute(
+			"""
+			SELECT 1
+			FROM inspection_members im
+			JOIN users u ON u.id = im.user_id
+			WHERE im.inspection_id = ?
+			  AND u.zespol_id = ?
+			LIMIT 1
+			""",
+			(inspection_id, int(operator["zespol_id"])),
+		).fetchone()
+		return member_team_row is not None
+
+	created_by_user_id = inspection_row.get("created_by_user_id")
+	if created_by_user_id is not None and int(created_by_user_id) == int(operator["id"]):
+		return True
+
+	member_row = conn.execute(
+		"SELECT 1 FROM inspection_members WHERE inspection_id = ? AND user_id = ? LIMIT 1",
+		(inspection_id, int(operator["id"])),
+	).fetchone()
+	return member_row is not None
+
+
+def _safe_average(values: list[int]) -> float | None:
+	if not values:
+		return None
+	return float(sum(values)) / float(len(values))
+
+
+@router.get("/api/reports/inspections-time-analytics", response_model=InspectionsTimeAnalyticsResponse)
+def get_inspections_time_analytics(
+	x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
+	inspectionType: str = Query(...),
+	trendMode: str = Query("median"),
+	teams: str | None = Query(default=None),
+	years: str | None = Query(default=None),
+) -> dict[str, Any]:
+	inspection_type = inspectionType.strip().upper()
+	if inspection_type not in {"K", "W"}:
+		raise HTTPException(status_code=400, detail="inspectionType musi byc K albo W")
+
+	trend_mode = trendMode.strip().lower()
+	if trend_mode not in {"average", "median"}:
+		raise HTTPException(status_code=400, detail="trendMode musi byc average albo median")
+	metric_label = "Srednia" if trend_mode == "average" else "Mediana"
+
+	team_filter = set(_parse_csv_values(teams))
+	year_filter = set(_parse_csv_values(years))
+
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+		if int(operator["rola_id"]) not in {1, 2, 3}:
+			raise HTTPException(status_code=403, detail="Brak uprawnien do raportu")
+
+		operator_team_id = int(operator["zespol_id"]) if operator.get("zespol_id") is not None else None
+		operator_team_code = "-"
+		if operator_team_id is not None:
+			team_row = conn.execute("SELECT kod FROM teams WHERE id = ? LIMIT 1", (operator_team_id,)).fetchone()
+			if team_row is not None:
+				operator_team_code = str(team_row["kod"] or "-").strip() or "-"
+
+		operator_team_member_inspections: set[int] = set()
+		if operator_team_id is not None:
+			team_member_rows = conn.execute(
+				"""
+				SELECT DISTINCT im.inspection_id
+				FROM inspection_members im
+				JOIN users u ON u.id = im.user_id
+				WHERE u.zespol_id = ?
+				""",
+				(operator_team_id,),
+			).fetchall()
+			operator_team_member_inspections = {int(item["inspection_id"]) for item in team_member_rows}
+
+		rows = conn.execute(
+			"""
+			SELECT
+				i.id,
+				i.kod_inspekcji,
+				i.created_by_user_id,
+				i.poczatek_inspekcji,
+				i.koniec_inspekcji,
+				i.data_protokolu_sprawozdania,
+				ti.nazwa_pozycji AS typ_inspekcji,
+				COALESCE(np.nazwa_pozycji, '-') AS nazwa_podmiotu,
+				COALESCE(u.login, '-') AS osoba_kierujaca,
+				COALESCE(t.kod, '-') AS zespol_osoby_kierujacej_kod,
+				u.zespol_id AS lead_team_id
+			FROM inspections i
+			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
+			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
+			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
+			LEFT JOIN teams t ON t.id = u.zespol_id
+			ORDER BY i.id ASC
+			"""
+		).fetchall()
+
+	typed_rows: list[dict[str, Any]] = []
+	base_rows: list[dict[str, Any]] = []
+	for raw_row in rows:
+		row = dict(raw_row)
+		if _inspekcja_code(row.get("typ_inspekcji")) != inspection_type:
+			continue
+
+		diff = _days_difference(row.get("data_protokolu_sprawozdania"), row.get("koniec_inspekcji"))
+		year = _year_from_date(row.get("poczatek_inspekcji"))
+		team_code = str(row.get("zespol_osoby_kierujacej_kod") or "-").strip() or "-"
+		normalized_row = {
+			"inspectionId": int(row["id"]),
+			"kodInspekcji": str(row.get("kod_inspekcji") or "-").strip() or "-",
+			"inspekcja": _inspekcja_code(row.get("typ_inspekcji")),
+			"nazwaPodmiotu": str(row.get("nazwa_podmiotu") or "-").strip() or "-",
+			"osobaKierujaca": str(row.get("osoba_kierujaca") or "-").strip() or "-",
+			"rokPoczatku": year,
+			"poczatekInspekcji": row.get("poczatek_inspekcji"),
+			"koniecInspekcji": row.get("koniec_inspekcji"),
+			"data": row.get("data_protokolu_sprawozdania"),
+			"zespol": team_code,
+			"czas": diff,
+			"leadTeamId": row.get("lead_team_id"),
+		}
+		typed_rows.append(normalized_row)
+
+		if int(operator["rola_id"]) in {2, 3} or _can_access_inspection_for_reports(conn, row, operator):
+			base_rows.append(normalized_row)
+
+	if year_filter:
+		rows_after_year = [row for row in base_rows if str(row.get("rokPoczatku") or "") in year_filter]
+	else:
+		rows_after_year = list(base_rows)
+
+	if team_filter:
+		filtered_rows = [row for row in rows_after_year if str(row.get("zespol") or "") in team_filter]
+	else:
+		filtered_rows = list(rows_after_year)
+
+	team_options = sorted({str(row["zespol"]) for row in base_rows if str(row.get("zespol") or "") not in {"", "-"}})
+	year_options = sorted({str(row["rokPoczatku"]) for row in base_rows if row.get("rokPoczatku") is not None}, reverse=True)
+
+	def _is_valid_for_aggregations(row: dict[str, Any]) -> bool:
+		if row.get("rokPoczatku") is None:
+			return False
+		czas_value = row.get("czas")
+		return isinstance(czas_value, (int, float))
+
+	agg_filtered_rows = [row for row in filtered_rows if _is_valid_for_aggregations(row)]
+	department_scope_rows = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
+
+	summary_rows: list[dict[str, Any]] = []
+	overall_rows: list[dict[str, Any]] = []
+
+	if int(operator["rola_id"]) == 1:
+		typed_rows_after_year = (
+			[row for row in typed_rows if str(row.get("rokPoczatku") or "") in year_filter]
+			if year_filter
+			else list(typed_rows)
+		)
+
+		department_user_scope = [row for row in typed_rows_after_year if _is_valid_for_aggregations(row)]
+
+		team_user_scope: list[dict[str, Any]] = []
+		if operator_team_id is not None:
+			for row in typed_rows_after_year:
+				if not _is_valid_for_aggregations(row):
+					continue
+				lead_team_id = row.get("leadTeamId")
+				inspection_id = int(row["inspectionId"])
+				is_team_row = (lead_team_id is not None and int(lead_team_id) == int(operator_team_id)) or (inspection_id in operator_team_member_inspections)
+				if is_team_row:
+					team_user_scope.append(row)
+
+		my_user_scope = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
+
+		dept_groups: dict[str, list[int]] = defaultdict(list)
+		for row in department_user_scope:
+			dept_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
+
+		team_groups: dict[str, list[int]] = defaultdict(list)
+		for row in team_user_scope:
+			team_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
+
+		my_groups: dict[str, list[int]] = defaultdict(list)
+		for row in my_user_scope:
+			my_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
+
+		all_years = sorted(set(dept_groups.keys()) | set(team_groups.keys()) | set(my_groups.keys()))
+		for year in all_years:
+			for scope_name, values in (
+				("Departament", dept_groups.get(year, [])),
+				(operator_team_code, team_groups.get(year, [])),
+				("Moj czas", my_groups.get(year, [])),
+			):
+				if not values:
+					continue
+				avg_value = _safe_average(values)
+				med_value = float(median(values)) if values else None
+				metric_value = avg_value if trend_mode == "average" else med_value
+				summary_rows.append(
+					{
+						"rok": year,
+						"zespol": scope_name,
+						"year": year,
+						"team": scope_name,
+						"count": len(values),
+						"average": avg_value,
+						"median": med_value,
+						"min": min(values),
+						"max": max(values),
+						"metric": metric_value,
+					}
+				)
+
+		for scope_name, rows_scope in (
+			("Departament", department_user_scope),
+			(operator_team_code, team_user_scope),
+			("Moj czas", my_user_scope),
+		):
+			values = [int(item["czas"]) for item in rows_scope]
+			if not values:
+				continue
+			avg_value = _safe_average(values)
+			med_value = float(median(values)) if values else None
+			metric_value = avg_value if trend_mode == "average" else med_value
+			overall_rows.append(
+				{
+					"zespol": scope_name,
+					"count": len(values),
+					"average": avg_value,
+					"median": med_value,
+					"min": min(values),
+					"max": max(values),
+					"metric": metric_value,
+				}
+			)
+	else:
+		summary_groups: dict[tuple[str, str], list[int]] = defaultdict(list)
+		for row in agg_filtered_rows:
+			summary_groups[(str(row["rokPoczatku"]), str(row["zespol"]))].append(int(row["czas"]))
+
+		for (year, team), values in sorted(summary_groups.items(), key=lambda item: (item[0][0], item[0][1])):
+			avg_value = _safe_average(values)
+			med_value = float(median(values)) if values else None
+			metric_value = avg_value if trend_mode == "average" else med_value
+			summary_rows.append(
+				{
+					"rok": year,
+					"zespol": team,
+					"year": year,
+					"team": team,
+					"count": len(values),
+					"average": avg_value,
+					"median": med_value,
+					"min": min(values) if values else None,
+					"max": max(values) if values else None,
+					"metric": metric_value,
+				}
+			)
+
+		department_groups: dict[str, list[int]] = defaultdict(list)
+		for row in department_scope_rows:
+			department_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
+
+		for year, values in sorted(department_groups.items(), key=lambda item: item[0]):
+			avg_value = _safe_average(values)
+			med_value = float(median(values)) if values else None
+			metric_value = avg_value if trend_mode == "average" else med_value
+			summary_rows.append(
+				{
+					"rok": year,
+					"zespol": "Departament",
+					"year": year,
+					"team": "Departament",
+					"count": len(values),
+					"average": avg_value,
+					"median": med_value,
+					"min": min(values) if values else None,
+					"max": max(values) if values else None,
+					"metric": metric_value,
+				}
+			)
+
+	trend_groups: dict[str, list[int]] = defaultdict(list)
+	for row in agg_filtered_rows:
+		trend_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
+
+	trend_rows: list[dict[str, Any]] = []
+	for year, values in sorted(trend_groups.items(), key=lambda item: item[0]):
+		avg_value = _safe_average(values)
+		med_value = float(median(values)) if values else None
+		trend_rows.append(
+			{
+				"year": int(year) if str(year).isdigit() else year,
+				"count": len(values),
+				"average": avg_value,
+				"median": med_value,
+				"min": min(values) if values else None,
+				"max": max(values) if values else None,
+				"trend": avg_value if trend_mode == "average" else med_value,
+			}
+		)
+
+	summary_pivot_years = sorted({str(row.get("rok")) for row in summary_rows if row.get("rok") not in {None, ""}})
+	pivot_team_order: list[str] = []
+	pivot_team_values: dict[str, dict[str, float]] = {}
+	for row in summary_rows:
+		team_name = str(row.get("zespol") or "").strip()
+		year_value = str(row.get("rok") or "").strip()
+		metric_value = row.get("metric")
+		if not team_name or not year_value or not isinstance(metric_value, (int, float)):
+			continue
+		if team_name not in pivot_team_values:
+			pivot_team_values[team_name] = {}
+			pivot_team_order.append(team_name)
+		pivot_team_values[team_name][year_value] = float(metric_value)
+
+	summary_pivot_rows: list[dict[str, Any]] = []
+	for team_name in pivot_team_order:
+		summary_pivot_rows.append(
+			{
+				"zespol": team_name,
+				"values": {year: pivot_team_values[team_name].get(year) for year in summary_pivot_years},
+			}
+		)
+
+	detail_rows = [
+		{
+			"inspectionId": row["inspectionId"],
+			"inspekcja": row["inspekcja"],
+			"kontrola": row["kodInspekcji"],
+			"kodInspekcji": row["kodInspekcji"],
+			"year": row.get("rokPoczatku") or "-",
+			"rokPoczatku": row.get("rokPoczatku") or "-",
+			"nazwaPodmiotu": row["nazwaPodmiotu"],
+			"poczatekInspekcji": row.get("poczatekInspekcji") or "-",
+			"koniecInspekcji": row.get("koniecInspekcji") or "-",
+			"osobaKierujaca": row.get("osobaKierujaca", "-"),
+			"zespol": row["zespol"],
+			"data": row.get("data") or "-",
+			"czas": row.get("czas"),
+		}
+		for row in filtered_rows
+	]
+
+	scatter_rows = [
+		{
+			"inspectionId": row["inspectionId"],
+			"year": int(row["rokPoczatku"]) if str(row.get("rokPoczatku") or "").isdigit() else (row.get("rokPoczatku") or "-"),
+			"time": float(row["czas"]),
+			"nazwaPodmiotu": row["nazwaPodmiotu"],
+			"kontrola": row["kodInspekcji"],
+			"osobaKierujaca": row.get("osobaKierujaca", "-"),
+			"zespol": row["zespol"],
+		}
+		for row in agg_filtered_rows
+	]
+
+	return {
+		"inspectionType": inspection_type,
+		"trendMode": trend_mode,
+		"selectedMetric": trend_mode,
+		"selectedMetricLabel": metric_label,
+		"baseCount": len(base_rows),
+		"filteredCount": len(filtered_rows),
+		"teamOptions": team_options,
+		"yearOptions": year_options,
+		"detailRows": detail_rows,
+		"summaryColumns": [
+			{"key": "zespol", "label": "Zespol"},
+			{"key": "rok", "label": "Rok"},
+			{"key": "metric", "label": f"{metric_label} czasu"},
+			{"key": "average", "label": "Srednia"},
+			{"key": "median", "label": "Mediana"},
+			{"key": "count", "label": "Liczba"},
+		],
+		"summaryRows": summary_rows,
+		"summaryPivotYears": summary_pivot_years,
+		"summaryPivotRows": summary_pivot_rows,
+		"trendRows": trend_rows,
+		"scatterRows": scatter_rows,
+		"overallColumns": [
+			{"key": "zespol", "label": "Zespol"},
+			{"key": "metric", "label": f"{metric_label}"},
+			{"key": "count", "label": "Liczba"},
+		],
+		"overallRows": overall_rows,
+	}
+
+
+@router.get("/api/reports/inspections-matrix", response_model=InspectionsMatrixResponse)
+def get_inspections_matrix(
+	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> dict[str, Any]:
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+
+		rows = conn.execute(
+			"""
+			SELECT
+				i.id,
+				i.created_by_user_id,
+				COALESCE(np.nazwa_pozycji, '-') AS nazwa_podmiotu,
+				ti.nazwa_pozycji AS typ_inspekcji,
+				(
+					SELECT group_concat(x.scope_name, '; ')
+					FROM (
+						SELECT sp.nazwa_pozycji AS scope_name
+						FROM inspection_scopes isc
+						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
+						WHERE isc.inspection_id = i.id
+						ORDER BY lower(sp.nazwa_pozycji), sp.id
+					) x
+				) AS zakres_inspekcji,
+				i.poczatek_inspekcji AS poczatek_inspekcji,
+				u.zespol_id AS lead_team_id
+			FROM inspections i
+			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
+			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
+			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
+			ORDER BY lower(np.nazwa_pozycji) ASC, i.poczatek_inspekcji ASC, i.id ASC
+			"""
+		).fetchall()
+
+	values_map: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+	years_set: set[str] = set()
+
+	for row in rows:
+		if int(operator["rola_id"]) != 1 and not _can_access_inspection_for_reports(conn, dict(row), operator):
+			continue
+		nazwa_podmiotu = str(row["nazwa_podmiotu"] or "-").strip() or "-"
+		year = _year_from_date(row["poczatek_inspekcji"])
+		if year is None:
+			continue
+
+		years_set.add(year)
+		cell_value = _matrix_cell_value(row["typ_inspekcji"], row["zakres_inspekcji"])
+		values_map[nazwa_podmiotu][year].append(cell_value)
+
+	lata = sorted(years_set)
+	result_rows: list[dict[str, Any]] = []
+
+	for nazwa_podmiotu in sorted(values_map.keys(), key=lambda value: value.lower()):
+		wartosci: dict[str, str] = {}
+		for year in lata:
+			cell_values = values_map[nazwa_podmiotu].get(year, [])
+			if not cell_values:
+				wartosci[year] = "-"
+				continue
+
+			# Keep insertion order while removing duplicates.
+			deduplicated = list(dict.fromkeys(cell_values))
+			if len(deduplicated) > 1:
+				deduplicated = [value for value in deduplicated if value != "-"]
+			wartosci[year] = ", ".join(deduplicated)
+
+		result_rows.append(
+			{
+				"nazwa_podmiotu": nazwa_podmiotu,
+				"wartosci": wartosci,
+			}
+		)
+
+	return {
+		"lata": lata,
+		"rows": result_rows,
+	}
+
+
+@router.get("/api/reports/inspections-detailed", response_model=InspectionsDetailedResponse)
+def get_inspections_detailed(
+	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> dict[str, Any]:
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+
+		rows = conn.execute(
+			"""
+			SELECT
+				i.id AS id,
+				i.created_by_user_id AS created_by_user_id,
+				i.kod_inspekcji AS kod_inspekcji,
+				COALESCE(np.nazwa_pozycji, '-') AS nazwa_podmiotu,
+				ti.nazwa_pozycji AS typ_inspekcji,
+				(
+					SELECT group_concat(x.scope_name, '; ')
+					FROM (
+						SELECT sp.nazwa_pozycji AS scope_name
+						FROM inspection_scopes isc
+						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
+						WHERE isc.inspection_id = i.id
+						ORDER BY lower(sp.nazwa_pozycji), sp.id
+					) x
+				) AS zakres_inspekcji,
+				i.poczatek_inspekcji AS poczatek_inspekcji,
+				i.koniec_inspekcji AS koniec_inspekcji,
+				i.data_protokolu_sprawozdania AS data_protokolu_sprawozdania,
+				COALESCE(
+					nullif(trim(u.imie || ' ' || u.nazwisko), ''),
+					'-'
+				) AS osoba_kierujaca,
+				COALESCE(t.kod, '-') AS zespol_osoby_kierujacej_kod,
+				u.zespol_id AS lead_team_id
+			FROM inspections i
+			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
+			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
+			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
+			LEFT JOIN teams t ON t.id = u.zespol_id
+			ORDER BY lower(np.nazwa_pozycji) ASC, i.poczatek_inspekcji ASC, i.id ASC
+			"""
+		).fetchall()
+
+	result_rows: list[dict[str, Any]] = []
+	for row in rows:
+		if int(operator["rola_id"]) != 1 and not _can_access_inspection_for_reports(conn, dict(row), operator):
+			continue
+		poczatek_inspekcji = str(row["poczatek_inspekcji"] or "-")
+		koniec_inspekcji = str(row["koniec_inspekcji"] or "-")
+		data_protokolu = row["data_protokolu_sprawozdania"]
+
+		result_rows.append(
+			{
+				"kod_inspekcji": str(row["kod_inspekcji"] or "-").strip() or "-",
+				"nazwa_podmiotu": str(row["nazwa_podmiotu"] or "-").strip() or "-",
+				"inspekcja": _inspekcja_code(row["typ_inspekcji"]),
+				"typ_zakres_inspekcji": _matrix_cell_value(row["typ_inspekcji"], row["zakres_inspekcji"]),
+				"rok_poczatku": _year_from_date(row["poczatek_inspekcji"]) or "-",
+				"poczatek_inspekcji": poczatek_inspekcji,
+				"koniec_inspekcji": koniec_inspekcji,
+				"osoba_kierujaca": str(row["osoba_kierujaca"] or "-").strip() or "-",
+				"zespol_osoby_kierujacej_kod": str(row["zespol_osoby_kierujacej_kod"] or "-").strip() or "-",
+				"data_protokolu_sprawozdania": data_protokolu,
+				"roznica_dni_miedzy_data_protokolu_a_koncem": _days_difference(data_protokolu, row["koniec_inspekcji"]),
+			}
+		)
+
+	return {
+		"rows": result_rows,
+	}
