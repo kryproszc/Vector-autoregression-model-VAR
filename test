@@ -1,3 +1,7 @@
-winget install --id GitHub.GitLFS -e
-git lfs version
-choco install git-lfs
+git lfs install
+rmdir /s /q stella-pl-retrieval-8k
+rmdir /s /q polish-reranker-roberta-v3
+git clone https://huggingface.co/sdadas/stella-pl-retrieval-8k
+git clone https://huggingface.co/sdadas/polish-reranker-roberta-v3
+dir stella-pl-retrieval-8k
+dir polish-reranker-roberta-v3
