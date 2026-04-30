@@ -1,13 +1,6 @@
-import numpy
-import pandas
-import torch
-import faiss
-import optuna
-import sklearn
-import tqdm
-import openpyxl
-
-from sentence_transformers import SentenceTransformer, CrossEncoder
-from rank_bm25 import BM25Okapi
-
-print("Wszystko działa")
+cd   
+mkdir models
+cd models
+git lfs install
+git clone https://huggingface.co/sdadas/stella-pl-retrieval-8k
+git clone https://huggingface.co/sdadas/polish-reranker-roberta-v3
