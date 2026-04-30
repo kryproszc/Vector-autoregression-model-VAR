@@ -1,12 +1,13 @@
-faiss-cpu
-numpy
-pandas
-torch
-sentence-transformers
-rank-bm25
-openpyxl
-optuna
-scikit-learn
-tqdm
+import numpy
+import pandas
+import torch
+import faiss
+import optuna
+import sklearn
+import tqdm
+import openpyxl
 
-pip install -r requirements.txt --proxy http://LOGIN:HASLO@PROXY:PORT
+from sentence_transformers import SentenceTransformer, CrossEncoder
+from rank_bm25 import BM25Okapi
+
+print("Wszystko działa")
