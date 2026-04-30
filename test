@@ -1,6 +1,5 @@
-cd   
-mkdir models
-cd models
-git lfs install
-git clone https://huggingface.co/sdadas/stella-pl-retrieval-8k
-git clone https://huggingface.co/sdadas/polish-reranker-roberta-v3
+git config --global http.proxy http://user123:haslo@proxy.company.com:8080
+git config --global https.proxy http://user123:haslo@proxy.company.com:8080
+
+
+git config --global --get http.proxy
