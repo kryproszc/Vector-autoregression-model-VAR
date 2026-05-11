@@ -1,1 +1,22 @@
- uvicorn app.main:app --host 0.0.0.0 --port 8002
+import "@/styles/globals.css";
+
+import { AuthFetchProvider } from "@/features/auth/components/AuthFetchProvider";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+	title: "Rejestr spraw",
+	description: "Rejestr spraw Uniwersytetu Jazdy Rowerem",
+	icons: [{ rel: "icon", url: "/favicon.ico" }],
+};
+
+export default function RootLayout({
+	children,
+}: Readonly<{ children: React.ReactNode }>) {
+	return (
+		<html lang="en" suppressHydrationWarning>
+			<body className="dark" suppressHydrationWarning>
+				<AuthFetchProvider>{children}</AuthFetchProvider>
+			</body>
+		</html>
+	);
+}
