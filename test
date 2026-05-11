@@ -1,13 +1,1 @@
 
-Uprawnienie	Kto ma dostęp	Warunek biznesowy
-Przeglądanie zaleceń	Użytkownicy z dostępem do modułu Zalecenia	Użytkownik musi być aktywny i mieć przyznany dostęp do tego modułu.
-Dodanie zalecenia do wskazanej inspekcji	Dyrektor	Konto aktywne, dostęp operacyjny; brak ograniczeń obszarowych.
-Dodanie zalecenia do wskazanej inspekcji	Kierownik	Konto aktywne, dostęp operacyjny; inspekcja musi być w jego obszarze odpowiedzialności: osoba kierująca lub członek składu jest z jego zespołu albo został utworzony przez tego kierownika.
-Dodanie zalecenia do wskazanej inspekcji	Inspektor / inny użytkownik wewnętrzny	Konto aktywne, dostęp operacyjny; może działać dla inspekcji, którą utworzył, albo w której jest członkiem składu.
-Dodanie zalecenia bez powiązania z inspekcją	Użytkownik wewnętrzny z dostępem operacyjnym	Możliwe tylko przy wskazaniu podmiotu; brak podmiotu blokuje zapis.
-Dodanie/edycja zaleceń	Użytkownik zewnętrzny / Obserwator / konto nieaktywne	Brak dostępu do zmian (może być co najwyżej odczyt, jeśli ma uprawnienie odczytowe).
-Edycja istniejącego zalecenia	Dyrektor	Pełny dostęp do edycji.
-Edycja istniejącego zalecenia	Kierownik	Może edytować zalecenie, jeśli powiązana inspekcja jest w jego obszarze odpowiedzialności (zespół kierownika lub osoba utworzona przez kierownika).
-Edycja istniejącego zalecenia	Inspektor / inny użytkownik wewnętrzny	Może edytować, gdy zalecenie dotyczy inspekcji, którą utworzył lub do której jest przypisany jako członek składu.
-Zmiana przypisania zalecenia do innej inspekcji	Użytkownik uprawniony do edycji	Przeniesienie jest dozwolone tylko wtedy, gdy użytkownik ma prawo działania również w tej docelowej inspekcji.
-Usunięcie zalecenia	Dyrektor	Usuwanie jest zarezerwowane wyłącznie dla poziomu dyrektorskiego.
