@@ -1,13 +1,1 @@
-Obszar	Kategoria użytkownika	Znaczenie biznesowe
-Rola organizacyjna	Dyrektor	Nadzór nad całością procesu oraz podejmowanie decyzji przekrojowych
-Rola organizacyjna	Kierownik zespołu	Koordynacja pracy zespołu oraz odpowiedzialność za realizację spraw w danym obszarze
-Rola organizacyjna	Inspektor	Operacyjna realizacja działań oraz bieżąca obsługa spraw
-Dostęp operacyjny	Użytkownik zewnętrzny	Ograniczony dostęp wyłącznie do wybranych funkcji i danych
-Typ konta	Konto DIU	Standardowe konto wykorzystywane w codziennej pracy operacyjnej
-Typ konta	Konto techniczne	Konto systemowe wspierające ciągłość działania procesów
-Typ konta	Obserwator	Dostęp wyłącznie informacyjny, bez możliwości modyfikacji danych
-Status konta	Aktywny	Użytkownik dostępny do bieżącej pracy i realizacji działań
-Status konta	Nieaktywny	Użytkownik wyłączony z bieżącej obsługi procesów
-Widoczność na listach	Widoczny	Użytkownik dostępny do wyboru w procesach operacyjnych
-Widoczność na listach	Ukryty	Użytkownik niewidoczny w standardowych listach operacyjnych
-Przynależność organizacyjna	Zespół / brak zespołu	Określenie obszaru odpowiedzialności i ścieżki realizacji spraw
+
