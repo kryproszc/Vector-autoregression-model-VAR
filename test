@@ -1,1 +1,12 @@
-
+Uprawnienie	Kto ma dostęp	Warunek biznesowy
+Dodanie nowej inspekcji	Dyrektor	Konto aktywne oraz uprawnienia operacyjne do pracy w module.
+Dodanie nowej inspekcji	Kierownik	Konto aktywne oraz uprawnienia operacyjne; osobą kierującą może być kierownik, osoba z jego zespołu lub osoba utworzona przez tego kierownika.
+Dodanie nowej inspekcji	Inspektor DIU	Konto aktywne oraz uprawnienia operacyjne; inspekcja może być założona wyłącznie „na siebie” (inspektor jako osoba kierująca).
+Dodanie nowej inspekcji	Użytkownik zewnętrzny / Obserwator / Konto nieaktywne	Brak dostępu do tworzenia inspekcji.
+Edycja inspekcji	Dyrektor	Pełny dostęp do edycji wszystkich inspekcji.
+Edycja inspekcji	Autor inspekcji	Może edytować inspekcję, którą utworzył.
+Edycja inspekcji	Członek składu inspekcji	Może edytować inspekcję, do której jest przypisany.
+Edycja inspekcji	Kierownik	Może edytować, jeśli inspekcja dotyczy jego obszaru odpowiedzialności: w składzie jest osoba z jego zespołu lub osoba utworzona przez tego kierownika.
+Edycja inspekcji	Pozostali użytkownicy	Brak dostępu do edycji.
+Wskazanie osoby kierującej	Dyrektor, Kierownik, Inspektor (w ramach swoich zasad)	Osoba kierująca musi być widoczna na listach; dla Inspektora DIU dodatkowo obowiązuje zasada „tylko na siebie”.
+Wskazanie członków składu	Dyrektor, Kierownik, Inspektor (w ramach swoich zasad)	Do składu można wskazywać wyłącznie osoby widoczne na listach.
