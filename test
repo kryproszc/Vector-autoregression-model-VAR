@@ -1,14 +1,1 @@
 
-Uprawnienie	Kto ma dostęp	Warunek biznesowy
-Przeglądanie wniosków sankcyjnych	Użytkownicy z dostępem do modułu Wnioski sankcyjne	Użytkownik musi być aktywny i mieć przyznany dostęp do modułu.
-Dodanie wniosku sankcyjnego do wskazanej inspekcji	Dyrektor	Konto aktywne, dostęp operacyjny; pełny dostęp do wszystkich inspekcji.
-Dodanie wniosku sankcyjnego do wskazanej inspekcji	Kierownik	Konto aktywne, dostęp operacyjny; inspekcja musi być w jego obszarze odpowiedzialności: osoba kierująca lub członek składu jest z jego zespołu albo został utworzony przez tego kierownika.
-Dodanie wniosku sankcyjnego do wskazanej inspekcji	Inspektor / inny użytkownik wewnętrzny	Konto aktywne, dostęp operacyjny; może działać dla inspekcji, którą utworzył, albo w której jest członkiem składu.
-Dodanie wniosku sankcyjnego bez powiązania z inspekcją	Użytkownik wewnętrzny z dostępem operacyjnym	Dozwolone; w takim przypadku odpowiedzialność i zakres wynikają z autorstwa wpisu.
-Dodanie/edycja wniosków sankcyjnych	Użytkownik zewnętrzny / Obserwator / konto nieaktywne	Brak dostępu do zmian (co najwyżej odczyt, jeśli ma uprawnienie odczytowe).
-Edycja istniejącego wniosku sankcyjnego	Dyrektor	Pełny dostęp do edycji wszystkich wniosków.
-Edycja istniejącego wniosku sankcyjnego powiązanego z inspekcją	Kierownik	Może edytować, jeśli inspekcja należy do jego obszaru odpowiedzialności (zespół kierownika lub osoby utworzone przez kierownika).
-Edycja istniejącego wniosku sankcyjnego powiązanego z inspekcją	Inspektor / inny użytkownik wewnętrzny	Może edytować, jeśli ma dostęp do danej inspekcji (autor inspekcji lub członek jej składu).
-Edycja istniejącego wniosku sankcyjnego bez powiązania z inspekcją	Autor wniosku	Może edytować wyłącznie autor takiego wpisu; pozostali użytkownicy nie mają dostępu.
-Zmiana przypisania wniosku do innej inspekcji	Użytkownik uprawniony do edycji	Przeniesienie jest możliwe tylko, gdy użytkownik ma prawo działania również w docelowej inspekcji.
-Usunięcie wniosku sankcyjnego	Dyrektor	Usuwanie jest zarezerwowane wyłącznie dla poziomu dyrektorskiego.
