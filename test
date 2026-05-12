@@ -1,22 +1,143 @@
-import "@/styles/globals.css";
+from __future__ import annotations
 
-import { AuthFetchProvider } from "@/features/auth/components/AuthFetchProvider";
-import type { Metadata } from "next";
+from pathlib import Path
+from datetime import datetime
+import sqlite3
+import traceback
 
-export const metadata: Metadata = {
-	title: "Rejestr spraw",
-	description: "Rejestr spraw Uniwersytetu Jazdy Rowerem",
-	icons: [{ rel: "icon", url: "/favicon.ico" }],
-};
+EXPECTED_CODES = [
+    "registry.inspections.read",
+    "registry.recommendations.read",
+    "registry.obligating_decisions.read",
+    "registry.risk_exposure.read",
+    "reports.executed_inspections.read",
+    "reports.protocol_time.read",
+    "reports.report_time.read",
+]
 
-export default function RootLayout({
-	children,
-}: Readonly<{ children: React.ReactNode }>) {
-	return (
-		<html lang="en" suppressHydrationWarning>
-			<body className="dark" suppressHydrationWarning>
-				<AuthFetchProvider>{children}</AuthFetchProvider>
-			</body>
-		</html>
-	);
-}
+def fmt_ts(ts: float) -> str:
+    try:
+        return datetime.fromtimestamp(ts).isoformat(sep=" ", timespec="seconds")
+    except Exception:
+        return "n/a"
+
+def print_file_info(path: Path) -> None:
+    if not path.exists():
+        print(f"- MISSING: {path}")
+        return
+    stat = path.stat()
+    print(f"- OK: {path}")
+    print(f"  size={stat.st_size} bytes")
+    print(f"  mtime={fmt_ts(stat.st_mtime)}")
+
+def main() -> int:
+    print("=== EXTERNAL USER DIAG ===")
+
+    try:
+        from app.database.connection import DB_PATH, BASE_DIR
+        db_path = Path(DB_PATH)
+        base_dir = Path(BASE_DIR)
+    except Exception:
+        print("ERR: nie moge zaimportowac app.database.connection")
+        traceback.print_exc()
+        return 2
+
+    print(f"BASE_DIR = {base_dir}")
+    print(f"DB_PATH  = {db_path}")
+    print(f"CWD      = {Path.cwd()}")
+
+    print("\n=== FILES ===")
+    print_file_info(db_path)
+    print_file_info(db_path.with_name(db_path.name + "-wal"))
+    print_file_info(db_path.with_name(db_path.name + "-shm"))
+
+    if not db_path.exists():
+        print("\nERR: plik bazy nie istnieje pod DB_PATH")
+        return 3
+
+    print("\n=== DB CHECKS ===")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    try:
+        tables = {
+            str(r["name"])
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required_tables = {"users", "auth_permissions", "user_permissions"}
+        print(f"tables_found = {len(tables)}")
+        print(f"required_missing = {sorted(required_tables - tables)}")
+
+        if "users" in tables:
+            users_count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+            external_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE rola_id = 4"
+            ).fetchone()["c"]
+            print(f"users_count = {users_count}")
+            print(f"external_users_count = {external_count}")
+
+        if "auth_permissions" in tables:
+            ap_count = conn.execute("SELECT COUNT(*) AS c FROM auth_permissions").fetchone()["c"]
+            codes = [
+                str(r["code"])
+                for r in conn.execute(
+                    "SELECT code FROM auth_permissions ORDER BY code"
+                ).fetchall()
+            ]
+            missing = sorted(set(EXPECTED_CODES) - set(codes))
+            extra = sorted(set(codes) - set(EXPECTED_CODES))
+
+            print(f"auth_permissions_count = {ap_count}")
+            print("auth_permissions_codes:")
+            for c in codes:
+                print(f"  {c}")
+
+            print(f"missing_expected_codes = {missing}")
+            print(f"extra_codes = {extra}")
+
+        if "user_permissions" in tables and "auth_permissions" in tables:
+            up_count = conn.execute("SELECT COUNT(*) AS c FROM user_permissions").fetchone()["c"]
+            print(f"user_permissions_count = {up_count}")
+
+            broken_permission_fk = conn.execute(
+                """
+                SELECT up.user_id, up.permission_code
+                FROM user_permissions up
+                LEFT JOIN auth_permissions ap ON ap.code = up.permission_code
+                WHERE ap.code IS NULL
+                LIMIT 20
+                """
+            ).fetchall()
+            print(f"broken_permission_fk_rows = {len(broken_permission_fk)}")
+            for row in broken_permission_fk:
+                print(f"  user_id={row['user_id']} permission_code={row['permission_code']}")
+
+        fk_issues = conn.execute("PRAGMA foreign_key_check").fetchall()
+        print(f"foreign_key_check_rows = {len(fk_issues)}")
+        for row in fk_issues[:20]:
+            # row format: table, rowid, parent, fkid
+            print(f"  table={row[0]} rowid={row[1]} parent={row[2]} fkid={row[3]}")
+
+        print("\n=== QUICK FIX SQL (if missing_expected_codes is not empty) ===")
+        print(
+            "INSERT OR IGNORE INTO auth_permissions (code, label, permission_group, active) VALUES\n"
+            "('registry.inspections.read', 'Inspekcje', 'rejestry', 1),\n"
+            "('registry.recommendations.read', 'Zalecenia', 'rejestry', 1),\n"
+            "('registry.obligating_decisions.read', 'Decyzje zobowiazujace', 'rejestry', 1),\n"
+            "('registry.risk_exposure.read', 'Wnioski sankcyjne', 'rejestry', 1),\n"
+            "('reports.executed_inspections.read', 'Wykonane inspekcje', 'raporty', 1),\n"
+            "('reports.protocol_time.read', 'Czas protokolu', 'raporty', 1),\n"
+            "('reports.report_time.read', 'Czas sprawozdania', 'raporty', 1);"
+        )
+
+    finally:
+        conn.close()
+
+    print("\n=== END ===")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
