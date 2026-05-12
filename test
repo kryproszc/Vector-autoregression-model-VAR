@@ -1,88 +1,141 @@
-from __future__ import annotations
-
-from pathlib import Path
+import argparse
 import sqlite3
-import sys
-
-EXPECTED_PERMISSIONS: list[tuple[str, str, str, int]] = [
-    ("registry.inspections.read", "Inspekcje", "rejestry", 1),
-    ("registry.recommendations.read", "Zalecenia", "rejestry", 1),
-    ("registry.obligating_decisions.read", "Decyzje zobowiazujace", "rejestry", 1),
-    ("registry.risk_exposure.read", "Wnioski sankcyjne", "rejestry", 1),
-    ("reports.executed_inspections.read", "Wykonane inspekcje", "raporty", 1),
-    ("reports.protocol_time.read", "Czas protokolu", "raporty", 1),
-    ("reports.report_time.read", "Czas sprawozdania", "raporty", 1),
-]
+from pathlib import Path
 
 
-def main() -> int:
+def qident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
+    rows = conn.execute(f"PRAGMA table_info({qident(table_name)})").fetchall()
+    return [str(r[1]) for r in rows]
+
+
+def copy_table_best_effort(src: sqlite3.Connection, dst: sqlite3.Connection, table: str) -> tuple[int, str | None]:
+    cols = table_columns(src, table)
+    if not cols:
+        return 0, f"Brak kolumn w tabeli {table}"
+
+    col_list = ", ".join(qident(c) for c in cols)
+    placeholders = ", ".join("?" for _ in cols)
+    insert_sql = f"INSERT INTO {qident(table)} ({col_list}) VALUES ({placeholders})"
+
+    copied = 0
     try:
-        # Uzywa tej samej sciezki DB co backend
-        from app.database.connection import DB_PATH
+        cur = src.execute(f"SELECT {col_list} FROM {qident(table)}")
+        batch = []
+        for row in cur:
+            batch.append(tuple(row))
+            if len(batch) >= 500:
+                dst.executemany(insert_sql, batch)
+                copied += len(batch)
+                batch.clear()
+        if batch:
+            dst.executemany(insert_sql, batch)
+            copied += len(batch)
+        return copied, None
     except Exception as exc:
-        print(f"ERR: nie mozna zaimportowac DB_PATH: {exc}")
-        return 2
+        return copied, str(exc)
 
-    db_path = Path(DB_PATH)
-    print(f"DB_PATH: {db_path}")
 
-    if not db_path.exists():
-        print("ERR: plik bazy nie istnieje")
-        return 3
+def recover_db(src_path: Path, dst_path: Path) -> None:
+    if not src_path.exists():
+        raise FileNotFoundError(f"Nie znaleziono pliku: {src_path}")
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    if dst_path.exists():
+        raise FileExistsError(f"Plik docelowy juz istnieje: {dst_path}")
+
+    src = sqlite3.connect(src_path)
+    src.row_factory = sqlite3.Row
+    dst = sqlite3.connect(dst_path)
+
     try:
-        conn.execute("PRAGMA foreign_keys = ON")
+        # Łagodniejsze ustawienia dla importu
+        dst.execute("PRAGMA journal_mode=DELETE")
+        dst.execute("PRAGMA synchronous=OFF")
+        dst.execute("PRAGMA foreign_keys=OFF")
 
-        # Tabela powinna istniec, ale dla bezpieczenstwa:
-        conn.execute(
+        # Sprawdzenie źródła (może rzucić wyjątek przy uszkodzeniu)
+        try:
+            ic = src.execute("PRAGMA integrity_check").fetchone()
+            print("integrity_check(src):", ic[0] if ic else "brak")
+        except Exception as exc:
+            print("integrity_check(src) ERROR:", exc)
+
+        # Pobierz definicje obiektów
+        objects = src.execute(
             """
-            CREATE TABLE IF NOT EXISTS auth_permissions (
-                code TEXT PRIMARY KEY,
-                label TEXT NOT NULL,
-                permission_group TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+              AND sql IS NOT NULL
+            ORDER BY
+                CASE type
+                    WHEN 'table' THEN 1
+                    WHEN 'view' THEN 2
+                    WHEN 'index' THEN 3
+                    WHEN 'trigger' THEN 4
+                    ELSE 9
+                END,
+                name
             """
-        )
-
-        before = conn.execute("SELECT COUNT(*) AS c FROM auth_permissions").fetchone()["c"]
-        print(f"auth_permissions before: {before}")
-
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO auth_permissions (code, label, permission_group, active)
-            VALUES (?, ?, ?, ?)
-            """,
-            EXPECTED_PERMISSIONS,
-        )
-        conn.commit()
-
-        rows = conn.execute(
-            "SELECT code, label, permission_group, active FROM auth_permissions ORDER BY code"
         ).fetchall()
 
-        print(f"auth_permissions after: {len(rows)}")
-        print("codes:")
-        for r in rows:
-            print(f"  {r['code']} | {r['label']} | {r['permission_group']} | active={r['active']}")
+        tables = [r for r in objects if r["type"] == "table"]
+        views = [r for r in objects if r["type"] == "view"]
+        indexes = [r for r in objects if r["type"] == "index"]
+        triggers = [r for r in objects if r["type"] == "trigger"]
 
-        existing_codes = {str(r["code"]) for r in rows}
-        expected_codes = {code for code, _, _, _ in EXPECTED_PERMISSIONS}
-        missing = sorted(expected_codes - existing_codes)
+        # Tworzenie tabel
+        for r in tables:
+            try:
+                dst.execute(r["sql"])
+                print(f"[OK] create table: {r['name']}")
+            except Exception as exc:
+                print(f"[ERR] create table {r['name']}: {exc}")
 
-        if missing:
-            print(f"ERR: nadal brakuje kodow: {missing}")
-            return 4
+        # Kopiowanie danych tabela po tabeli
+        for r in tables:
+            t = str(r["name"])
+            copied, err = copy_table_best_effort(src, dst, t)
+            if err:
+                print(f"[WARN] copy {t}: skopiowano {copied} rekordow, blad: {err}")
+            else:
+                print(f"[OK] copy {t}: {copied} rekordow")
 
-        print("OK: auth_permissions uzupelnione. Mozesz ponowic dodawanie uzytkownika zewnetrznego.")
-        return 0
+        # Tworzenie widoków, indeksów, triggerów (po danych)
+        for group_name, group in [("view", views), ("index", indexes), ("trigger", triggers)]:
+            for r in group:
+                try:
+                    dst.execute(r["sql"])
+                    print(f"[OK] create {group_name}: {r['name']}")
+                except Exception as exc:
+                    print(f"[WARN] create {group_name} {r['name']}: {exc}")
+
+        dst.commit()
+
+        # Włącz FK i walidacja nowej bazy
+        dst.execute("PRAGMA foreign_keys=ON")
+        qc = dst.execute("PRAGMA quick_check").fetchone()
+        print("quick_check(dst):", qc[0] if qc else "brak")
+
+        ic2 = dst.execute("PRAGMA integrity_check").fetchone()
+        print("integrity_check(dst):", ic2[0] if ic2 else "brak")
+
     finally:
-        conn.close()
+        src.close()
+        dst.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Best-effort recovery SQLite DB")
+    parser.add_argument("source", help="Sciezka do uszkodzonej bazy, np. rejestr.db")
+    parser.add_argument("target", help="Sciezka do nowej bazy, np. rejestr_fixed.db")
+    args = parser.parse_args()
+
+    recover_db(Path(args.source), Path(args.target))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
