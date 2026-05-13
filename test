@@ -1,11 +1,16 @@
-  const renamedColumns = columns.map((col) => {
-    let mapped = col;
-    if (mapped === 'Projection A') mapped = labelA || mapped;
-    if (mapped === 'Projection B') mapped = labelB || mapped;
-    if (normalizeIbnrLabel) {
-      mapped = mapped.replace(/\bIBNR\s*\+\s*RBNP\b/gi, 'IBNR');
-    } else if (expandIbnrLabel) {
-      mapped = mapped.replace(/\bIBNR\b(?!\s*\+\s*RBNP)/gi, 'IBNR + RBNP');
-    }
-    return mapped;
-  });
+Uprawnienie	Kto ma dostęp	Warunek biznesowy
+Decyzje zobowiązujące - utworzenie rekordu (część wspólna)	Dyrektor, Kierownik	Użytkownik aktywny, z dostępem operacyjnym; decyzja musi być powiązana z istniejącym zaleceniem, a operator musi mieć prawo działania dla tego zalecenia.
+Decyzje zobowiązujące - utworzenie rekordu (część wspólna)	Inspektor / inny użytkownik wewnętrzny	Co do zasady brak standardowego dostępu do utworzenia decyzji; proces tworzenia jest prowadzony na poziomie kierowniczym lub dyrektorskim.
+I instancja - edycja danych merytorycznych	Dyrektor	Pełny dostęp.
+I instancja - edycja danych merytorycznych	Osoba prowadząca I instancję	Może edytować, jeśli jest przypisana do I instancji tej decyzji.
+I instancja - edycja danych merytorycznych	Kierownik	Może edytować, jeśli decyzja jest w jego obszarze odpowiedzialności (zespół lub osoby utworzone przez kierownika).
+I instancja - przypisywanie osób prowadzących	Dyrektor	Pełny dostęp do przypisania osób I instancji.
+I instancja - przypisywanie osób prowadzących	Kierownik	Może przypisywać osoby I instancji w ramach swojego zakresu odpowiedzialności.
+II instancja - warunek uruchomienia	Dyrektor, Kierownik, osoby prowadzące	II instancja staje się dostępna dopiero po uzupełnieniu daty wpływu wniosku o ponowne rozpatrzenie.
+II instancja - edycja danych merytorycznych	Dyrektor	Pełny dostęp po spełnieniu warunku uruchomienia II instancji.
+II instancja - edycja danych merytorycznych	Osoba prowadząca II instancję	Może edytować, jeśli jest przypisana do II instancji.
+II instancja - edycja danych merytorycznych	Kierownik	Może edytować jako kierownik osób przypisanych do II instancji; gdy II instancja nie ma jeszcze osób, uprawnienie wynika z odpowiedzialności za osoby I instancji.
+II instancja - przypisywanie osób prowadzących	Dyrektor	Może przypisywać osoby II instancji (po aktywacji II instancji).
+II instancja - przypisywanie osób prowadzących	Kierownik	Może przypisywać osoby II instancji, jeśli odpowiada za obszar I/II instancji tej decyzji.
+Komentarz decyzji - edycja	Dyrektor, uprawnieni z I lub II instancji	Komentarz może edytować użytkownik, który ma prawo edycji co najmniej jednej instancji (I albo II).
+Usunięcie decyzji	Dyrektor	Usuwanie jest zarezerwowane wyłącznie dla poziomu dyrektorskiego.
