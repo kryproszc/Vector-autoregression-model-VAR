@@ -1,3 +1,203 @@
-py -3 recover_sqlite.py rejestr.db rejestr_fixed.db
+import { ChevronDown } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
-python recover_sqlite.py rejestr.db rejestr_fixed.db
+type SingleSelectPortalFieldProps = {
+	label: string;
+	value: string;
+	options: string[] | Array<{ value: string; label: string }>;
+	placeholder: string;
+	onChange: (next: string) => void;
+	disabled?: boolean;
+	invalid?: boolean;
+	errorMessage?: string | null;
+};
+
+export function SingleSelectPortalField({
+	label,
+	value,
+	options,
+	placeholder,
+	onChange,
+	disabled = false,
+	invalid = false,
+	errorMessage = null,
+}: SingleSelectPortalFieldProps) {
+	const baseOptions = options.map((option) =>
+		typeof option === "string"
+			? { value: option, label: option }
+			: { value: option.value, label: option.label },
+	);
+	const normalizedOptions =
+		value && !baseOptions.some((option) => option.value === value)
+			? [{ value, label: value }, ...baseOptions]
+			: baseOptions;
+
+	const selectedLabel =
+		normalizedOptions.find((option) => option.value === value)?.label ?? value;
+	const popupMaxHeight = 320;
+
+	const [isOpen, setIsOpen] = useState(false);
+	const triggerRef = useRef<HTMLButtonElement | null>(null);
+	const popupRef = useRef<HTMLDivElement | null>(null);
+	const [popupPosition, setPopupPosition] = useState<{
+		top: number;
+		left: number;
+		width: number;
+	} | null>(null);
+
+	const updatePopupPosition = () => {
+		const trigger = triggerRef.current;
+		if (!trigger) {
+			return;
+		}
+
+		const rect = trigger.getBoundingClientRect();
+		const viewportPadding = 8;
+		const popupHeight = Math.max(120, popupMaxHeight + 12);
+		const dialog = trigger.closest('[role="dialog"]') as HTMLElement | null;
+		const dialogRect = dialog?.getBoundingClientRect() ?? null;
+		const availableBottom = Math.min(
+			window.innerHeight,
+			dialogRect ? dialogRect.bottom - 8 : window.innerHeight,
+		);
+		const spaceBelow = availableBottom - rect.bottom;
+		const shouldOpenUp =
+			spaceBelow < popupHeight + 8 && rect.top > popupHeight + 8;
+
+		setPopupPosition({
+			top: shouldOpenUp ? rect.top - popupHeight - 8 : rect.bottom + 8,
+			left: Math.min(
+				Math.max(viewportPadding, rect.left),
+				window.innerWidth - rect.width - viewportPadding,
+			),
+			width: rect.width,
+		});
+	};
+
+	useEffect(() => {
+		if (!isOpen) {
+			setPopupPosition(null);
+			return;
+		}
+
+		updatePopupPosition();
+		const handleAnyScroll = (event: Event) => {
+			const target = event.target as Node | null;
+			if (target && popupRef.current?.contains(target)) {
+				return;
+			}
+			setIsOpen(false);
+		};
+		window.addEventListener("resize", updatePopupPosition);
+		window.addEventListener("scroll", handleAnyScroll, true);
+		return () => {
+			window.removeEventListener("resize", updatePopupPosition);
+			window.removeEventListener("scroll", handleAnyScroll, true);
+		};
+	}, [isOpen, normalizedOptions.length]);
+
+	useEffect(() => {
+		if (!isOpen) {
+			return;
+		}
+
+		const handlePointerDown = (event: MouseEvent) => {
+			const target = event.target as Node | null;
+			if (!target) {
+				return;
+			}
+
+			const isInsideTrigger =
+				triggerRef.current && triggerRef.current.contains(target);
+			const isInsidePopup = popupRef.current && popupRef.current.contains(target);
+
+			if (!isInsideTrigger && !isInsidePopup) {
+				setIsOpen(false);
+			}
+		};
+
+		document.addEventListener("mousedown", handlePointerDown);
+		return () => {
+			document.removeEventListener("mousedown", handlePointerDown);
+		};
+	}, [isOpen]);
+
+	return (
+		<label className="block text-slate-700 text-sm">
+			<span className="mb-1 block">{label}</span>
+			<button
+				ref={triggerRef}
+				type="button"
+				disabled={disabled}
+				onClick={() => {
+					if (disabled) {
+						return;
+					}
+					setIsOpen((prev) => !prev);
+				}}
+				className={`flex w-full items-center justify-between rounded-lg border bg-white px-3 py-2 text-left text-sm outline-none transition-colors disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-700 ${
+					invalid ? "border-rose-300 focus:border-rose-400" : "border-slate-300 focus:border-blue-400"
+				}`}
+			>
+				<span className="truncate">{selectedLabel || placeholder}</span>
+				<ChevronDown size={14} className="text-slate-500" />
+			</button>
+
+			{isOpen && popupPosition
+				? createPortal(
+						<div
+							ref={popupRef}
+							className="fixed z-[80] subtle-vertical-scroll overflow-y-auto rounded-xl border border-slate-200 bg-white py-1.5 shadow-[0_14px_34px_rgba(15,23,42,0.14)]"
+							style={{
+								top: popupPosition.top,
+								left: popupPosition.left,
+								width: popupPosition.width,
+								maxHeight: popupMaxHeight,
+							}}
+						>
+							<button
+								type="button"
+								onClick={() => {
+									onChange("");
+									setIsOpen(false);
+								}}
+								className={`block w-full rounded-sm px-3 py-2.5 text-left text-sm transition-colors ${
+									!value
+										? "bg-blue-100 text-blue-900"
+										: "text-slate-800 hover:bg-slate-100"
+								}`}
+							>
+								{placeholder}
+							</button>
+							{normalizedOptions.map((option) => {
+								const isSelected = option.value === value;
+								return (
+									<button
+										key={`${option.value}-${option.label}`}
+										type="button"
+										onClick={() => {
+											onChange(option.value);
+											setIsOpen(false);
+										}}
+										className={`block w-full rounded-sm px-3 py-2.5 text-left text-sm transition-colors ${
+											isSelected
+												? "bg-blue-100 text-blue-900"
+												: "text-slate-800 hover:bg-slate-100"
+										}`}
+									>
+										{option.label}
+									</button>
+								);
+							})}
+						</div>,
+						document.body,
+					)
+				: null}
+
+			{invalid && errorMessage ? (
+				<span className="mt-1 block text-rose-700 text-xs">{errorMessage}</span>
+			) : null}
+		</label>
+	);
+}
