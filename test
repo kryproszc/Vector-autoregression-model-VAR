@@ -1,1 +1,7 @@
-c
+        <div className="flex flex-col justify-center items-center mb-8">
+          <h1 className="text-sm font-semibold text-blue-300 text-center leading-tight">
+            Uniwersytet Pomocy
+            <br />
+            Zagubionym
+          </h1>
+        </div>
