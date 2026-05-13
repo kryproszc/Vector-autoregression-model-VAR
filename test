@@ -1,7 +1,11 @@
-        <div className="flex flex-col justify-center items-center mb-8">
-          <h1 className="text-sm font-semibold text-blue-300 text-center leading-tight">
-            Uniwersytet Pomocy
-            <br />
-            Zagubionym
-          </h1>
-        </div>
+  const renamedColumns = columns.map((col) => {
+    let mapped = col;
+    if (mapped === 'Projection A') mapped = labelA || mapped;
+    if (mapped === 'Projection B') mapped = labelB || mapped;
+    if (normalizeIbnrLabel) {
+      mapped = mapped.replace(/\bIBNR\s*\+\s*RBNP\b/gi, 'IBNR');
+    } else if (expandIbnrLabel) {
+      mapped = mapped.replace(/\bIBNR\b(?!\s*\+\s*RBNP)/gi, 'IBNR + RBNP');
+    }
+    return mapped;
+  });
