@@ -1,0 +1,16 @@
+pip install -U docling
+
+
+
+from docling.document_converter import DocumentConverter
+
+converter = DocumentConverter()
+
+result = converter.convert("owu (3).pdf")
+
+markdown = result.document.export_to_markdown()
+
+with open("outputs/owu.md", "w", encoding="utf-8") as f:
+    f.write(markdown)
+
+print("Gotowe")
