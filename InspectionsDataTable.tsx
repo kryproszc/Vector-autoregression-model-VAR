@@ -209,6 +209,8 @@ export function InspectionsDataTable({
 									const columnWidth = columnWidths?.[column.key];
 									const isScopeColumn = column.key === "zakresInspekcji";
 									const isTeamColumn = column.key === "skladZespolu";
+									const isAcceptanceDatesColumn =
+										column.key === "dataAkceptacjiNoty";
 									const isRecommendationDatesColumn =
 										column.key === "dataZalecen";
 									const verticalListItems = isTeamColumn
@@ -221,7 +223,7 @@ export function InspectionsDataTable({
 												.split(/[;,]/)
 												.map((item) => item.trim())
 												.filter(Boolean)
-										: isRecommendationDatesColumn
+										: isAcceptanceDatesColumn || isRecommendationDatesColumn
 											? displayValue
 												.split(",")
 												.map((item) => item.trim())
@@ -280,7 +282,7 @@ export function InspectionsDataTable({
 														))
 													)}
 												</div>
-											) : isRecommendationDatesColumn && displayValue !== "-" ? (
+											) : (isAcceptanceDatesColumn || isRecommendationDatesColumn) && displayValue !== "-" ? (
 												<div className="subtle-vertical-scroll max-h-28 w-full space-y-1 overflow-y-auto pr-1">
 													{verticalListItems.map((item, index) => (
 														<div key={`${row.id}-${column.key}-${index}`} className="whitespace-normal break-words">
