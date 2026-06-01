@@ -3217,7 +3217,7 @@ export function RecommendationsPanel({
 				<div className="grid gap-3 sm:grid-cols-2">
 								<div className="text-slate-700 text-sm">
 									<SingleSelectPortalField
-										label="Id inspekcji *"
+										label="Powiązanie z inspekcją *"
 										value={form.inspectionId}
 										options={inspectionSelectOptions}
 										placeholder={
