@@ -1,1077 +1,846 @@
 "use client";
 
-import { Pencil, Plus, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ChevronDown, Download } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { AuthRole } from "@/app/_components/home-tabs/types";
+import { fetchInspectionsReportMatrix } from "@/features/reports/api";
+import type { ReportInspectionMatrixRow } from "@/features/reports/types";
 import {
-	updateDictionaryEntry,
-	updateTeamEntry,
-} from "@/features/dictionaries/api";
-import { AddDictionaryEntryModal } from "@/features/dictionaries/components/AddDictionaryEntryModal";
-import { useDictionariesSheet } from "@/features/dictionaries/hooks/useDictionariesSheet";
-import type {
-	DictionaryEntry,
-	DictionaryType,
-} from "@/features/dictionaries/types";
-import { SingleSelectPortalField } from "@/shared/components/forms/SingleSelectPortalField";
-import { TableSurface } from "@/shared/components/table/TableSurface";
+	createStyledExportWorkbook,
+	saveWorkbookAsXlsx,
+} from "@/shared/utils/excel-export";
 
-type DictionariesSheetPanelProps = {
+type ReportsPanelProps = {
 	operatorLogin: string;
-	authRole?: AuthRole;
-	preferredKodTypu?: string;
-	tableOnly?: boolean;
-	title?: string;
-	subtitle?: string;
-	canEdit?: boolean;
 };
 
-type DictionaryCategoryOption = {
-	key: string;
-	label: string;
-	sortOrder: number;
-};
+const INSPECTIONS_CHANGED_EVENT = "inspections:changed";
 
-const SANCTION_DICTIONARY_CODES = new Set([
-	"department",
-	"informacja_o_wszczeciu_postepowania_sankcyjnego",
-	"naruszenia_skutkujace_sankcja",
-	"nazwy_podmiotow_sankcje",
-	"podstawa_prawna_sankcji",
-	"rozstrzygniecie_wniosku_sankcyjnego_i",
-	"sankcja",
-]);
-
-const COMMITMENT_DECISION_DICTIONARY_CODES = new Set([
-	"rozstrzygniecie_decyzji_i",
-	"rozstrzygniecie_decyzji_ii",
-]);
-
-const GENERAL_DICTIONARY_CODES = new Set(["department_ogolne"]);
-
-const TEAM_LEAD_EDITABLE_DICTIONARY_TYPE_CODES = new Set([
-	"department_ogolne",
-	"nazwy_podmiotow",
-	"zakresy_inspekcji",
-	"department",
-	"podstawa_prawna_sankcji",
-	"naruszenia_skutkujace_sankcja",
-	"nazwy_podmiotow_sankcje",
-]);
-
-function inferCategoryKeyFromCode(kodTypu: string): string {
-	const normalizedCode = kodTypu.trim().toLowerCase();
-
-	if (normalizedCode === "statusy_zalecen") {
-		return "1";
-	}
-
-	if (GENERAL_DICTIONARY_CODES.has(normalizedCode)) {
-		return "3";
-	}
-
-	if (COMMITMENT_DECISION_DICTIONARY_CODES.has(normalizedCode)) {
-		return "4";
-	}
-
-	if (SANCTION_DICTIONARY_CODES.has(normalizedCode)) {
-		return "2";
-	}
-
-	return "0";
-}
-
-function toHumanLabel(value: string) {
-	return value
-		.replace(/[_-]+/g, " ")
-		.split(" ")
-		.filter(Boolean)
-		.map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
-		.join(" ");
-}
-
-function resolveCategoryOption(type: DictionaryType): DictionaryCategoryOption {
-	const normalizedCode = type.kodTypu.trim().toLowerCase();
-	if (GENERAL_DICTIONARY_CODES.has(normalizedCode)) {
-		return { key: "3", label: "Ogólne", sortOrder: -1 };
-	}
-
-	if (COMMITMENT_DECISION_DICTIONARY_CODES.has(normalizedCode)) {
-		return { key: "4", label: "Decyzje zobowiązujące", sortOrder: 4 };
-	}
-
-	const rawCategory = type.kategoria;
-
-	if (typeof rawCategory === "number" && Number.isFinite(rawCategory)) {
-		const key = String(rawCategory);
-		if (key === "0") {
-			return { key, label: "Inspekcje", sortOrder: 0 };
-		}
-		if (key === "1") {
-			return { key, label: "Zalecenia", sortOrder: 1 };
-		}
-		if (key === "2") {
-			return { key, label: "Wnioski sankcyjne", sortOrder: 2 };
-		}
-		if (key === "3") {
-			return { key, label: "Ogólne", sortOrder: -1 };
-		}
-		if (key === "4") {
-			return { key, label: "Decyzje zobowiązujące", sortOrder: 4 };
-		}
-
-		return { key, label: `Kategoria ${key}`, sortOrder: rawCategory };
-	}
-
-	if (typeof rawCategory === "string" && rawCategory.trim()) {
-		const normalized = rawCategory.trim().toLowerCase();
-		if (["0", "inspekcje", "inspections"].includes(normalized)) {
-			return { key: "0", label: "Inspekcje", sortOrder: 0 };
-		}
-		if (["1", "zalecenia", "recommendations"].includes(normalized)) {
-			return { key: "1", label: "Zalecenia", sortOrder: 1 };
-		}
-		if (
-			[
-				"2",
-				"wnioski sankcyjne",
-				"wnioski_sankcyjne",
-				"sanction requests",
-				"sankcje",
-			].includes(normalized)
-		) {
-			return { key: "2", label: "Wnioski sankcyjne", sortOrder: 2 };
-		}
-		if (
-			[
-				"3",
-				"ogolne",
-				"ogólne",
-				"general",
-				"common",
-			].includes(normalized)
-		) {
-			return { key: "3", label: "Ogólne", sortOrder: -1 };
-		}
-		if (
-			[
-				"4",
-				"decyzje zobowiązujące",
-				"decyzje zobowiazujace",
-				"decyzje_zobowiazujace",
-				"commitment decisions",
-			].includes(normalized)
-		) {
-			return { key: "4", label: "Decyzje zobowiązujące", sortOrder: 4 };
-		}
-
-		return { key: normalized, label: toHumanLabel(rawCategory.trim()), sortOrder: 100 };
-	}
-
-	const fallbackKey = inferCategoryKeyFromCode(type.kodTypu);
-	if (fallbackKey === "1") {
-		return { key: fallbackKey, label: "Zalecenia", sortOrder: 1 };
-	}
-	if (fallbackKey === "2") {
-		return { key: fallbackKey, label: "Wnioski sankcyjne", sortOrder: 2 };
-	}
-	if (fallbackKey === "3") {
-		return { key: fallbackKey, label: "Ogólne", sortOrder: -1 };
-	}
-	if (fallbackKey === "4") {
-		return { key: fallbackKey, label: "Decyzje zobowiązujące", sortOrder: 4 };
-	}
-
-	return { key: fallbackKey, label: "Inspekcje", sortOrder: 0 };
-}
-
-function toTitleCaseFromCode(kodTypu: string) {
-	return kodTypu
-		.split("_")
-		.filter(Boolean)
-		.map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-		.join(" ");
-}
-
-function getDictionaryTypeLabel(type: DictionaryType) {
-	const normalizedCode = type.kodTypu.trim().toLowerCase();
-	if (normalizedCode === "rozstrzygniecie_decyzji_i") {
-		return "Rozstrzygnięcie decyzji I";
-	}
-	if (normalizedCode === "rozstrzygniecie_decyzji_ii") {
-		return "Rozstrzygnięcie decyzji II";
-	}
-	if (normalizedCode === "rozstrzygniecie_wniosku_sankcyjnego_i") {
-		return "Rozstrzygnięcie wniosku sankcyjnego";
-	}
-	if (normalizedCode === "rynki") {
-		return "Rynek";
-	}
-	if (normalizedCode === "statusy_inspekcji") {
-		return "Status inspekcji";
-	}
-	if (normalizedCode === "statusy_zalecen") {
-		return "Status zaleceń";
-	}
-	if (normalizedCode === "department_ogolne") {
-		return "Departament";
-	}
-
-	const trimmedName = type.nazwaTypu.trim();
-	if (trimmedName) {
-		return trimmedName.charAt(0).toUpperCase() + trimmedName.slice(1);
-	}
-
-	return toTitleCaseFromCode(type.kodTypu);
-}
-
-export function DictionariesSheetPanel({
-	operatorLogin,
-	authRole,
-	preferredKodTypu,
-	tableOnly = false,
-	title = "Arkusz słowników",
-	subtitle = "Wybierz typ słownika, przeglądaj pozycje i dodawaj nowe wpisy.",
-	canEdit = true,
-}: DictionariesSheetPanelProps) {
-	const {
-		types,
-		entries,
-		selectedKodTypu,
-		selectedType,
-		setSelectedKodTypu,
-		isTypesLoading,
-		isEntriesLoading,
-		typesError,
-		entriesError,
-		loadTypes,
-		loadEntries,
-		loadTeamLeaders,
-		isAddModalOpen,
-		openAddModal,
-		closeAddModal,
-		isAddingEntry,
-		addEntryError,
-		addEntryForm,
-		setAddEntryForm,
-		teamLeaders,
-		isTeamLeadersLoading,
-		isTeamsType,
-		submitAddEntry,
-	} = useDictionariesSheet({ operatorLogin });
-
-	const [editingTeamEntry, setEditingTeamEntry] =
-		useState<DictionaryEntry | null>(null);
-	const [editingDictionaryEntry, setEditingDictionaryEntry] =
-		useState<DictionaryEntry | null>(null);
-	const [editDictionaryForm, setEditDictionaryForm] = useState({
-		nazwaPozycji: "",
-		nazwaUzytkowa: "",
-		skrotPozycji: "",
-		aktywny: true,
-	});
-	const [editDictionaryError, setEditDictionaryError] = useState<string | null>(
-		null,
+function TableLoadingOverlay() {
+	return (
+		<div className="absolute inset-0 z-20 flex items-center justify-center bg-white/70 backdrop-blur-[1px]">
+			<div className="flex items-center gap-3 rounded-full border border-slate-200 bg-white/90 px-4 py-2 shadow-[0_8px_20px_rgba(2,8,23,0.15)]">
+				<span className="h-4 w-4 animate-spin rounded-full border-2 border-[#7aa5dc] border-t-[#255087]" />
+				<span className="font-medium text-slate-700 text-sm">Ładowanie danych...</span>
+			</div>
+		</div>
 	);
-	const [isSubmittingDictionaryEdit, setIsSubmittingDictionaryEdit] =
-		useState(false);
-	const [editTeamCode, setEditTeamCode] = useState("");
-	const [editTeamName, setEditTeamName] = useState("");
-	const [editTeamLeaderId, setEditTeamLeaderId] = useState<number | null>(null);
-	const [editTeamError, setEditTeamError] = useState<string | null>(null);
-	const [isSubmittingTeamEdit, setIsSubmittingTeamEdit] = useState(false);
-	const [selectedCategoryKey, setSelectedCategoryKey] = useState("");
+}
 
-	const sortedTypes = useMemo(() => {
-		const orderByCode: Record<string, number> = {
-			nazwy_podmiotow: 10,
-			typy_inspekcji: 20,
-			zakresy_inspekcji: 30,
-			rynki: 40,
-			rodzaje_podmiotu: 50,
-			statusy_inspekcji: 60,
-			statusy_zalecen: 70,
-			department_ogolne: 75,
-			zespoly: 80,
-			department: 210,
-			sankcja: 220,
-			podstawa_prawna_sankcji: 230,
-			naruszenia_skutkujace_sankcja: 240,
-			informacja_o_wszczeciu_postepowania_sankcyjnego: 250,
-			rozstrzygniecie_wniosku_sankcyjnego_i: 260,
-			nazwy_podmiotow_sankcje: 270,
-			rozstrzygniecie_decyzji_i: 310,
-			rozstrzygniecie_decyzji_ii: 320,
-		};
+export function ReportsPanel({ operatorLogin }: ReportsPanelProps) {
+	const [rows, setRows] = useState<ReportInspectionMatrixRow[]>([]);
+	const [years, setYears] = useState<string[]>([]);
+	const [isLoading, setIsLoading] = useState(true);
+	const [isExporting, setIsExporting] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	const [isHeatmapEnabled, setIsHeatmapEnabled] = useState(false);
+	const [selectedPlants, setSelectedPlants] = useState<string[]>([]);
+	const [selectedEntityTypes, setSelectedEntityTypes] = useState<string[]>([]);
+	const [selectedYears, setSelectedYears] = useState<string[]>([]);
+	const [plantSearch, setPlantSearch] = useState("");
+	const [entityTypeSearch, setEntityTypeSearch] = useState("");
+	const [yearSearch, setYearSearch] = useState("");
+	const filtersRef = useRef<HTMLDivElement | null>(null);
+	const codeColumnWidthCh = 14;
+	const firstColumnNaturalWidthCh = useMemo(() => {
+		const headerLength = "Nazwa podmiotu".length;
+		const longestNameLength = rows.reduce(
+			(maxLength, row) => Math.max(maxLength, row.nazwaPodmiotu.length),
+			headerLength,
+		);
 
-		return types
-			.filter((type) => {
-				const normalizedCode = type.kodTypu.trim().toLowerCase();
-				const hideTeamsInGeneralDictionaryView = !tableOnly;
+		return Math.min(32, Math.max(18, longestNameLength + 2));
+	}, [rows]);
 
-				return (
-					normalizedCode !== "osoby" &&
-					normalizedCode !== "rozstrzygniecie_wniosku_sankcyjnego_ii" &&
-					(!hideTeamsInGeneralDictionaryView || normalizedCode !== "zespoly")
-				);
-			})
-			.sort((left, right) => {
-				const leftCode = left.kodTypu.trim().toLowerCase();
-				const rightCode = right.kodTypu.trim().toLowerCase();
-				const leftOrder = orderByCode[leftCode] ?? Number.MAX_SAFE_INTEGER;
-				const rightOrder = orderByCode[rightCode] ?? Number.MAX_SAFE_INTEGER;
+	const toControlLabelFromCellEntry = useCallback(
+		(entry: ReportInspectionMatrixRow["cells"][string][number]) => {
+			const normalizedScopes = entry.scopes
+				.map((scope) => scope.trim())
+				.filter(Boolean);
 
-				if (leftOrder !== rightOrder) {
-					return leftOrder - rightOrder;
+			if (normalizedScopes.length === 0) {
+				return `${entry.type}_[]`;
+			}
+
+			return `${entry.type}_[${normalizedScopes.join(", ")}]`;
+		},
+		[],
+	);
+
+	const parseControls = (value: string) =>
+		value
+			.split(",")
+			.map((item) => item.trim())
+			.filter((item) => item.length > 0 && item !== "-");
+
+	const getControlsForCell = useCallback(
+		(row: ReportInspectionMatrixRow, year: string) => {
+			const cellEntries = row.cells[year] ?? [];
+			if (cellEntries.length > 0) {
+				return cellEntries.map(toControlLabelFromCellEntry);
+			}
+
+			return parseControls(row.wartosci[year] ?? "-");
+		},
+		[toControlLabelFromCellEntry],
+	);
+
+	const selectedPlantsSet = useMemo(() => new Set(selectedPlants), [selectedPlants]);
+	const selectedEntityTypesSet = useMemo(
+		() => new Set(selectedEntityTypes),
+		[selectedEntityTypes],
+	);
+	const selectedYearsSet = useMemo(() => new Set(selectedYears), [selectedYears]);
+
+	const allPlants = useMemo(
+		() =>
+			Array.from(new Set(rows.map((row) => row.nazwaPodmiotu))).sort((left, right) =>
+				left.localeCompare(right),
+			),
+		[rows],
+	);
+
+	const allEntityTypes = useMemo(
+		() =>
+			Array.from(
+				new Set(
+					rows
+						.map((row) => row.rodzajPodmiotu.trim())
+						.filter((value) => value.length > 0 && value !== "-"),
+				),
+			).sort((left, right) => left.localeCompare(right, "pl", { sensitivity: "base" })),
+		[rows],
+	);
+
+	const allYears = useMemo(() => [...years], [years]);
+
+	const visibleYears = useMemo(() => {
+		if (selectedYearsSet.size === 0) {
+			return allYears;
+		}
+
+		return allYears.filter((year) => selectedYearsSet.has(year));
+	}, [allYears, selectedYearsSet]);
+
+	const yearColumnWidthByYearPx = useMemo(() => {
+		const next: Record<string, number> = {};
+
+		for (const year of visibleYears) {
+			let maxLabelLength = year.length;
+
+			for (const row of rows) {
+				const controls = getControlsForCell(row, year);
+				for (const control of controls) {
+					maxLabelLength = Math.max(maxLabelLength, control.length);
 				}
-
-				return getDictionaryTypeLabel(left).localeCompare(
-					getDictionaryTypeLabel(right),
-					"pl",
-					{
-						sensitivity: "base",
-					},
-				);
-			});
-	}, [tableOnly, types]);
-
-	const categoryOptions = useMemo(() => {
-		const categoryMap = new Map<string, DictionaryCategoryOption>();
-
-		for (const type of sortedTypes) {
-			const category = resolveCategoryOption(type);
-			if (!categoryMap.has(category.key)) {
-				categoryMap.set(category.key, category);
-			}
-		}
-
-		return Array.from(categoryMap.values()).sort((left, right) => {
-			if (left.sortOrder !== right.sortOrder) {
-				return left.sortOrder - right.sortOrder;
 			}
 
-			return left.label.localeCompare(right.label, "pl", { sensitivity: "base" });
-		});
-	}, [sortedTypes]);
-
-	const visibleTypes = useMemo(() => {
-		if (tableOnly || !selectedCategoryKey) {
-			return sortedTypes;
+			next[year] = Math.max(160, Math.round((maxLabelLength + 6) * 7));
 		}
 
-		return sortedTypes.filter(
-			(type) => resolveCategoryOption(type).key === selectedCategoryKey,
+		return next;
+	}, [getControlsForCell, rows, visibleYears]);
+
+	const firstColumnWidthCh = useMemo(() => {
+		const visibleYearCount = visibleYears.length;
+		const maxByYearCount =
+			visibleYearCount <= 4
+				? 30
+				: visibleYearCount <= 6
+					? 26
+					: visibleYearCount <= 8
+						? 23
+						: visibleYearCount <= 10
+							? 20
+							: 18;
+
+		return Math.max(16, Math.min(firstColumnNaturalWidthCh, maxByYearCount));
+	}, [firstColumnNaturalWidthCh, visibleYears.length]);
+
+	const visiblePlantOptions = useMemo(() => {
+		const query = plantSearch.trim().toLowerCase();
+		if (!query) {
+			return allPlants;
+		}
+
+		return allPlants.filter((plant) => plant.toLowerCase().includes(query));
+	}, [allPlants, plantSearch]);
+
+	const visibleEntityTypeOptions = useMemo(() => {
+		const query = entityTypeSearch.trim().toLowerCase();
+		if (!query) {
+			return allEntityTypes;
+		}
+
+		return allEntityTypes.filter((entityType) =>
+			entityType.toLowerCase().includes(query),
 		);
-	}, [selectedCategoryKey, sortedTypes, tableOnly]);
+	}, [allEntityTypes, entityTypeSearch]);
 
-	const visibleSelectedType = useMemo(
-		() => visibleTypes.find((type) => type.kodTypu === selectedKodTypu) ?? null,
-		[selectedKodTypu, visibleTypes],
+	const visibleYearOptions = useMemo(() => {
+		const query = yearSearch.trim();
+		if (!query) {
+			return allYears;
+		}
+
+		return allYears.filter((year) => year.includes(query));
+	}, [allYears, yearSearch]);
+
+	const getSelectionLabel = useCallback(
+		(label: string, selectedCount: number, total: number) => {
+			if (total === 0) return `${label}: brak`;
+			if (selectedCount === 0) return `${label}: wszystkie`;
+			return `${label}: ${selectedCount}`;
+		},
+		[],
 	);
 
-	const handleCategorySelect = (categoryKey: string) => {
-		setSelectedCategoryKey(categoryKey);
+	const filteredRows = useMemo(() => {
+		return rows.filter((row) => {
+			if (selectedPlantsSet.size > 0 && !selectedPlantsSet.has(row.nazwaPodmiotu)) {
+				return false;
+			}
 
-		const selectedStillVisible = sortedTypes.some(
-			(type) =>
-				type.kodTypu === selectedKodTypu &&
-				resolveCategoryOption(type).key === categoryKey,
-		);
+			if (
+				selectedEntityTypesSet.size > 0 &&
+				!selectedEntityTypesSet.has(row.rodzajPodmiotu)
+			) {
+				return false;
+			}
 
-		if (selectedStillVisible) {
-			return;
-		}
-
-		const firstTypeInCategory = sortedTypes.find(
-			(type) => resolveCategoryOption(type).key === categoryKey,
-		);
-
-		setSelectedKodTypu(firstTypeInCategory?.kodTypu ?? "");
-	};
-
-	const isTeamsSelected = selectedKodTypu.trim().toLowerCase() === "zespoly";
-	const normalizedSelectedKodTypu = selectedKodTypu.trim().toLowerCase();
-	const canEditCurrentType =
-		canEdit &&
-		(authRole !== "team_lead" ||
-			TEAM_LEAD_EDITABLE_DICTIONARY_TYPE_CODES.has(normalizedSelectedKodTypu));
-	const tableColumnCount = isTeamsSelected ? 5 : 4;
-
-	const openTeamEditModal = (entry: DictionaryEntry) => {
-		if (!canEditCurrentType) {
-			return;
-		}
-
-		if (!entry.teamId) {
-			return;
-		}
-
-		setEditingTeamEntry(entry);
-		setEditTeamCode(entry.kodPozycji);
-		setEditTeamName(entry.nazwaPozycji);
-		setEditTeamLeaderId(entry.kierownikUserId ?? null);
-		setEditTeamError(null);
-		void loadTeamLeaders();
-	};
-
-	const openDictionaryEditModal = (entry: DictionaryEntry) => {
-		if (!canEditCurrentType) {
-			return;
-		}
-
-		setEditingDictionaryEntry(entry);
-		setEditDictionaryForm({
-			nazwaPozycji: entry.nazwaPozycji,
-			nazwaUzytkowa: entry.nazwaUzytkowa ?? "",
-			skrotPozycji: entry.skrotPozycji ?? "",
-			aktywny: entry.aktywny,
+			return true;
 		});
-		setEditDictionaryError(null);
-	};
-
-	const closeDictionaryEditModal = () => {
-		setEditingDictionaryEntry(null);
-		setEditDictionaryError(null);
-		setIsSubmittingDictionaryEdit(false);
-	};
-
-	const handleSubmitDictionaryEdit = async (
-		event: React.FormEvent<HTMLFormElement>,
-	) => {
-		event.preventDefault();
-
-		if (!canEditCurrentType) {
-			setEditDictionaryError("Brak uprawnień do edycji słownika.");
-			return;
-		}
-
-		if (!editingDictionaryEntry) {
-			return;
-		}
-
-		if (!editDictionaryForm.nazwaPozycji.trim()) {
-			setEditDictionaryError("Uzupełnij wymagane pola.");
-			return;
-		}
-
-		setIsSubmittingDictionaryEdit(true);
-		setEditDictionaryError(null);
-
-		try {
-			const result = await updateDictionaryEntry({
-				operatorLogin,
-				kodTypu: selectedKodTypu,
-				entryId: editingDictionaryEntry.id,
-				form: {
-					kodPozycji: editingDictionaryEntry.kodPozycji,
-					...editDictionaryForm,
-					kierownikUserId: null,
-				},
-			});
-
-			if (!result.ok) {
-				setEditDictionaryError(result.error);
-				return;
-			}
-
-			await loadEntries(selectedKodTypu, { forceRefresh: true });
-			closeDictionaryEditModal();
-		} catch {
-			setEditDictionaryError("Nie udało się zaktualizować pozycji słownika.");
-		} finally {
-			setIsSubmittingDictionaryEdit(false);
-		}
-	};
-
-	const closeTeamEditModal = () => {
-		setEditingTeamEntry(null);
-		setEditTeamCode("");
-		setEditTeamName("");
-		setEditTeamLeaderId(null);
-		setEditTeamError(null);
-		setIsSubmittingTeamEdit(false);
-	};
-
-	const handleSubmitTeamEdit = async (
-		event: React.FormEvent<HTMLFormElement>,
-	) => {
-		event.preventDefault();
-
-		if (!canEditCurrentType) {
-			setEditTeamError("Brak uprawnień do edycji słownika.");
-			return;
-		}
-
-		if (!editingTeamEntry?.teamId) {
-			return;
-		}
-
-		if (!editTeamName.trim()) {
-			setEditTeamError("Nazwa zespołu jest wymagana.");
-			return;
-		}
-
-		if (!editTeamCode.trim()) {
-			setEditTeamError("Kod zespołu jest wymagany.");
-			return;
-		}
-
-		setIsSubmittingTeamEdit(true);
-		setEditTeamError(null);
-
-		try {
-			const result = await updateTeamEntry({
-				operatorLogin,
-				teamId: editingTeamEntry.teamId,
-				kod: editTeamCode,
-				nazwa: editTeamName,
-				kierownikUserId: editTeamLeaderId,
-			});
-
-			if (!result.ok) {
-				setEditTeamError(result.error);
-				return;
-			}
-
-			await loadEntries(selectedKodTypu, { forceRefresh: true });
-			closeTeamEditModal();
-		} catch {
-			setEditTeamError("Nie udało się zaktualizować zespołu.");
-		} finally {
-			setIsSubmittingTeamEdit(false);
-		}
-	};
-
-	useEffect(() => {
-		void loadTypes();
-	}, [loadTypes]);
-
-	useEffect(() => {
-		if (!selectedKodTypu) {
-			return;
-		}
-
-		void loadEntries(selectedKodTypu);
-	}, [loadEntries, selectedKodTypu]);
-
-	useEffect(() => {
-		if (tableOnly) {
-			return;
-		}
-
-		if (categoryOptions.length === 0) {
-			if (selectedCategoryKey) {
-				setSelectedCategoryKey("");
-			}
-			return;
-		}
-
-		const isSelectedCategoryVisible = categoryOptions.some(
-			(category) => category.key === selectedCategoryKey,
-		);
-
-		if (!isSelectedCategoryVisible) {
-			setSelectedCategoryKey(categoryOptions[0]?.key ?? "");
-		}
-	}, [categoryOptions, selectedCategoryKey, tableOnly]);
-
-	useEffect(() => {
-		if (visibleTypes.length === 0) {
-			setSelectedKodTypu("");
-			return;
-		}
-
-		const selectedIsVisible = visibleTypes.some(
-			(type) => type.kodTypu === selectedKodTypu,
-		);
-		if (!selectedIsVisible) {
-			const firstVisibleType = visibleTypes[0];
-			if (firstVisibleType) {
-				setSelectedKodTypu(firstVisibleType.kodTypu);
-			}
-		}
-	}, [selectedKodTypu, setSelectedKodTypu, visibleTypes]);
-
-	useEffect(() => {
-		const normalizedPreferred = preferredKodTypu?.trim();
-		if (!normalizedPreferred) {
-			return;
-		}
-
-		const preferredType = sortedTypes.find(
-			(type) => type.kodTypu === normalizedPreferred,
-		);
-		if (!preferredType) {
-			return;
-		}
-
-		const preferredCategoryKey = resolveCategoryOption(preferredType).key;
-		if (preferredCategoryKey !== selectedCategoryKey) {
-			setSelectedCategoryKey(preferredCategoryKey);
-		}
-
-		if (selectedKodTypu !== normalizedPreferred) {
-			setSelectedKodTypu(normalizedPreferred);
-		}
 	}, [
-		preferredKodTypu,
-		selectedCategoryKey,
-		selectedKodTypu,
-		setSelectedKodTypu,
-		sortedTypes,
+		rows,
+		selectedPlantsSet,
+		selectedEntityTypesSet,
 	]);
 
-	const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-		event.preventDefault();
-		if (!canEditCurrentType) {
-			return;
+	const togglePlant = useCallback((plant: string) => {
+		setSelectedPlants((previous) =>
+			previous.includes(plant)
+				? previous.filter((item) => item !== plant)
+				: [...previous, plant],
+		);
+	}, []);
+
+	const toggleEntityType = useCallback((entityType: string) => {
+		setSelectedEntityTypes((previous) =>
+			previous.includes(entityType)
+				? previous.filter((item) => item !== entityType)
+				: [...previous, entityType],
+		);
+	}, []);
+
+	const toggleYear = useCallback((year: string) => {
+		setSelectedYears((previous) =>
+			previous.includes(year)
+				? previous.filter((item) => item !== year)
+				: [...previous, year],
+		);
+	}, []);
+
+	const closeOpenFilters = useCallback(() => {
+		if (!filtersRef.current) return;
+
+		for (const detailsElement of filtersRef.current.querySelectorAll("details[open]")) {
+			(detailsElement as HTMLDetailsElement).open = false;
 		}
-		await submitAddEntry();
+	}, []);
+
+	const clearFilters = useCallback(() => {
+		setSelectedPlants([]);
+		setSelectedEntityTypes([]);
+		setSelectedYears([]);
+		setIsHeatmapEnabled(false);
+		closeOpenFilters();
+	}, [closeOpenFilters]);
+
+	const handleFilterToggle = useCallback((currentDetails: HTMLDetailsElement) => {
+		if (!currentDetails.open || !filtersRef.current) return;
+
+		for (const detailsElement of filtersRef.current.querySelectorAll("details[open]")) {
+			if (detailsElement !== currentDetails) {
+				(detailsElement as HTMLDetailsElement).open = false;
+			}
+		}
+	}, []);
+
+	useEffect(() => {
+		setSelectedPlants((previous) => {
+			const filtered = previous.filter((plant) => allPlants.includes(plant));
+			return filtered.length === previous.length ? previous : filtered;
+		});
+	}, [allPlants]);
+
+	useEffect(() => {
+		setSelectedEntityTypes((previous) => {
+			const filtered = previous.filter((entityType) =>
+				allEntityTypes.includes(entityType),
+			);
+			return filtered.length === previous.length ? previous : filtered;
+		});
+	}, [allEntityTypes]);
+
+	useEffect(() => {
+		setSelectedYears((previous) => {
+			const filtered = previous.filter((year) => allYears.includes(year));
+			return filtered.length === previous.length ? previous : filtered;
+		});
+	}, [allYears]);
+
+	const getCellIntensityClass = (controlsCount: number) => {
+		if (!isHeatmapEnabled) return "";
+		if (controlsCount <= 0) return "";
+		if (controlsCount === 1) return "bg-[#e9f2ff]";
+		if (controlsCount === 2) return "bg-[#d4e7ff]";
+		return "bg-[#bdd9ff]";
 	};
 
-	return (
-		<section
-			className={`rounded-2xl border border-slate-700/70 bg-[#101f39] p-4 sm:p-5 ${
-				tableOnly
-					? "relative flex h-[calc(100vh-2.2rem)] min-h-[40rem] flex-col"
-					: ""
-			}`}
-		>
-			<div className="mb-4 border-slate-700/70 border-b pb-3">
-				<div>
-					<h2 className="font-semibold text-lg text-slate-100">
-						{title}
-					</h2>
-					{subtitle.trim() ? (
-						<p className="mt-1 text-slate-300/85 text-sm">
-							{subtitle}
-						</p>
-					) : null}
-				</div>
-			</div>
+	const getDisplayCellValue = useCallback(
+		(row: ReportInspectionMatrixRow, year: string) => {
+			const controls = getControlsForCell(row, year);
+			if (controls.length === 0) {
+				return "-";
+			}
 
-			{!tableOnly ? (
-				<div className="mb-4 rounded-xl border border-slate-700/70 bg-[#0f1c34] p-2">
-					<p className="mb-2 px-1 font-semibold text-slate-300/90 text-xs uppercase tracking-[0.08em]">
-						Kategoria słowników
-					</p>
-					<div className="flex flex-wrap gap-2">
-						{categoryOptions.map((category) => {
-							const isActive = selectedCategoryKey === category.key;
+			return controls.join(", ");
+		},
+		[getControlsForCell],
+	);
 
-							return (
-								<button
-									key={category.key}
-									type="button"
-									onClick={() => handleCategorySelect(category.key)}
-									className={`inline-flex items-center whitespace-nowrap rounded-lg border px-3 py-2 font-semibold text-sm transition-colors ${
-										isActive
-											? "border-[#84b0f2] bg-[#345689] text-white"
-											: "border-slate-600/50 bg-slate-900/40 text-slate-200 hover:bg-slate-800/70"
-									}`}
-								>
-									{category.label}
-								</button>
-							);
-						})}
-					</div>
-				</div>
-			) : null}
+	const parseControlLabel = useCallback((controlLabel: string) => {
+		const normalized = controlLabel.trim();
+		const match = normalized.match(/^([A-Za-z]+)_\[(.*)\]$/);
+		if (!match) {
+			return {
+				type: normalized.toUpperCase().startsWith("WN") ? "WN" : "K",
+				scopesLabel: normalized || "-",
+			};
+		}
 
-			<div
-				className={
-					tableOnly
-						? "flex min-h-0 flex-1 flex-col"
-						: "grid gap-4 lg:grid-cols-[minmax(220px,260px)_1fr]"
+		const rawType = (match[1] ?? "K").trim().toUpperCase();
+		const type = rawType === "WN" ? "WN" : "K";
+		const rawScopes = (match[2] ?? "").trim();
+		const scopes = rawScopes
+			.split(",")
+			.map((scope) => scope.trim())
+			.filter(Boolean);
+
+		return {
+			type,
+			scopesLabel: scopes.length > 0 ? scopes.join(", ") : "Brak zakresu",
+		};
+	}, []);
+
+	const getControlTypeRank = useCallback((controlLabel: string) => {
+		const parsed = parseControlLabel(controlLabel);
+		return parsed.type === "K" ? 0 : 1;
+	}, [parseControlLabel]);
+
+	const getCellTooltip = useCallback(
+		(row: ReportInspectionMatrixRow, year: string) => {
+			const controls = getControlsForCell(row, year);
+			if (controls.length === 0) {
+				return "-";
+			}
+
+			return controls.join("\n");
+		},
+		[getControlsForCell],
+	);
+
+	const loadReport = useCallback(async () => {
+		setIsLoading(true);
+		setError(null);
+
+		const result = await fetchInspectionsReportMatrix(operatorLogin);
+		if (!result.ok) {
+			setRows([]);
+			setYears([]);
+			setError(result.error);
+			setIsLoading(false);
+			return;
+		}
+
+		setRows(result.data.rows);
+		setYears(result.data.lata);
+		setIsLoading(false);
+	}, [operatorLogin]);
+
+	const handleExportToExcel = useCallback(async () => {
+		if (isExporting || filteredRows.length === 0) {
+			return;
+		}
+
+		setIsExporting(true);
+		setError(null);
+
+		try {
+			const workbook = await createStyledExportWorkbook("Mapa inspekcji");
+			const worksheet = workbook.addWorksheet("Mapa inspekcji");
+
+			const headers = ["Kod inspekcji", "Nazwa podmiotu", ...visibleYears];
+			worksheet.addRow(headers);
+
+			for (const row of filteredRows) {
+				const values = visibleYears.map((year) => {
+					return getDisplayCellValue(row, year);
+				});
+				worksheet.addRow([row.kodInspekcji || "-", row.nazwaPodmiotu, ...values]);
+			}
+
+			const headerRow = worksheet.getRow(1);
+			headerRow.font = { bold: true };
+			headerRow.alignment = { vertical: "middle", horizontal: "left" };
+
+			worksheet.columns = headers.map((header, index) => {
+				if (index === 0) {
+					return { header, width: Math.max(14, codeColumnWidthCh) };
 				}
-			>
-				{!tableOnly ? (
-					<aside className="rounded-xl border border-slate-700/70 bg-[#0f1c34] p-3">
-						<p className="mb-2 font-semibold text-slate-300/90 text-xs uppercase tracking-[0.08em]">
-							Typ słownika
-						</p>
+				if (index === 1) {
+					return { header, width: Math.max(22, firstColumnWidthCh) };
+				}
+				return {
+					header,
+					width: Math.max(
+						12,
+						Math.round((yearColumnWidthByYearPx[header] ?? 160) / 8),
+					),
+				};
+			});
 
-						{isTypesLoading ? (
-							<p className="text-slate-300 text-sm">Ładowanie typów...</p>
-						) : null}
-						{typesError ? (
-							<p className="font-medium text-rose-300 text-sm">{typesError}</p>
-						) : null}
+			const fileName = "wykonane-inspekcje.xlsx";
+			await saveWorkbookAsXlsx(workbook, fileName);
+		} catch (exportError) {
+			if (exportError instanceof DOMException && exportError.name === "AbortError") {
+				return;
+			}
 
-						<div className="subtle-vertical-scroll min-h-64 max-h-[calc(100vh-24rem)] space-y-1.5 overflow-y-auto pr-1">
-							{visibleTypes.length === 0 ? (
-								<p className="rounded-lg border border-slate-600/40 bg-slate-900/35 px-2.5 py-2 text-slate-300 text-sm">
-									Brak typów słowników w tej kategorii.
-								</p>
-							) : null}
-							{visibleTypes.map((type) => {
-								const isActive = type.kodTypu === selectedKodTypu;
+			setError("Nie udało się wyeksportować danych do Excela.");
+		} finally {
+			setIsExporting(false);
+		}
+	}, [
+		codeColumnWidthCh,
+		filteredRows,
+		firstColumnWidthCh,
+		getDisplayCellValue,
+		isExporting,
+		yearColumnWidthByYearPx,
+		visibleYears,
+	]);
 
-								return (
-									<button
-										key={type.kodTypu}
-										type="button"
-										onClick={() => setSelectedKodTypu(type.kodTypu)}
-										className={`w-full rounded-lg border px-2.5 py-2 text-left text-sm transition-colors ${
-											isActive
-												? "border-[#84b0f2] bg-[#345689] text-white"
-												: "border-slate-600/50 bg-slate-900/40 text-slate-200 hover:bg-slate-800/70"
-										}`}
-									>
-										<p className="font-semibold">
-											{getDictionaryTypeLabel(type)}
-										</p>
-									</button>
-								);
-							})}
-						</div>
-					</aside>
-				) : null}
+	useEffect(() => {
+		loadReport();
+	}, [loadReport]);
 
-				<div className={tableOnly ? "flex min-h-0 flex-1 flex-col" : ""}>
-					<div className="mb-3 flex flex-wrap justify-end gap-2">
-						{canEditCurrentType ? (
-							<button
-								type="button"
-								onClick={openAddModal}
-								disabled={!selectedKodTypu}
-								className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#8ec5a1] bg-[#b9e8c9] px-3.5 font-semibold text-[#1f5130] text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.45)] transition-colors hover:bg-[#a5debb] disabled:cursor-not-allowed disabled:opacity-60"
-							>
-								<Plus size={15} />
-								Dodaj pozycję słownika
-							</button>
-						) : (
-							<span className="inline-flex h-10 items-center rounded-lg border border-slate-300 bg-slate-100 px-3.5 font-semibold text-slate-600 text-sm">
-								Tryb tylko do odczytu
-							</span>
-						)}
+	useEffect(() => {
+		const handleInspectionsChanged = () => {
+			void loadReport();
+		};
+
+		window.addEventListener(INSPECTIONS_CHANGED_EVENT, handleInspectionsChanged);
+		return () => {
+			window.removeEventListener(INSPECTIONS_CHANGED_EVENT, handleInspectionsChanged);
+		};
+	}, [loadReport]);
+
+	useEffect(() => {
+		const handlePointerDown = (event: MouseEvent) => {
+			if (!filtersRef.current) return;
+
+			const target = event.target;
+			if (!(target instanceof Node)) return;
+
+			if (!filtersRef.current.contains(target)) {
+				closeOpenFilters();
+			}
+		};
+
+		const handleEscape = (event: KeyboardEvent) => {
+			if (event.key === "Escape") {
+				closeOpenFilters();
+			}
+		};
+
+		document.addEventListener("mousedown", handlePointerDown);
+		document.addEventListener("keydown", handleEscape);
+
+		return () => {
+			document.removeEventListener("mousedown", handlePointerDown);
+			document.removeEventListener("keydown", handleEscape);
+		};
+	}, [closeOpenFilters]);
+
+	return (
+		<section className="flex h-[calc(100vh-4.4rem)] min-h-0 flex-col space-y-4 rounded-2xl border border-slate-700/70 bg-[#101f39] p-5 shadow-[0_18px_44px_rgba(2,8,23,0.34)]">
+			<div className="border-slate-700/70 border-b pb-2">
+				<div className="flex flex-wrap items-center justify-between gap-3">
+					<div>
+						<h2 className="font-semibold text-xl text-slate-100">Mapa inspekcji</h2>
 					</div>
 
-					<TableSurface
-						isLoading={isEntriesLoading}
-						loadingMessage="Ładowanie pozycji..."
-						errorMessage={entriesError}
-						containerClassName={tableOnly ? "min-h-0 flex-1" : ""}
-						scrollAreaClassName={
-							tableOnly ? "h-full min-h-0 pr-2" : "h-[calc(100vh-19rem)] min-h-96 pr-2"
-						}
-					>
-					<table className="min-w-full table-fixed border-collapse text-slate-900 text-sm">
-						<thead className="sticky top-0 z-10">
-							<tr className="bg-slate-100 text-slate-800">
-								<th className="w-[48%] border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
-									{isTeamsSelected ? "Nazwa zespołu" : "Nazwa pełna"}
-								</th>
-								<th className="w-[22%] border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
-									{isTeamsSelected ? "Skrót nazwy zespołu" : "Nazwa skrócona"}
-								</th>
-								{isTeamsSelected ? (
-									<th className="w-[18%] border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
-										Kierownik
-									</th>
-								) : null}
-								<th className="whitespace-nowrap border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
-									Status
-								</th>
-								<th className="whitespace-nowrap border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
-									
-								</th>
-							</tr>
-						</thead>
-
-						<tbody>
-							{entries.map((entry) => (
-								<tr
-									key={`${entry.kodTypu}-${entry.kodPozycji}`}
-									className="border-slate-200 border-b text-slate-900 last:border-b-0 hover:bg-slate-50"
-								>
-									<td
-										className="break-words px-3 py-2.5 align-top whitespace-normal"
-										title={entry.nazwaPozycji}
-									>
-										{entry.nazwaPozycji}
-									</td>
-									<td
-										className="break-words px-3 py-2.5 align-top whitespace-normal"
-										title={entry.skrotPozycji || "-"}
-									>
-										{entry.skrotPozycji || "-"}
-									</td>
-									{isTeamsSelected ? (
-										<td
-											className="break-words px-3 py-2.5 align-top whitespace-normal"
-											title={entry.kierownikDisplayName || "-"}
-										>
-											{entry.kierownikDisplayName || "-"}
-										</td>
-									) : null}
-									<td className="whitespace-nowrap px-3 py-2.5">
-										<span
-											className={`inline-flex rounded-full px-2 py-0.5 font-semibold text-xs ${
-												entry.aktywny
-													? "bg-emerald-100 text-emerald-800"
-													: "bg-slate-200 text-slate-700"
-											}`}
-										>
-											{entry.aktywny ? "Aktywny" : "Nieaktywny"}
-										</span>
-									</td>
-									<td className="whitespace-nowrap px-3 py-2.5">
-										<button
-											type="button"
-											onClick={() =>
-												isTeamsSelected
-													? openTeamEditModal(entry)
-													: openDictionaryEditModal(entry)
-											}
-											disabled={!canEditCurrentType || (isTeamsSelected ? !entry.teamId : false)}
-											className="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2 py-1 font-semibold text-slate-700 text-xs transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-										>
-											<Pencil size={12} />
-											Edytuj
-										</button>
-									</td>
-								</tr>
-							))}
-
-							{!isEntriesLoading && entries.length === 0 ? (
-								<tr>
-									<td
-										colSpan={tableColumnCount}
-										className="px-3 py-8 text-center text-slate-500"
-									>
-										Brak pozycji dla wybranego typu słownika.
-									</td>
-								</tr>
-							) : null}
-						</tbody>
-					</table>
-					</TableSurface>
+					<div className="flex items-center gap-2">
+						<button
+							type="button"
+							onClick={handleExportToExcel}
+							disabled={isLoading || isExporting || filteredRows.length === 0}
+							className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#6ea3f0] bg-[#285186] px-3.5 font-medium text-sm text-slate-100 transition-colors hover:bg-[#3563a1] disabled:cursor-not-allowed disabled:opacity-70"
+						>
+							<Download size={14} />
+							{isExporting ? "Eksportowanie..." : "Eksportuj"}
+						</button>
+					</div>
 				</div>
 			</div>
 
-			{canEditCurrentType ? (
-				<AddDictionaryEntryModal
-					isOpen={isAddModalOpen}
-					isSubmitting={isAddingEntry}
-					error={addEntryError}
-					form={addEntryForm}
-					isTeamsType={isTeamsType}
-					teamLeaders={teamLeaders}
-					isTeamLeadersLoading={isTeamLeadersLoading}
-					onClose={closeAddModal}
-					onSubmit={handleSubmit}
-					onFormChange={setAddEntryForm}
-				/>
-			) : null}
-
-			{editingDictionaryEntry ? (
-				<div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-					<div
-						aria-hidden="true"
-						className="absolute inset-0 bg-slate-950/65"
-					/>
-
-					<div
-						role="dialog"
-						aria-modal="true"
-						aria-label="Edytuj pozycję słownika"
-						className="relative z-10 w-full max-w-2xl rounded-2xl border border-slate-300 bg-white p-4 text-slate-900 shadow-[0_24px_56px_rgba(2,8,23,0.35)] sm:p-5"
-					>
-						<div className="mb-4 flex items-center justify-between gap-3 border-slate-200 border-b pb-3">
-							<div>
-								<h3 className="font-semibold text-base text-slate-900">
-									Edytuj pozycję słownika
-								</h3>
-							</div>
-
-							<button
-								type="button"
-								onClick={closeDictionaryEditModal}
-								className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-600 transition-colors hover:bg-slate-100"
-							>
-								<X size={14} />
-							</button>
-						</div>
-
-						<form className="space-y-4" onSubmit={handleSubmitDictionaryEdit}>
-							<div className="grid gap-3 sm:grid-cols-2">
-								<label className="text-slate-700 text-sm">
-									<span className="mb-1 block">Nazwa pełna *</span>
-									<input
-										required
-										value={editDictionaryForm.nazwaPozycji}
-										onChange={(event) =>
-											setEditDictionaryForm((previous) => ({
-												...previous,
-												nazwaPozycji: event.target.value,
-											}))
-										}
-										className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-400"
-									/>
-								</label>
-
-								<label className="text-slate-700 text-sm">
-									<span className="mb-1 block">Nazwa skrócona</span>
-									<input
-										value={editDictionaryForm.skrotPozycji}
-										onChange={(event) =>
-											setEditDictionaryForm((previous) => ({
-												...previous,
-												skrotPozycji: event.target.value,
-											}))
-										}
-										className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-400"
-									/>
-								</label>
-							</div>
-
-							<label className="inline-flex items-center gap-2 text-slate-700 text-sm">
-								<input
-									type="checkbox"
-									checked={editDictionaryForm.aktywny}
-									onChange={(event) =>
-										setEditDictionaryForm((previous) => ({
-											...previous,
-											aktywny: event.target.checked,
-										}))
-									}
+			<div ref={filtersRef} className="space-y-2 rounded-lg border border-slate-700/70 bg-[#122c4e] p-3">
+				<div className="flex flex-wrap items-center justify-between gap-2">
+					<div className="flex flex-wrap items-center gap-2">
+						<details
+							className="group relative"
+							onToggle={(event) => handleFilterToggle(event.currentTarget)}
+						>
+							<summary className="inline-flex w-52 cursor-pointer list-none items-center justify-between rounded-md border border-slate-300 bg-white px-3 py-2 font-medium text-slate-800 text-sm transition-colors hover:bg-slate-50">
+								<span className="truncate">
+									{getSelectionLabel(
+										"Rodzaj podmiotu",
+										selectedEntityTypes.length,
+										allEntityTypes.length,
+									)}
+								</span>
+								<ChevronDown
+									size={14}
+									className="shrink-0 text-slate-500 transition-transform duration-150 group-open:rotate-180"
 								/>
-								Aktywny
-							</label>
-
-							{editDictionaryError ? (
-								<p className="font-medium text-rose-600 text-sm">
-									{editDictionaryError}
-								</p>
-							) : null}
-
-							<div className="flex flex-wrap justify-end gap-2 border-slate-200 border-t pt-3">
-								<button
-									type="button"
-									onClick={closeDictionaryEditModal}
-									className="inline-flex h-9 items-center rounded-lg border border-slate-300 bg-transparent px-3 font-semibold text-slate-700 text-sm transition-colors hover:bg-slate-100"
-								>
-									Anuluj
-								</button>
-
-								<button
-									type="submit"
-									disabled={isSubmittingDictionaryEdit}
-									className="inline-flex h-9 items-center rounded-lg border border-[#6ea3f0] bg-[#2d4d7f] px-3 font-semibold text-slate-100 text-sm transition-colors hover:bg-[#375f99] disabled:cursor-not-allowed disabled:opacity-70"
-								>
-									{isSubmittingDictionaryEdit
-										? "Zapisywanie..."
-										: "Zapisz zmiany"}
-								</button>
+							</summary>
+							<div className="absolute left-0 z-30 mt-2 w-80 rounded-lg border border-slate-300 bg-slate-100 p-2 shadow-[0_14px_28px_rgba(2,8,23,0.24)]">
+								<input
+									type="text"
+									value={entityTypeSearch}
+									onChange={(event) => setEntityTypeSearch(event.target.value)}
+									placeholder="Szukaj rodzaju podmiotu"
+									className="w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-slate-700 text-sm outline-none placeholder:text-slate-400 focus:border-slate-400"
+								/>
+								<div className="subtle-vertical-scroll mt-2 max-h-36 space-y-1 overflow-auto pr-1">
+									{visibleEntityTypeOptions.map((entityType) => {
+										const isSelected = selectedEntityTypes.includes(entityType);
+										return (
+											<label
+												key={entityType}
+												className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-slate-700 text-sm hover:bg-slate-200/70"
+												title={entityType}
+											>
+												<input
+													type="checkbox"
+													checked={isSelected}
+													onChange={() => toggleEntityType(entityType)}
+													className="h-3.5 w-3.5"
+												/>
+												<span className="truncate">{entityType}</span>
+											</label>
+										);
+									})}
+									{visibleEntityTypeOptions.length === 0 ? (
+										<p className="px-2 py-1 text-slate-500 text-sm">Brak wyników.</p>
+									) : null}
+								</div>
 							</div>
-						</form>
+						</details>
+
+						<details
+							className="group relative"
+							onToggle={(event) => handleFilterToggle(event.currentTarget)}
+						>
+							<summary className="inline-flex w-44 cursor-pointer list-none items-center justify-between rounded-md border border-slate-300 bg-white px-3 py-2 font-medium text-slate-800 text-sm transition-colors hover:bg-slate-50">
+								<span className="truncate">
+									{getSelectionLabel("Podmioty", selectedPlants.length, allPlants.length)}
+								</span>
+								<ChevronDown
+									size={14}
+									className="shrink-0 text-slate-500 transition-transform duration-150 group-open:rotate-180"
+								/>
+							</summary>
+							<div className="absolute left-0 z-30 mt-2 w-80 rounded-lg border border-slate-300 bg-slate-100 p-2 shadow-[0_14px_28px_rgba(2,8,23,0.24)]">
+								<input
+									type="text"
+									value={plantSearch}
+									onChange={(event) => setPlantSearch(event.target.value)}
+									placeholder="Szukaj zakładu"
+									className="w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-slate-700 text-sm outline-none placeholder:text-slate-400 focus:border-slate-400"
+								/>
+								<div className="subtle-vertical-scroll mt-2 max-h-36 space-y-1 overflow-auto pr-1">
+									{visiblePlantOptions.map((plant) => {
+										const isSelected = selectedPlants.includes(plant);
+										return (
+											<label
+												key={plant}
+												className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-slate-700 text-sm hover:bg-slate-200/70"
+												title={plant}
+											>
+												<input
+													type="checkbox"
+													checked={isSelected}
+													onChange={() => togglePlant(plant)}
+													className="h-3.5 w-3.5"
+												/>
+												<span className="truncate">{plant}</span>
+											</label>
+										);
+									})}
+									{visiblePlantOptions.length === 0 ? (
+										<p className="px-2 py-1 text-slate-500 text-sm">Brak wyników.</p>
+									) : null}
+								</div>
+							</div>
+						</details>
+
+						<details
+							className="group relative"
+							onToggle={(event) => handleFilterToggle(event.currentTarget)}
+						>
+							<summary className="inline-flex w-44 cursor-pointer list-none items-center justify-between rounded-md border border-slate-300 bg-white px-3 py-2 font-medium text-slate-800 text-sm transition-colors hover:bg-slate-50">
+								<span className="truncate">
+									{getSelectionLabel("Rok", selectedYears.length, allYears.length)}
+								</span>
+								<ChevronDown
+									size={14}
+									className="shrink-0 text-slate-500 transition-transform duration-150 group-open:rotate-180"
+								/>
+							</summary>
+							<div className="absolute left-0 z-30 mt-2 w-56 rounded-lg border border-slate-300 bg-slate-100 p-2 shadow-[0_14px_28px_rgba(2,8,23,0.24)]">
+								<input
+									type="text"
+									value={yearSearch}
+									onChange={(event) => setYearSearch(event.target.value)}
+									placeholder="Szukaj roku"
+									className="w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-slate-700 text-sm outline-none placeholder:text-slate-400 focus:border-slate-400"
+								/>
+								<div className="subtle-vertical-scroll mt-2 max-h-36 space-y-1 overflow-auto pr-1">
+									{visibleYearOptions.map((year) => {
+										const isSelected = selectedYears.includes(year);
+										return (
+											<label
+												key={year}
+												className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-slate-700 text-sm hover:bg-slate-200/70"
+											>
+												<input
+													type="checkbox"
+													checked={isSelected}
+													onChange={() => toggleYear(year)}
+													className="h-3.5 w-3.5"
+												/>
+												<span>{year}</span>
+											</label>
+										);
+									})}
+									{visibleYearOptions.length === 0 ? (
+										<p className="px-2 py-1 text-slate-500 text-sm">Brak wyników.</p>
+									) : null}
+								</div>
+							</div>
+						</details>
+
+						<button
+							type="button"
+							onClick={() => setIsHeatmapEnabled((prev) => !prev)}
+							className={`inline-flex w-44 items-center justify-center rounded-md border px-3 py-2 font-medium text-sm transition-colors ${
+								isHeatmapEnabled
+									? "border-[#9fc6ff] bg-[#4477b7] text-slate-100"
+									: "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
+							}`}
+						>
+							Intensywność
+						</button>
+
+						{isHeatmapEnabled ? (
+							<div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-200">
+								<span className="rounded-md border border-[#4f6284] bg-[#1a3458] px-2 py-0.5 font-medium">
+									Mapa: liczba kontroli w komórce
+								</span>
+								<span className="rounded-md border border-[#d1dae7] bg-[#f2f5f9] px-1.5 py-0.5 text-[#526278]">
+									0
+								</span>
+								<span className="rounded-md border border-[#c3d8f6] bg-[#e2eeff] px-1.5 py-0.5 text-[#204874]">
+									1
+								</span>
+								<span className="rounded-md border border-[#a6c9f8] bg-[#bbd8ff] px-1.5 py-0.5 text-[#113f75]">
+									2
+								</span>
+								<span className="rounded-md border border-[#79a9e8] bg-[#8dbaf5] px-1.5 py-0.5 text-[#0d2e57]">
+									3+
+								</span>
+							</div>
+						) : null}
+					</div>
+
+					<div className="flex items-center">
+						<button
+							type="button"
+							onClick={clearFilters}
+							disabled={
+								selectedPlants.length === 0 &&
+								selectedEntityTypes.length === 0 &&
+								selectedYears.length === 0 &&
+								!isHeatmapEnabled
+							}
+							className={`inline-flex h-7 items-center rounded px-1.5 transition-colors disabled:cursor-not-allowed ${
+								selectedPlants.length > 0 ||
+								selectedEntityTypes.length > 0 ||
+								selectedYears.length > 0 ||
+								isHeatmapEnabled
+									? "font-semibold text-blue-300 text-sm hover:text-blue-200"
+									: "font-medium text-slate-500 text-xs"
+							}`}
+						>
+							Wyczyść filtry
+						</button>
 					</div>
 				</div>
+			</div>
+
+			{error ? (
+				<p className="rounded-lg border border-rose-300/60 bg-rose-100/90 px-3 py-2 text-rose-800 text-sm">
+					{error}
+				</p>
 			) : null}
 
-			{editingTeamEntry ? (
-				<div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-					<div
-						aria-hidden="true"
-						className="absolute inset-0 bg-slate-950/65"
-					/>
-
-					<div
-						role="dialog"
-						aria-modal="true"
-						aria-label="Edytuj zespół"
-						className="relative z-10 w-full max-w-xl rounded-2xl border border-slate-300 bg-white p-4 text-slate-900 shadow-[0_24px_56px_rgba(2,8,23,0.35)] sm:p-5"
-					>
-						<div className="mb-4 flex items-center justify-between gap-3 border-slate-200 border-b pb-3">
-							<div>
-								<h3 className="font-semibold text-base text-slate-900">
-									Edytuj zespół
-								</h3>
-								<p className="mt-1 text-slate-600 text-sm">
-									Skrót nazwy zespołu: {editingTeamEntry.kodPozycji}
-								</p>
-							</div>
-
-							<button
-								type="button"
-								onClick={closeTeamEditModal}
-								className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-600 transition-colors hover:bg-slate-100"
+			<div className="relative subtle-horizontal-scroll subtle-vertical-scroll table-scroll-gutter-right min-h-0 flex-1 w-full max-w-full overflow-x-auto overflow-y-auto rounded-xl border border-slate-400 bg-white shadow-[0_10px_28px_rgba(2,8,23,0.18)]">
+				{isLoading ? <TableLoadingOverlay /> : null}
+				<table className="w-full min-w-max border-collapse text-slate-900 text-sm">
+					<thead>
+						<tr className="bg-slate-100 text-slate-800">
+							<th
+								className="sticky top-0 left-0 z-20 whitespace-nowrap border-slate-300 border-b border-r bg-slate-100 px-3 py-2 text-left font-semibold"
+								style={{ width: `${firstColumnWidthCh}ch`, minWidth: `${firstColumnWidthCh}ch` }}
 							>
-								<X size={14} />
-							</button>
-						</div>
-
-						<form className="space-y-4" onSubmit={handleSubmitTeamEdit}>
-							<label className="block text-slate-700 text-sm">
-								<span className="mb-1 block">Skrót nazwy zespołu *</span>
-								<input
-									required
-									value={editTeamCode}
-									onChange={(event) =>
-										setEditTeamCode(event.target.value.toUpperCase())
-									}
-									className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm uppercase outline-none transition-colors focus:border-blue-400"
-								/>
-							</label>
-
-							<label className="block text-slate-700 text-sm">
-								<span className="mb-1 block">Nazwa zespołu *</span>
-								<input
-									required
-									value={editTeamName}
-									onChange={(event) => setEditTeamName(event.target.value)}
-									className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-400"
-								/>
-							</label>
-
-							<div className="block">
-								<SingleSelectPortalField
-									label="Kierownik zespołu (opcjonalnie)"
-									value={editTeamLeaderId ? String(editTeamLeaderId) : ""}
-									options={teamLeaders.map((leader) => ({
-										value: String(leader.id),
-										label: leader.displayName,
-									}))}
-									placeholder="Bez kierownika"
-									onChange={(next) => setEditTeamLeaderId(next ? Number(next) : null)}
-									disabled={isTeamLeadersLoading}
-								/>
-								{isTeamLeadersLoading ? (
-									<p className="mt-1 text-slate-500 text-xs">
-										Ładowanie użytkowników...
-									</p>
-								) : null}
-							</div>
-
-							{editTeamError ? (
-								<p className="font-medium text-rose-600 text-sm">
-									{editTeamError}
-								</p>
-							) : null}
-
-							<div className="flex flex-wrap justify-end gap-2 border-slate-200 border-t pt-3">
-								<button
-									type="button"
-									onClick={closeTeamEditModal}
-									className="inline-flex h-9 items-center rounded-lg border border-slate-300 bg-transparent px-3 font-semibold text-slate-700 text-sm transition-colors hover:bg-slate-100"
+								Nazwa podmiotu
+							</th>
+							{visibleYears.map((year) => (
+								<th
+									key={year}
+									className="sticky top-0 z-10 whitespace-nowrap border-slate-300 border-b bg-slate-100 px-2.5 py-2 text-left font-semibold"
+									style={{
+										width: `${yearColumnWidthByYearPx[year] ?? 160}px`,
+										minWidth: `${yearColumnWidthByYearPx[year] ?? 160}px`,
+										maxWidth: `${yearColumnWidthByYearPx[year] ?? 160}px`,
+									}}
 								>
-									Anuluj
-								</button>
+									{year}
+								</th>
+							))}
+						</tr>
+					</thead>
 
-								<button
-									type="submit"
-									disabled={isSubmittingTeamEdit}
-									className="inline-flex h-9 items-center rounded-lg border border-[#6ea3f0] bg-[#2d4d7f] px-3 font-semibold text-slate-100 text-sm transition-colors hover:bg-[#375f99] disabled:cursor-not-allowed disabled:opacity-70"
+					<tbody>
+						{filteredRows.map((row) => (
+							<tr
+								key={row.nazwaPodmiotu}
+								className="border-slate-200 border-b bg-white transition-colors hover:bg-slate-50 last:border-b-0"
+							>
+								<td
+									className="sticky left-0 z-10 align-top whitespace-nowrap border-slate-200 border-r bg-white px-3 py-2.5 text-slate-900"
+									title={row.nazwaPodmiotu}
+									style={{ width: `${firstColumnWidthCh}ch`, maxWidth: `${firstColumnWidthCh}ch` }}
 								>
-									{isSubmittingTeamEdit ? "Zapisywanie..." : "Zapisz zmiany"}
-								</button>
-							</div>
-						</form>
-					</div>
-				</div>
-			) : null}
+									<span className="block truncate">{row.nazwaPodmiotu}</span>
+								</td>
+								{visibleYears.map((year) => (
+									<td
+										key={`${row.nazwaPodmiotu}-${year}`}
+										className={`px-2.5 py-2.5 align-top whitespace-normal wrap-break-word ${getCellIntensityClass(getControlsForCell(row, year).length)}`}
+										title={getCellTooltip(row, year)}
+										style={{
+											width: `${yearColumnWidthByYearPx[year] ?? 160}px`,
+											minWidth: `${yearColumnWidthByYearPx[year] ?? 160}px`,
+											maxWidth: `${yearColumnWidthByYearPx[year] ?? 160}px`,
+										}}
+									>
+										{(() => {
+											const controls = getControlsForCell(row, year);
+											if (controls.length === 0) {
+												return "-";
+											}
+
+											const sortedControls = [...controls].sort((left, right) => {
+												const rankDiff = getControlTypeRank(left) - getControlTypeRank(right);
+												if (rankDiff !== 0) {
+													return rankDiff;
+												}
+
+												return left.localeCompare(right, "pl", { sensitivity: "base" });
+											});
+
+											return (
+												<div className="space-y-1.5">
+													{sortedControls.map((controlLabel, index) => {
+														const parsed = parseControlLabel(controlLabel);
+														const entryClass = isHeatmapEnabled
+															? "rounded-md border border-slate-300/70 bg-transparent px-2 py-1"
+															: "rounded-md border border-slate-200 bg-white/85 px-2 py-1";
+														const typeBadgeClass =
+															parsed.type === "WN"
+																? "inline-flex min-w-7 items-center justify-center rounded-md border border-violet-400/80 bg-violet-100 px-1.5 py-0.5 font-bold text-[10px] leading-none tracking-wide text-violet-800"
+																: "inline-flex min-w-7 items-center justify-center rounded-md border border-purple-400/80 bg-purple-100 px-1.5 py-0.5 font-bold text-[10px] leading-none tracking-wide text-purple-800";
+
+														return (
+															<div
+																key={`${controlLabel}-${index}`}
+																className={entryClass}
+															>
+																<div className="flex items-start gap-2">
+																<span
+																	className={typeBadgeClass}
+																>
+																	{parsed.type}
+																</span>
+																<span
+																		className="min-w-0 flex-1 break-words text-[12px] leading-[1.3] text-slate-800"
+																	title={parsed.scopesLabel}
+																>
+																	{parsed.scopesLabel}
+																</span>
+																</div>
+															</div>
+														);
+													})}
+												</div>
+											);
+										})()}
+									</td>
+								))}
+							</tr>
+						))}
+
+						{!isLoading && filteredRows.length === 0 ? (
+							<tr>
+								<td
+									colSpan={Math.max(1, visibleYears.length + 1)}
+									className="px-3 py-6 text-center text-slate-500 text-sm"
+								>
+										{selectedPlants.length > 0 ||
+									selectedEntityTypes.length > 0 ||
+									selectedYears.length > 0
+										? "Brak rekordów dla wybranych filtrów."
+										: "Brak rekordów raportu."}
+								</td>
+							</tr>
+						) : null}
+
+						{isLoading ? (
+							<tr>
+								<td
+									colSpan={Math.max(1, visibleYears.length + 1)}
+									className="px-3 py-6 text-center text-slate-500 text-sm"
+								>
+									Ładowanie danych raportu...
+								</td>
+							</tr>
+						) : null}
+					</tbody>
+				</table>
+			</div>
 		</section>
 	);
 }
