@@ -1,3482 +1,2001 @@
-"use client";
+from __future__ import annotations
 
-import {
-	CalendarDays,
-	Pencil,
-	Plus,
-	Trash2,
-} from "lucide-react";
-import type { SetStateAction } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { DateCalendar } from "@mui/x-date-pickers/DateCalendar";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import { AdapterDateFns } from "@mui/x-date-pickers/AdapterDateFns";
-import { pl } from "date-fns/locale";
-import type { AuthRole } from "@/app/_components/home-tabs/types";
+from collections import defaultdict
+from datetime import date, datetime
+import re
+from statistics import median
+from typing import Any
+import unicodedata
 
-import { fetchDictionaryEntries } from "@/features/dictionaries/api";
-import type { DictionaryEntry } from "@/features/dictionaries/types";
-import {
-	type RawInspectionRow,
-	normalizeInspectionRow,
-} from "@/features/inspections/components/inspections-panel.utils";
-import { fetchObligatingDecisions } from "@/features/obligating-decisions/api";
-import { RecommendationsSuccessModal } from "@/features/recommendations/components/RecommendationsSuccessModal";
-import {
-	createRecommendation,
-	deleteRecommendation,
-	fetchRecommendations,
-	type RecommendationLockConflict,
-	updateRecommendation,
-} from "@/features/recommendations/api";
-import { fetchSanctionRequests } from "@/features/sanction-requests/api";
-import type {
-	RecommendationRead,
-	RecommendationWrite,
-} from "@/features/recommendations/types";
-import { DateListEditor } from "@/shared/components/forms/DateListEditor";
-import { RegistryFormScaffold } from "@/shared/components/forms/RegistryFormScaffold";
-import { SingleSelectPortalField } from "@/shared/components/forms/SingleSelectPortalField";
-import {
-	formatDatesInDisplayText,
-	formatIsoDateForDisplay,
-	toDateList,
-} from "@/shared/utils/date";
-import { DeleteSuccessModal } from "@/shared/components/DeleteSuccessModal";
-import { ExportConfigModal } from "@/shared/components/export/ExportConfigModal";
-import { RegistryDataTable } from "@/shared/components/table/RegistryDataTable";
-import { TableAdvancedFilterModal } from "@/shared/components/table/TableAdvancedFilterModal";
-import { TableColumnPickerModal } from "@/shared/components/table/TableColumnPickerModal";
-import { TablePanelToolbar } from "@/shared/components/table/TablePanelToolbar";
-import { TablePagination } from "@/shared/components/table/TablePagination";
-import {
-	addWorksheetWithStyles,
-	createStyledExportWorkbook,
-	saveWorkbookAsXlsx,
-} from "@/shared/utils/excel-export";
-import { getFloatingPanelAnchor } from "@/shared/utils/floating-panel";
-import { useTableState } from "@/shared/hooks/useTableState";
-import { useInactivityTimeout } from "@/shared/hooks/useInactivityTimeout";
-import { useRecordLock } from "@/shared/hooks/useRecordLock";
+from fastapi import APIRouter, Header, HTTPException, Query
+from pydantic import BaseModel
 
-const INACTIVITY_TIMEOUT_MS = 60_000; // 1 minuta (do testów)
-const INACTIVITY_WARNING_MS = 30_000; // 30 sekund ostrzeżenia
-const TABLE_PAGE_SIZE_OPTIONS = [20, 30, 50, 70, 100] as const;
-const NO_DATES_MARKER = "Brak";
-const RECOMMENDATIONS_COLUMN_WIDTHS_STORAGE_PREFIX =
-	"triangle.ui.recommendations.column-widths";
-const RECOMMENDATIONS_NAME_VARIANTS_STORAGE_PREFIX =
-	"triangle.ui.recommendations.name-variants";
-const RECOMMENDATIONS_TABLE_VIEW_STORAGE_PREFIX =
-	"triangle.ui.recommendations.table-view";
-const RECOMMENDATIONS_MIN_COLUMN_WIDTH = 90;
+from app.api.reports.generation_data import build_year_count_sections
+from app.db import get_connection
+from app.permissions import (
+	PERMISSION_RECOMMENDATIONS_READ,
+	PERMISSION_REPORTS_EXECUTED_INSPECTIONS_READ,
+	PERMISSION_REPORTS_PROTOCOL_TIME_READ,
+	PERMISSION_REPORTS_REPORT_TIME_READ,
+	require_permission,
+)
 
-type RecommendationsPanelProps = {
-	operatorLogin: string;
-	authRole: AuthRole;
-	isObserver?: boolean;
-};
 
-const RECOMMENDATIONS_CHANGED_EVENT = "recommendations:changed";
-const INSPECTIONS_CHANGED_EVENT = "inspections:changed";
-const DASHBOARD_OPEN_RECOMMENDATION_EVENT = "dashboard:open-recommendation";
-const DASHBOARD_OPEN_RECOMMENDATION_CODE_KEY =
-	"triangle.dashboard.openRecommendationCode";
-const DASHBOARD_OPEN_INSPECTION_EVENT = "dashboard:open-inspection";
-const DASHBOARD_OPEN_INSPECTION_CODE_KEY = "triangle.dashboard.openInspectionCode";
+router = APIRouter()
 
-function openInspectionFromDashboard(inspectionCode: string) {
-	const normalizedCode = inspectionCode.trim();
-	if (!normalizedCode || typeof window === "undefined") {
-		return;
-	}
 
-	window.sessionStorage.setItem(
-		DASHBOARD_OPEN_INSPECTION_CODE_KEY,
-		normalizedCode,
-	);
-	window.dispatchEvent(
-		new CustomEvent(DASHBOARD_OPEN_INSPECTION_EVENT, {
-			detail: { inspectionCode: normalizedCode },
-		}),
-	);
-}
+class InspectionsMatrixRow(BaseModel):
+	nazwa_podmiotu: str
+	rodzaj_podmiotu: str
+	wartosci: dict[str, str]
+	cells: dict[str, list[dict[str, Any]]]
 
-type RecommendationColumnKey =
-	| "lp"
-	| "kodZalecenia"
-	| "pozycja"
-	| "inspectionId"
-	| "nazwaPodmiotu"
-	| "terminWykonaniaZalecen"
-	| "status"
-	| "komentarz"
-	| "dataZalecenList"
-	| "dataAkceptacjiNotyWeryfikacjiList";
 
-type RecommendationColumn = {
-	key: RecommendationColumnKey;
-	label: string;
-};
+class InspectionsMatrixResponse(BaseModel):
+	formatVersion: str
+	lata: list[str]
+	rows: list[InspectionsMatrixRow]
 
-const RECOMMENDATION_COLUMNS: RecommendationColumn[] = [
-	{ key: "lp", label: "Lp." },
-	{ key: "kodZalecenia", label: "Id zalecenia" },
-	{ key: "inspectionId", label: "Id inspekcji" },
-	{ key: "nazwaPodmiotu", label: "Nazwa podmiotu" },
-	{ key: "terminWykonaniaZalecen", label: "Data zaleceń" },
-	{ key: "dataZalecenList", label: "Termin wykonania zaleceń" },
-	{ key: "pozycja", label: "Liczba zaleceń" },
+
+class InspectionsDetailedRow(BaseModel):
+	kod_inspekcji: str
+	nazwa_podmiotu: str
+	nazwa_podmiotu_skrocona: str | None = None
+	nazwa_podmiotu_skrot: str | None = None
+	nazwaPodmiotuSkrocona: str | None = None
+	nazwaPodmiotuSkrot: str | None = None
+	rodzaj_podmiotu: str | None = None
+	inspekcja: str
+	typ_inspekcji: str | None = None
+	status: str | None = None
+	status_inspekcji_skrot: str | None = None
+	status_inspekcji_id: int | None = None
+	status_inspekcji: str | None = None
+	zakres_inspekcji: str | None = None
+	typ_zakres_inspekcji: str
+	rok_poczatku: str
+	poczatek_inspekcji: str
+	koniec_inspekcji: str
+	inspektor_kierujacy: str
+	is_leader_current_user: bool = False
+	is_leader_in_manager_team: bool = False
+	is_member_current_user: bool = False
+	is_member_in_manager_team: bool = False
+	liczba_dni_od_konca_inspekcji_do_dzis: int | None = None
+	wartosc_liczbowa_przedzialu: int | None = None
+	wartosc_liczbowa_przedzialu_alt: int | None = None
+	osoba_kierujaca: str
+	zespol_osoby_kierujacej_kod: str
+	data_protokolu_sprawozdania: str | None = None
+	roznica_dni_miedzy_data_protokolu_a_koncem: int | None = None
+
+
+class InspectionsDetailedResponse(BaseModel):
+	rows: list[InspectionsDetailedRow]
+
+
+class InspectionsTimeAnalyticsResponse(BaseModel):
+	inspectionType: str
+	trendMode: str
+	selectedMetric: str
+	selectedMetricLabel: str
+	baseCount: int
+	filteredCount: int
+	teamOptions: list[str]
+	yearOptions: list[str]
+	detailRows: list[dict[str, Any]]
+	summaryColumns: list[dict[str, str]] = []
+	summaryRows: list[dict[str, Any]]
+	summaryPivotYears: list[str] = []
+	summaryPivotRows: list[dict[str, Any]] = []
+	trendRows: list[dict[str, Any]]
+	scatterRows: list[dict[str, Any]]
+	overallColumns: list[dict[str, str]] = []
+	overallRows: list[dict[str, Any]] = []
+	yearCountColumns: list[str] = []
+	yearCountRows: list[dict[str, Any]] = []
+	yearCountByTeamColumns: list[str] = []
+	yearCountByTeamRows: list[dict[str, Any]] = []
+	alertStatusCounts: list[dict[str, Any]] = []
+	alertPiszemyProtokolCount: int = 0
+
+
+class StageSummarySubgroup(BaseModel):
+	stageSubgroupCode: str
+	stageSubgroupLabel: str
+	stageSubgroupOrder: int
+	count: int
+	countTeam: int
+	countManagerAdded: int
+	countTeamAndManagerAdded: int
+
+
+class StageSummaryGroup(BaseModel):
+	stageGroupCode: str
+	stageGroupLabel: str
+	stageGroupOrder: int
+	count: int
+	countTeam: int
+	countManagerAdded: int
+	countTeamAndManagerAdded: int
+	subgroups: list[StageSummarySubgroup]
+
+
+class StageSummaryFlatSubgroup(BaseModel):
+	stageGroupCode: str
+	stageGroupLabel: str
+	stageGroupOrder: int
+	stageSubgroupCode: str
+	stageSubgroupLabel: str
+	stageSubgroupOrder: int
+	count: int
+	countTeam: int
+	countManagerAdded: int
+	countTeamAndManagerAdded: int
+
+
+class InspectionsStageSummaryResponse(BaseModel):
+	generatedAt: str
+	stageDictionaryVersion: str
+	totalInspections: int
+	qualityErrorCount: int
+	statuses: list[RecommendationStatusGroup]
+
+
+class RecommendationStatusGroup(BaseModel):
+	stageGroupCode: str
+	stageGroupLabel: str
+	stageGroupShortLabel: str | None = None
+	stageGroupOrder: int
+	count: int
+	countTeam: int
+	countManagerAdded: int
+	countTeamAndManagerAdded: int
+
+
+class RecommendationsStageSummaryResponse(BaseModel):
+	generatedAt: str
+	stageDictionaryVersion: str
+	totalRecommendations: int
+	qualityErrorCount: int
+	groups: list[RecommendationStatusGroup]
+
+
+class RecommendationsDetailedRow(BaseModel):
+	status: str
+	status_skrot: str | None = None
+	statusSkrot: str | None = None
+	kod_zalecenia: str | None = None
+	kod_inspekcji: str | None = None
+	kodZalecenia: str | None = None
+	kodInspekcji: str | None = None
+	nazwa_podmiotu: str
+	nazwa_podmiotu_skrocona: str | None = None
+	nazwa_podmiotu_skrot: str | None = None
+	nazwaPodmiotuSkrocona: str | None = None
+	nazwaPodmiotuSkrot: str | None = None
+	data_zalecen: str | None = None
+	termin_zalecen: str | None = None
+	termin_wykonania_zalecen: str | None = None
+	liczba_zalecen: int
+
+
+class RecommendationsDetailedResponse(BaseModel):
+	rows: list[RecommendationsDetailedRow]
+
+
+STAGE_DICTIONARY_VERSION = "1.0.0"
+RECOMMENDATIONS_STAGE_DICTIONARY_VERSION = "1.0.0"
+
+STAGE_GROUPS: list[dict[str, Any]] = [
 	{
-		key: "dataAkceptacjiNotyWeryfikacjiList",
-		label: "Data akceptacji noty z weryfikacji wykonania zaleceń",
+		"code": "pre",
+		"label": "Przed inspekcja",
+		"order": 1,
+		"subgroups": [
+			{"code": "pre_planned", "label": "Plan", "order": 1},
+			{"code": "pre_preparation", "label": "Przygotowanie", "order": 2},
+		],
 	},
-	{ key: "status", label: "Status" },
-	{ key: "komentarz", label: "Komentarz" },
-];
+	{
+		"code": "during",
+		"label": "W trakcie inspekcji",
+		"order": 2,
+		"subgroups": [
+			{"code": "in_progress_active", "label": "Trwa", "order": 1},
+			{"code": "in_progress_report_writing", "label": "Zakonczona - piszemy", "order": 2},
+		],
+	},
+	{
+		"code": "post",
+		"label": "Po inspekcji",
+		"order": 3,
+		"subgroups": [
+			{"code": "post_protocol_sent", "label": "Przekazano protokol", "order": 1},
+			{"code": "post_post_visit_letter_sent", "label": "Przekazano pismo po wizycie", "order": 2},
+			{"code": "post_objections_received", "label": "Wplynely zastrzezenia", "order": 3},
+			{"code": "post_post_visit_response_received", "label": "Wplynela odpowiedz po wizycie", "order": 4},
+		],
+	},
+	{
+		"code": "recommendations",
+		"label": "Rekomendacje",
+		"order": 4,
+		"subgroups": [
+			{"code": "rec_writing_recommendations", "label": "Piszemy zalecenia/odstapienie", "order": 1},
+			{"code": "rec_findings_letter", "label": "Pismo ustalenia", "order": 2},
+		],
+	},
+	{
+		"code": "closed",
+		"label": "Zamkniete inspekcje",
+		"order": 5,
+		"subgroups": [
+			{"code": "closed_with_recommendations", "label": "Zamkniete - wydano zalecenia", "order": 1},
+			{"code": "closed_without_recommendations", "label": "Zamkniete - brak zalecen", "order": 2},
+		],
+	},
+	{
+		"code": "unknown",
+		"label": "Nieprzypisane",
+		"order": 99,
+		"subgroups": [
+			{"code": "unknown_unmapped", "label": "Brak mapowania", "order": 1},
+		],
+	},
+]
 
-const DEFAULT_RECOMMENDATION_COLUMN_WIDTHS: Partial<
-	Record<RecommendationColumnKey, number>
-> = {
-	lp: 90,
-	kodZalecenia: 170,
-	inspectionId: 170,
-	nazwaPodmiotu: 220,
-	terminWykonaniaZalecen: 180,
-	dataZalecenList: 230,
-	pozycja: 140,
-	dataAkceptacjiNotyWeryfikacjiList: 300,
-	status: 170,
-	komentarz: 240,
-};
-
-const RECOMMENDATION_COLUMN_TOOLTIPS: Partial<
-	Record<RecommendationColumnKey, string>
-> = {
-	kodZalecenia: "Unikalne id zalecenia",
-	inspectionId: "Unikalne id inspekcji",
-};
-
-const ALL_RECOMMENDATION_COLUMN_KEYS: RecommendationColumnKey[] =
-	RECOMMENDATION_COLUMNS.map((column) => column.key);
-
-type RecommendationFormState = {
-	inspectionId: string;
-	isInspectionMissing: boolean;
-	pozycja: string;
-	nazwaPodmiotu: string;
-	terminWykonaniaZalecen: string;
-	status: string;
-	komentarz: string;
-	dataZalecenList: string[];
-	dataAkceptacjiList: string[];
-	isDataZalecenBrak: boolean;
-	isDataAkceptacjiBrak: boolean;
-};
-
-type InspectionOption = {
-	id: number;
-	lp: number;
-	inspectionCode: string;
-	nazwaPodmiotu: string;
-	nazwaPodmiotuSkrocona: string;
-};
-
-type SelectOption = {
-	value: string;
-	label: string;
-};
-
-type RecommendationNameVariant = "full" | "short";
-
-type RecommendationNameVariantColumnKey = "nazwaPodmiotu" | "status";
-
-type RecommendationNameVariantByColumn = Record<
-	RecommendationNameVariantColumnKey,
-	RecommendationNameVariant
->;
-
-const RECOMMENDATION_NAME_VARIANT_COLUMN_KEYS: RecommendationNameVariantColumnKey[] =
-	["nazwaPodmiotu", "status"];
-
-const RECOMMENDATION_NAME_VARIANT_OPTIONS = [
-	{ value: "full", label: "Nazwa pełna" },
-	{ value: "short", label: "Nazwa skrócona" },
-] as const;
-
-const DEFAULT_RECOMMENDATION_NAME_VARIANTS: RecommendationNameVariantByColumn = {
-	nazwaPodmiotu: "short",
-	status: "full",
-};
-
-function isRecommendationNameVariantColumnKey(
-	columnKey: RecommendationColumnKey,
-): columnKey is RecommendationNameVariantColumnKey {
-	return RECOMMENDATION_NAME_VARIANT_COLUMN_KEYS.includes(
-		columnKey as RecommendationNameVariantColumnKey,
-	);
+STAGE_SUBGROUP_INDEX: dict[str, dict[str, Any]] = {
+	subgroup["code"]: {
+		"stage_group_code": group["code"],
+		"stage_group_label": group["label"],
+		"stage_group_order": int(group["order"]),
+		"stage_subgroup_code": subgroup["code"],
+		"stage_subgroup_label": subgroup["label"],
+		"stage_subgroup_order": int(subgroup["order"]),
+	}
+	for group in STAGE_GROUPS
+	for subgroup in group["subgroups"]
 }
 
-const INSPECTIONS_API_URL = "/api/structure/inspections";
-const AVAILABLE_INSPECTIONS_API_URL = "/api/recommendations/available-inspections";
 
-const BLOCKING_INSPECTION_STATUS_CODES = new Set([
-	"CLOSED_WITH_RECOMMENDATIONS",
-	"CLOSED_WITHOUT_RECOMMENDATIONS",
-]);
+def _resolve_operator(conn: Any, operator_login: str | None) -> dict[str, Any]:
+	login = (operator_login or "").strip()
+	if not login:
+		raise HTTPException(status_code=401, detail="Operator nie istnieje")
 
-const BLOCKING_INSPECTION_STATUS_FALLBACK_LABELS = new Set([
-	"zamkniete - brak zalecen i wniosku sankcyjnego",
+	row = conn.execute(
+		"""
+		SELECT id, login, rola_id, zespol_id, aktywny
+		FROM users
+		WHERE lower(login)=lower(?)
+		LIMIT 1
+		""",
+		(login,),
+	).fetchone()
+	if row is None:
+		raise HTTPException(status_code=401, detail="Operator nie istnieje")
+
+	operator = dict(row)
+	if int(operator["aktywny"]) != 1:
+		raise HTTPException(status_code=403, detail="Operator jest nieaktywny")
+
+	return operator
+
+
+def _year_from_date(value: str | None) -> str | None:
+	if value is None:
+		return None
+	cleaned = value.strip()
+	if len(cleaned) < 4:
+		return None
+	year = cleaned[:4]
+	if not year.isdigit():
+		return None
+	return year
+
+
+def _matrix_cell_value(typ_inspekcji: str | None, zakres_inspekcji: str | None) -> str:
+	typ_clean = (typ_inspekcji or "").strip()
+	zakres_clean = (zakres_inspekcji or "").strip()
+
+	first_letter = typ_clean[:1].upper() if typ_clean else ""
+	if first_letter and zakres_clean:
+		parts = [part.strip() for part in re.split(r"[;,]", zakres_clean) if part.strip()]
+		if parts:
+			return ", ".join(f"{first_letter}_{part}" for part in parts)
+		return f"{first_letter}_{zakres_clean}"
+	return "-"
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+	if value is None:
+		return None
+	cleaned = value.strip()
+	if len(cleaned) < 10:
+		return None
+	try:
+		return date.fromisoformat(cleaned[:10])
+	except ValueError:
+		return None
+
+
+def _days_difference(date_from: str | None, date_to: str | None) -> int | None:
+	left = _parse_iso_date(date_from)
+	right = _parse_iso_date(date_to)
+	if left is None or right is None:
+		return None
+	# Analytics in "czas protokolu" should not expose negative durations.
+	return max((left - right).days, 0)
+
+
+def _days_from_end_to_today(end_date: str | None) -> int | None:
+	parsed_end = _parse_iso_date(end_date)
+	if parsed_end is None:
+		return None
+	return (date.today() - parsed_end).days
+
+
+def _end_to_today_bucket(days_value: int | None) -> int | None:
+	if days_value is None:
+		return None
+	if days_value < 21:
+		return 0
+	if days_value <= 26:
+		return 1
+	if days_value <= 29:
+		return 2
+	if days_value > 29:
+		return 3
+	return None
+
+
+def _end_to_today_bucket_alt(days_value: int | None) -> int | None:
+	if days_value is None:
+		return None
+	if days_value < 14:
+		return 0
+	if days_value <= 21:
+		return 1
+	if days_value <= 28:
+		return 2
+	if days_value > 29:
+		return 3
+	return None
+
+
+def _inspekcja_code(typ_inspekcji: str | None) -> str:
+	cleaned = (typ_inspekcji or "").strip().lower()
+	if cleaned.startswith("kontrola"):
+		return "K"
+	if cleaned.startswith("wizyta nadzorcza"):
+		return "W"
+	return "-"
+
+
+def _matrix_type_code(typ_inspekcji: str | None) -> str:
+	code = _inspekcja_code(typ_inspekcji)
+	if code == "W":
+		return "WN"
+	return code
+
+
+def _normalize_matrix_scopes(raw_scopes: str | None) -> list[str]:
+	if raw_scopes is None:
+		return []
+	parts: list[str] = []
+	for part in str(raw_scopes).split(";"):
+		cleaned = part.strip()
+		if cleaned and cleaned != "-":
+			parts.append(cleaned)
+	# Keep insertion order while removing duplicates.
+	return list(dict.fromkeys(parts))
+
+
+def _normalize_text_key(value: str | None) -> str:
+	cleaned = (value or "").strip().lower()
+	if not cleaned:
+		return ""
+	normalized = unicodedata.normalize("NFKD", cleaned)
+	ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+	return " ".join(ascii_only.split())
+
+
+def _normalize_code_key(value: str | None) -> str:
+	cleaned = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+	if not cleaned:
+		return ""
+	normalized = unicodedata.normalize("NFKD", cleaned)
+	ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+	return re.sub(r"_+", "_", ascii_only)
+
+
+def _resolve_stage_subgroup_code(status_code: str | None) -> str:
+	code = _normalize_code_key(status_code)
+	if code == "plan":
+		return "pre_planned"
+	if code == "przygotowanie":
+		return "pre_preparation"
+	if code == "trwa":
+		return "in_progress_active"
+	if code == "zakonczona_piszemy":
+		return "in_progress_report_writing"
+	if code.startswith("przekazano_protoko"):
+		return "post_protocol_sent"
+	if code == "przekazano_pismo_po_wizycie":
+		return "post_post_visit_letter_sent"
+	if code == "wplynely_zastrzezenia":
+		return "post_objections_received"
+	if code == "wplynela_odp_po_wizycie":
+		return "post_post_visit_response_received"
+	if code == "piszemy_zalecenia_odstapienie":
+		return "rec_writing_recommendations"
+	if code.startswith("pismo_ustalen"):
+		return "rec_findings_letter"
+	if "zamkn" in code and ("wydano_zalec" in code or "z_zalec" in code):
+		return "closed_with_recommendations"
+	if "zamkn" in code and ("brak_zalec" in code or "bez_zalec" in code):
+		return "closed_without_recommendations"
+	return "unknown_unmapped"
+
+
+def _stage_payload_from_status_code(status_code: str | None) -> dict[str, Any]:
+	subgroup_code = _resolve_stage_subgroup_code(status_code)
+	return dict(STAGE_SUBGROUP_INDEX.get(subgroup_code, STAGE_SUBGROUP_INDEX["unknown_unmapped"]))
+
+
+def _manager_scope_flags_for_inspection(conn: Any, inspection_id: int, manager: dict[str, Any]) -> tuple[bool, bool]:
+	team_id = manager.get("zespol_id")
+	has_team = team_id is not None
+
+	leader_row = conn.execute(
+		"""
+		SELECT u.zespol_id AS leader_team_id, u.created_by_user_id AS leader_created_by
+		FROM inspections i
+		LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
+		WHERE i.id = ?
+		LIMIT 1
+		""",
+		(int(inspection_id),),
+	).fetchone()
+
+	in_team_scope = False
+	in_added_scope = False
+	if leader_row is not None:
+		leader_team_id = leader_row["leader_team_id"]
+		leader_created_by = leader_row["leader_created_by"]
+		if has_team and leader_team_id is not None and int(leader_team_id) == int(team_id):
+			in_team_scope = True
+		if leader_created_by is not None and int(leader_created_by) == int(manager["id"]):
+			in_added_scope = True
+
+	if has_team:
+		member_row = conn.execute(
+			"""
+			SELECT
+				MAX(CASE WHEN u.zespol_id = ? THEN 1 ELSE 0 END) AS has_team_member,
+				MAX(CASE WHEN u.created_by_user_id = ? THEN 1 ELSE 0 END) AS has_added_member
+			FROM inspection_members im
+			JOIN users u ON u.id = im.user_id
+			WHERE im.inspection_id = ?
+			""",
+			(int(team_id), int(manager["id"]), int(inspection_id)),
+		).fetchone()
+	else:
+		member_row = conn.execute(
+			"""
+			SELECT
+				0 AS has_team_member,
+				MAX(CASE WHEN u.created_by_user_id = ? THEN 1 ELSE 0 END) AS has_added_member
+			FROM inspection_members im
+			JOIN users u ON u.id = im.user_id
+			WHERE im.inspection_id = ?
+			""",
+			(int(manager["id"]), int(inspection_id)),
+		).fetchone()
+	if member_row is not None:
+		in_team_scope = in_team_scope or int(member_row["has_team_member"] or 0) == 1
+		in_added_scope = in_added_scope or int(member_row["has_added_member"] or 0) == 1
+
+	return in_team_scope, in_added_scope
+
+
+_HIDDEN_STATUS_KEYS = {
+	"zamkniete - wydano zalecenia",
 	"zamkniete - brak zalecen",
-	"zamkniete - wydano zalecenia i sporzadzono wniosek sankcyjny",
-	"zamkniete - sporzadzono wniosek sankcyjny",
-]);
-
-function normalizeInspectionStatusLabel(value: string) {
-	return value
-		.normalize("NFD")
-		.replace(/[\u0300-\u036f]/g, "")
-		.toLowerCase()
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
-type InspectionExportColumnKey =
-	| "kodInspekcji"
-	| "nazwaPodmiotu"
-	| "typInspekcji"
-	| "zakresInspekcji"
-	| "szczegolyDotyczaceZakresu"
-	| "aspektKonsumencki"
-	| "poczatekInspekcji"
-	| "koniecInspekcji"
-	| "osobaKierujaca"
-	| "skladZespolu"
-	| "rynek"
-	| "rodzajPodmiotu"
-	| "dataProtokolu"
-	| "dataDoreczeniaProtokolu"
-	| "dataAkceptacjiSprawozdania"
-	| "dataDoreczeniaPisma"
-	| "dataPismaZastrzezenia"
-	| "dataWyslaniaPismaZZastrzezeniami"
-	| "dataWplywuPisma"
-	| "dataPismaZOdpowiedzia"
-	| "dataWyslaniaPismaZOdpowiedzia"
-	| "dataAkceptacjiNoty"
-	| "dataZalecen"
-	| "status"
-	| "komentarz";
-
-type SanctionExportColumnKey =
-	| "lp"
-	| "requestId"
-	| "inspectionLp"
-	| "nazwaPodmiotuObjetegoInspekcja"
-	| "nazwaPodmiotuObjetegoSankcjaList"
-	| "dataWniosku"
-	| "wniosekDo"
-	| "sankcjaList"
-	| "podstawaPrawnaSankcjiList"
-	| "naruszeniaSkutkujaceSankcjaList"
-	| "czyMamyInformacjeOWszczeciuPostepowania"
-	| "rozstrzygniecie"
-	| "komentarz";
-
-type DecisionExportColumnKey =
-	| "lp"
-	| "kodDecyzji"
-	| "kodZalecenia"
-	| "inspectionLp"
-	| "nazwaPodmiotu"
-	| "liczbaZalecen"
-	| "dataWszczeciaPostepowaniaIInstancji"
-	| "osobyProwadzaceIInstancjeList"
-	| "dataDecyzjiIInstancji"
-	| "dataDoreczeniaDecyzjiIInstancji"
-	| "rozstrzygniecieI"
-	| "dataWnioskuPonowneRozpatrzenie"
-	| "dataWplywuWnioskuPonowneRozpatrzenie"
-	| "osobyProwadzaceIIInstancjeList"
-	| "dataDecyzjiIIInstancji"
-	| "dataDoreczeniaDecyzjiIIInstancji"
-	| "rozstrzygniecieII"
-	| "komentarz";
-
-type ExportColumnDefinition<T extends string> = {
-	key: T;
-	label: string;
-};
-
-const INSPECTION_EXPORT_COLUMNS: ExportColumnDefinition<InspectionExportColumnKey>[] = [
-	{ key: "kodInspekcji", label: "Id inspekcji" },
-	{ key: "nazwaPodmiotu", label: "Nazwa podmiotu" },
-	{ key: "typInspekcji", label: "Typ inspekcji" },
-	{ key: "zakresInspekcji", label: "Zakres inspekcji według upoważnienia" },
-	{
-		key: "szczegolyDotyczaceZakresu",
-		label: "Szczegóły dotyczące zakresu",
-	},
-	{ key: "aspektKonsumencki", label: "Aspekt konsumencki" },
-	{ key: "poczatekInspekcji", label: "Początek inspekcji" },
-	{ key: "koniecInspekcji", label: "Koniec inspekcji" },
-	{ key: "osobaKierujaca", label: "Osoba kierująca kontrolą / wizytą" },
-	{ key: "skladZespolu", label: "Skład zespołu inspekcyjnego" },
-	{ key: "rynek", label: "Rynek" },
-	{ key: "rodzajPodmiotu", label: "Rodzaj podmiotu" },
-	{ key: "dataProtokolu", label: "Data protokołu / sprawozdania" },
-	{ key: "dataDoreczeniaProtokolu", label: "Data doręczenia protokołu" },
-	{
-		key: "dataAkceptacjiSprawozdania",
-		label: "Data akceptacji sprawozdania z wizyty",
-	},
-	{ key: "dataDoreczeniaPisma", label: "Data doręczenia pisma po wizycie" },
-	{
-		key: "dataPismaZastrzezenia",
-		label: "Data pisma z zastrzeżeniami do protokołu / pisma po wizycie",
-	},
-	{
-		key: "dataWyslaniaPismaZZastrzezeniami",
-		label: "Data wysłania pisma z zastrzeżeniami",
-	},
-	{
-		key: "dataWplywuPisma",
-		label: "Data wpływu pisma z zastrzeżeniami do protokołu / pisma po wizycie",
-	},
-	{
-		key: "dataPismaZOdpowiedzia",
-		label: "Data pisma z odpowiedzią na zastrzeżenia",
-	},
-	{
-		key: "dataWyslaniaPismaZOdpowiedzia",
-		label: "Data wysłania pisma z odpowiedzią na zastrzeżenia",
-	},
-	{ key: "dataAkceptacjiNoty", label: "Data akceptacji noty" },
-	{ key: "dataZalecen", label: "Data zaleceń" },
-	{ key: "status", label: "Status" },
-	{ key: "komentarz", label: "Komentarz" },
-];
-
-const SANCTION_EXPORT_COLUMNS: ExportColumnDefinition<SanctionExportColumnKey>[] = [
-	{ key: "lp", label: "Lp. wniosku" },
-	{ key: "requestId", label: "Id wniosku" },
-	{ key: "inspectionLp", label: "Id inspekcji" },
-	{
-		key: "nazwaPodmiotuObjetegoInspekcja",
-		label: "Nazwa podmiotu objętego inspekcją",
-	},
-	{
-		key: "nazwaPodmiotuObjetegoSankcjaList",
-		label: "Nazwa podmiotu objętego sankcją",
-	},
-	{ key: "dataWniosku", label: "Data wniosku" },
-	{ key: "wniosekDo", label: "Wniosek do" },
-	{ key: "sankcjaList", label: "Sankcja" },
-	{ key: "podstawaPrawnaSankcjiList", label: "Podstawa prawna sankcji" },
-	{
-		key: "naruszeniaSkutkujaceSankcjaList",
-		label: "Naruszenia skutkujące sankcją",
-	},
-	{
-		key: "czyMamyInformacjeOWszczeciuPostepowania",
-		label: "Informacja o wszczęciu postępowania",
-	},
-	{ key: "rozstrzygniecie", label: "Rozstrzygnięcie" },
-	{ key: "komentarz", label: "Komentarz" },
-];
-
-const DECISION_EXPORT_COLUMNS: ExportColumnDefinition<DecisionExportColumnKey>[] = [
-	{ key: "lp", label: "Lp." },
-	{ key: "kodDecyzji", label: "Id decyzji" },
-	{ key: "kodZalecenia", label: "Id zalecenia" },
-	{ key: "inspectionLp", label: "Id inspekcji" },
-	{ key: "nazwaPodmiotu", label: "Nazwa podmiotu" },
-	{ key: "liczbaZalecen", label: "Liczba zaleceń" },
-	{
-		key: "dataWszczeciaPostepowaniaIInstancji",
-		label: "Data wszczęcia postępowania administracyjnego I instancji",
-	},
-	{ key: "osobyProwadzaceIInstancjeList", label: "Osoby prowadzące I instancję" },
-	{ key: "dataDecyzjiIInstancji", label: "Data decyzji I instancji" },
-	{
-		key: "dataDoreczeniaDecyzjiIInstancji",
-		label: "Data doręczenia decyzji I instancji",
-	},
-	{ key: "rozstrzygniecieI", label: "Rozstrzygnięcie I instancji" },
-	{
-		key: "dataWnioskuPonowneRozpatrzenie",
-		label: "Data wniosku o ponowne rozpatrzenie sprawy",
-	},
-	{
-		key: "dataWplywuWnioskuPonowneRozpatrzenie",
-		label: "Data wpływu wniosku o ponowne rozpatrzenie sprawy",
-	},
-	{ key: "osobyProwadzaceIIInstancjeList", label: "Osoby prowadzące II instancję" },
-	{ key: "dataDecyzjiIIInstancji", label: "Data decyzji II instancji" },
-	{
-		key: "dataDoreczeniaDecyzjiIIInstancji",
-		label: "Data doręczenia decyzji II instancji",
-	},
-	{ key: "rozstrzygniecieII", label: "Rozstrzygnięcie II instancji" },
-	{ key: "komentarz", label: "Komentarz" },
-];
-
-const EMPTY_FORM: RecommendationFormState = {
-	inspectionId: "",
-	isInspectionMissing: false,
-	pozycja: "",
-	nazwaPodmiotu: "",
-	terminWykonaniaZalecen: "",
-	status: "",
-	komentarz: "",
-	dataZalecenList: [],
-	dataAkceptacjiList: [],
-	isDataZalecenBrak: false,
-	isDataAkceptacjiBrak: false,
-};
-
-function resolveSetStateAction<T>(
-	nextValue: SetStateAction<T>,
-	prevValue: T,
-): T {
-	if (typeof nextValue === "function") {
-		return (nextValue as (prev: T) => T)(prevValue);
-	}
-
-	return nextValue;
-}
-
-function mapDictionaryEntriesToOptions(entries: DictionaryEntry[]): SelectOption[] {
-	const mappedOptions = entries
-		.filter((entry) => entry.aktywny)
-		.sort((left, right) => {
-			const leftOrder = left.kolejnosc ?? Number.MAX_SAFE_INTEGER;
-			const rightOrder = right.kolejnosc ?? Number.MAX_SAFE_INTEGER;
-			if (leftOrder !== rightOrder) {
-				return leftOrder - rightOrder;
-			}
-
-			return left.nazwaPozycji.localeCompare(right.nazwaPozycji, "pl", {
-				sensitivity: "base",
-			});
-		})
-		.map((entry) => {
-			const value = entry.nazwaPozycji.trim();
-			const shortLabel = String(entry.skrotPozycji ?? "").trim();
-			const label = shortLabel || value;
-
-			if (!value) {
-				return null;
-			}
-
-			return { value, label };
-		})
-		.filter((option): option is SelectOption => Boolean(option));
-
-	const uniqueByValue = new Map<string, SelectOption>();
-	for (const option of mappedOptions) {
-		if (!uniqueByValue.has(option.value)) {
-			uniqueByValue.set(option.value, option);
-		}
-	}
-
-	return Array.from(uniqueByValue.values());
-}
-
-function formatDateListDisplay(values: string[], isNoDatesSelected: boolean) {
-	if (isNoDatesSelected) {
-		return NO_DATES_MARKER;
-	}
-
-	const normalizedDates = toDateList(values);
-	if (normalizedDates.length === 0) {
-		return "-";
-	}
-
-	return normalizedDates
-		.map((date) => formatIsoDateForDisplay(date) || date)
-		.join(", ");
-}
-
-function formatDateListDisplayLines(values: string[], isNoDatesSelected: boolean) {
-	if (isNoDatesSelected) {
-		return [NO_DATES_MARKER];
-	}
-
-	const normalizedDates = toDateList(values);
-	if (normalizedDates.length === 0) {
-		return ["-"];
-	}
-
-	return normalizedDates.map((date) => formatIsoDateForDisplay(date) || date);
-}
-
-function formToPayload(
-	form: RecommendationFormState,
-): RecommendationWrite | null {
-	const inspectionId = Number(form.inspectionId);
-	const pozycja = Number(form.pozycja);
-
-	if (!Number.isFinite(pozycja) || pozycja <= 0) {
-		return null;
-	}
-
-	if (
-		!form.isInspectionMissing &&
-		(!Number.isFinite(inspectionId) || inspectionId <= 0)
-	) {
-		return null;
-	}
-
-	const normalizedListDates = form.isDataZalecenBrak
-		? []
-		: toDateList(form.dataZalecenList);
-	const singleDate = form.terminWykonaniaZalecen.trim() || null;
-
-	return {
-		inspectionId: form.isInspectionMissing ? null : inspectionId,
-		pozycja,
-		nazwaPodmiotu: form.nazwaPodmiotu.trim(),
-		dataZalecen: singleDate,
-		terminyWykonaniaZalecenList: normalizedListDates,
-		brakTerminowWykonaniaZalecen: form.isDataZalecenBrak,
-		brakDatAkceptacjiNotyWeryfikacji: form.isDataAkceptacjiBrak,
-		terminWykonaniaZalecen: singleDate,
-		status: form.status.trim() || null,
-		komentarz: form.komentarz.trim() || null,
-		dataZalecenList: normalizedListDates,
-		dataAkceptacjiNotyWeryfikacjiList: form.isDataAkceptacjiBrak
-			? []
-			: toDateList(form.dataAkceptacjiList),
-	};
-}
-
-function recommendationToForm(
-	item: RecommendationRead,
-): RecommendationFormState {
-	const hasInspectionLink =
-		typeof item.inspectionId === "number" &&
-		Number.isFinite(item.inspectionId) &&
-		item.inspectionId > 0;
-	const normalizedStatus = String(item.status ?? "").trim();
-	const statusValue =
-		normalizedStatus.toLowerCase() === "brak" ? "" : normalizedStatus;
-
-	return {
-		inspectionId: hasInspectionLink ? String(item.inspectionId) : "",
-		isInspectionMissing: !hasInspectionLink,
-		pozycja: String(item.pozycja),
-		nazwaPodmiotu: item.nazwaPodmiotu,
-		terminWykonaniaZalecen: item.dataZalecen ?? item.terminWykonaniaZalecen ?? "",
-		status: statusValue,
-		komentarz: item.komentarz ?? "",
-		dataZalecenList: toDateList(
-			item.terminyWykonaniaZalecenList.length > 0
-				? item.terminyWykonaniaZalecenList
-				: item.dataZalecenList,
-		),
-		dataAkceptacjiList: toDateList(item.dataAkceptacjiNotyWeryfikacjiList),
-		isDataZalecenBrak: item.brakTerminowWykonaniaZalecen === true,
-		isDataAkceptacjiBrak: item.brakDatAkceptacjiNotyWeryfikacji === true,
-	};
-}
-
-function formatLockStartHourMinute(value: string | null | undefined) {
-	if (!value) {
-		return "--:--";
-	}
-
-	const date = new Date(value);
-	if (Number.isNaN(date.getTime())) {
-		return "--:--";
-	}
-
-	return new Intl.DateTimeFormat("pl-PL", {
-		hour: "2-digit",
-		minute: "2-digit",
-		hour12: false,
-	}).format(date);
 }
 
 
-function parseIsoDate(value: string): Date | undefined {
-	if (!value) {
-		return undefined;
-	}
+def _is_hidden_status(value: str | None) -> bool:
+	return _normalize_text_key(value) in _HIDDEN_STATUS_KEYS
 
-	const [yearText, monthText, dayText] = value.split("-");
-	const year = Number(yearText);
-	const month = Number(monthText);
-	const day = Number(dayText);
-	if (
-		!Number.isInteger(year) ||
-		!Number.isInteger(month) ||
-		!Number.isInteger(day) ||
-		month < 1 ||
-		month > 12 ||
-		day < 1 ||
-		day > 31
-	) {
-		return undefined;
-	}
 
-	const date = new Date(year, month - 1, day);
-	if (
-		date.getFullYear() !== year ||
-		date.getMonth() !== month - 1 ||
-		date.getDate() !== day
-	) {
-		return undefined;
-	}
+def _is_hidden_status_code(status_code: str | None) -> bool:
+	code = _normalize_code_key(status_code)
+	if "zamkn" not in code:
+		return False
+	return ("wydano_zalec" in code) or ("z_zalec" in code) or ("brak_zalec" in code) or ("bez_zalec" in code)
 
-	return date;
-}
 
-function toIsoDateValue(date: Date) {
-	const year = date.getFullYear();
-	const month = String(date.getMonth() + 1).padStart(2, "0");
-	const day = String(date.getDate()).padStart(2, "0");
-	return `${year}-${month}-${day}`;
-}
+def _public_status_label(value: str | None) -> str:
+	label = str(value or "-").strip() or "-"
+	if _is_hidden_status(label):
+		return "-"
+	return label
 
-const MIN_CALENDAR_DATE = new Date(2016, 0, 1);
-const MAX_CALENDAR_DATE = new Date(2030, 11, 31);
 
-function clampDateToCalendarRange(date: Date) {
-	if (date < MIN_CALENDAR_DATE) {
-		return MIN_CALENDAR_DATE;
-	}
+def _should_compute_bucket_code(status_code: str | None) -> bool:
+	return _normalize_code_key(status_code) == "zakonczona_piszemy"
 
-	if (date > MAX_CALENDAR_DATE) {
-		return MAX_CALENDAR_DATE;
-	}
 
-	return date;
-}
+def _parse_csv_values(raw_value: str | list[str] | None) -> list[str]:
+	if raw_value is None:
+		return []
+	items = raw_value if isinstance(raw_value, list) else [raw_value]
+	parts: list[str] = []
+	for item in items:
+		for part in str(item).split(","):
+			cleaned = part.strip()
+			if cleaned:
+				parts.append(cleaned)
+	# Keep insertion order while removing duplicates.
+	return list(dict.fromkeys(parts))
 
-function formatDisplayDate(value: string) {
-	const parsed = parseIsoDate(value);
-	if (!parsed) {
-		return "";
-	}
 
-	const day = String(parsed.getDate()).padStart(2, "0");
-	const month = String(parsed.getMonth() + 1).padStart(2, "0");
-	const year = parsed.getFullYear();
-	return `${day}.${month}.${year}`;
-}
+def _can_access_inspection_for_reports(conn: Any, inspection_row: dict[str, Any], operator: dict[str, Any]) -> bool:
+	if int(operator["rola_id"]) == 3:
+		return True
+	if int(operator["rola_id"]) == 4:
+		return True
 
-function DateFieldWithClear({
-	label,
-	value,
-	onChange,
-	disabled = false,
-}: {
-	label: string;
-	value: string;
-	onChange: (next: string) => void;
-	disabled?: boolean;
-}) {
-	const [isCalendarOpen, setIsCalendarOpen] = useState(false);
-	const [calendarView, setCalendarView] = useState<"year" | "month" | "day">(
-		"day",
-	);
-	const containerRef = useRef<HTMLDivElement | null>(null);
-	const popupRef = useRef<HTMLDivElement | null>(null);
-	const [popupPosition, setPopupPosition] = useState<{
-		top: number;
-		left: number;
-	} | null>(null);
-	const [tempDate, setTempDate] = useState<Date | null>(() =>
-		parseIsoDate(value) ?? null,
-	);
-	const popupWidth = calendarView === "day" ? 288 : 336;
-	const popupHeight = calendarView === "day" ? 420 : 372;
+	inspection_id = int(inspection_row["id"])
 
-	const updatePopupPosition = () => {
-		const anchor = containerRef.current;
-		if (!anchor) {
-			return;
+	if int(operator["rola_id"]) == 2:
+		operator_team_id = operator.get("zespol_id")
+		has_team = operator_team_id is not None
+
+		if has_team:
+			leader_row = conn.execute(
+				"""
+				SELECT 1
+				FROM inspections i
+				JOIN users u ON u.id = i.osoba_kierujaca_user_id
+				WHERE i.id = ?
+				  AND (
+				      u.zespol_id = ?
+				      OR u.created_by_user_id = ?
+				  )
+				LIMIT 1
+				""",
+				(inspection_id, int(operator_team_id), int(operator["id"])),
+			).fetchone()
+		else:
+			leader_row = conn.execute(
+				"""
+				SELECT 1
+				FROM inspections i
+				JOIN users u ON u.id = i.osoba_kierujaca_user_id
+				WHERE i.id = ?
+				  AND u.created_by_user_id = ?
+				LIMIT 1
+				""",
+				(inspection_id, int(operator["id"])),
+			).fetchone()
+		if leader_row is not None:
+			return True
+
+		if has_team:
+			member_team_row = conn.execute(
+				"""
+				SELECT 1
+				FROM inspection_members im
+				JOIN users u ON u.id = im.user_id
+				WHERE im.inspection_id = ?
+				  AND (
+				      u.zespol_id = ?
+				      OR u.created_by_user_id = ?
+				  )
+				LIMIT 1
+				""",
+				(inspection_id, int(operator_team_id), int(operator["id"])),
+			).fetchone()
+		else:
+			member_team_row = conn.execute(
+				"""
+				SELECT 1
+				FROM inspection_members im
+				JOIN users u ON u.id = im.user_id
+				WHERE im.inspection_id = ?
+				  AND u.created_by_user_id = ?
+				LIMIT 1
+				""",
+				(inspection_id, int(operator["id"])),
+			).fetchone()
+		return member_team_row is not None
+
+	created_by_user_id = inspection_row.get("created_by_user_id")
+	if created_by_user_id is not None and int(created_by_user_id) == int(operator["id"]):
+		return True
+
+	member_row = conn.execute(
+		"SELECT 1 FROM inspection_members WHERE inspection_id = ? AND user_id = ? LIMIT 1",
+		(inspection_id, int(operator["id"])),
+	).fetchone()
+	if member_row is not None:
+		return True
+
+	leader_row = conn.execute(
+		"SELECT 1 FROM inspections WHERE id = ? AND osoba_kierujaca_user_id = ? LIMIT 1",
+		(inspection_id, int(operator["id"])),
+	).fetchone()
+	return leader_row is not None
+
+
+def _can_access_recommendation_for_reports(conn: Any, recommendation_row: dict[str, Any], operator: dict[str, Any]) -> bool:
+	if int(operator["rola_id"]) == 3:
+		return True
+
+	inspection_id_raw = recommendation_row.get("inspection_id")
+	if inspection_id_raw is not None:
+		inspection_row = {
+			"id": int(inspection_id_raw),
+			"created_by_user_id": recommendation_row.get("inspection_created_by_user_id"),
+		}
+		return _can_access_inspection_for_reports(conn, inspection_row, operator)
+
+	author_id_raw = recommendation_row.get("recommendation_created_by_user_id")
+	if author_id_raw is None:
+		return False
+	author_id = int(author_id_raw)
+
+	if author_id == int(operator["id"]):
+		return True
+
+	if int(operator["rola_id"]) == 2:
+		author_team_id = recommendation_row.get("recommendation_author_team_id")
+		author_created_by = recommendation_row.get("recommendation_author_created_by_user_id")
+		if author_created_by is not None and int(author_created_by) == int(operator["id"]):
+			return True
+		operator_team_id = operator.get("zespol_id")
+		if operator_team_id is None or author_team_id is None:
+			return False
+		return int(author_team_id) == int(operator_team_id)
+
+	return False
+
+
+def _safe_average(values: list[int]) -> float | None:
+	if not values:
+		return None
+	return float(sum(values)) / float(len(values))
+
+
+def _metric_from_values(values: list[int], trend_mode: str) -> float | None:
+	if not values:
+		return None
+	if trend_mode == "average":
+		return _safe_average(values)
+	return float(median(values))
+
+
+def _is_member_current_user(conn: Any, inspection_id: int, operator_id: int) -> bool:
+	row = conn.execute(
+		"SELECT 1 FROM inspection_members WHERE inspection_id = ? AND user_id = ? LIMIT 1",
+		(int(inspection_id), int(operator_id)),
+	).fetchone()
+	return row is not None
+
+
+def _is_leader_in_manager_scope(conn: Any, leader_user_id: int | None, operator: dict[str, Any]) -> bool:
+	if int(operator.get("rola_id", 0)) != 2:
+		return False
+	if leader_user_id is None:
+		return False
+	operator_team_id = operator.get("zespol_id")
+	if operator_team_id is None:
+		return False
+	row = conn.execute(
+		"""
+		SELECT 1
+		FROM users u
+		WHERE u.id = ?
+		  AND (
+		      u.zespol_id = ?
+		      OR u.created_by_user_id = ?
+		  )
+		LIMIT 1
+		""",
+		(int(leader_user_id), int(operator_team_id), int(operator["id"])),
+	).fetchone()
+	return row is not None
+
+
+def _is_member_in_manager_scope(conn: Any, inspection_id: int, operator: dict[str, Any]) -> bool:
+	if int(operator.get("rola_id", 0)) != 2:
+		return False
+	operator_team_id = operator.get("zespol_id")
+	if operator_team_id is None:
+		return False
+	row = conn.execute(
+		"""
+		SELECT 1
+		FROM inspection_members im
+		JOIN users u ON u.id = im.user_id
+		WHERE im.inspection_id = ?
+		  AND (
+		      u.zespol_id = ?
+		      OR u.created_by_user_id = ?
+		  )
+		LIMIT 1
+		""",
+		(int(inspection_id), int(operator_team_id), int(operator["id"])),
+	).fetchone()
+	return row is not None
+
+
+@router.get("/api/reports/inspections-time-analytics", response_model=InspectionsTimeAnalyticsResponse)
+def get_inspections_time_analytics(
+	x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
+	inspectionType: str = Query(...),
+	trendMode: str = Query("median"),
+	teams: str | None = Query(default=None),
+	years: list[str] | None = Query(default=None),
+) -> dict[str, Any]:
+	inspection_type = inspectionType.strip().upper()
+	if inspection_type not in {"K", "W"}:
+		raise HTTPException(status_code=400, detail="inspectionType musi byc K albo W")
+
+	trend_mode = trendMode.strip().lower()
+	if trend_mode not in {"average", "median"}:
+		raise HTTPException(status_code=400, detail="trendMode musi byc average albo median")
+	metric_label = "Srednia" if trend_mode == "average" else "Mediana"
+
+	team_filter = set(_parse_csv_values(teams))
+	year_filter = set(_parse_csv_values(years))
+
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+		require_permission(conn, operator, PERMISSION_REPORTS_REPORT_TIME_READ)
+		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
+			raise HTTPException(status_code=403, detail="Brak uprawnien")
+
+		operator_team_id = int(operator["zespol_id"]) if operator.get("zespol_id") is not None else None
+		operator_team_code = "-"
+		if operator_team_id is not None:
+			team_row = conn.execute("SELECT kod FROM teams WHERE id = ? LIMIT 1", (operator_team_id,)).fetchone()
+			if team_row is not None:
+				operator_team_code = str(team_row["kod"] or "-").strip() or "-"
+
+		operator_team_member_inspections: set[int] = set()
+		if operator_team_id is not None:
+			team_member_rows = conn.execute(
+				"""
+				SELECT DISTINCT im.inspection_id
+				FROM inspection_members im
+				JOIN users u ON u.id = im.user_id
+				WHERE u.zespol_id = ?
+				""",
+				(operator_team_id,),
+			).fetchall()
+			operator_team_member_inspections = {int(item["inspection_id"]) for item in team_member_rows}
+
+		rows = conn.execute(
+			"""
+			SELECT
+				i.id,
+				i.kod_inspekcji,
+				i.created_by_user_id,
+				i.poczatek_inspekcji,
+				i.koniec_inspekcji,
+				i.data_protokolu_sprawozdania,
+				i.status_inspekcji_id,
+				COALESCE(si.kod_pozycji, '') AS status_inspekcji_kod,
+				ti.nazwa_pozycji AS typ_inspekcji,
+				COALESCE(si.nazwa_pozycji, '-') AS status_inspekcji,
+				COALESCE(NULLIF(trim(si.skrot_pozycji), ''), si.nazwa_pozycji, '-') AS status_inspekcji_skrot,
+				COALESCE(NULLIF(trim(np.skrot_pozycji), ''), np.nazwa_pozycji, '-') AS nazwa_podmiotu,
+				COALESCE(u.login, '-') AS osoba_kierujaca,
+				COALESCE(t.kod, '-') AS zespol_osoby_kierujacej_kod,
+				u.zespol_id AS lead_team_id
+			FROM inspections i
+			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
+			LEFT JOIN slownik_pozycje si ON si.id = i.status_inspekcji_id
+			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
+			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
+			LEFT JOIN teams t ON t.id = u.zespol_id
+			ORDER BY i.id ASC
+			"""
+		).fetchall()
+
+	typed_rows: list[dict[str, Any]] = []
+	all_type_base_rows: list[dict[str, Any]] = []
+	base_rows: list[dict[str, Any]] = []
+	for raw_row in rows:
+		row = dict(raw_row)
+		row_type = _inspekcja_code(row.get("typ_inspekcji"))
+		if row_type not in {"K", "W"}:
+			continue
+
+		diff = _days_difference(row.get("data_protokolu_sprawozdania"), row.get("koniec_inspekcji"))
+		year = _year_from_date(row.get("poczatek_inspekcji"))
+		team_code = str(row.get("zespol_osoby_kierujacej_kod") or "-").strip() or "-"
+		status_label = _public_status_label(row.get("status_inspekcji"))
+		stage_payload = _stage_payload_from_status_code(row.get("status_inspekcji_kod"))
+		normalized_row = {
+			"inspectionId": int(row["id"]),
+			"kodInspekcji": str(row.get("kod_inspekcji") or "-").strip() or "-",
+			"inspekcja": row_type,
+			"statusInspekcjiId": int(row["status_inspekcji_id"]) if row.get("status_inspekcji_id") is not None else None,
+			"statusInspekcji": status_label,
+				"statusInspekcjiSkrot": str(row.get("status_inspekcji_skrot") or status_label or "-").strip() or "-",
+			"nazwaPodmiotu": str(row.get("nazwa_podmiotu") or "-").strip() or "-",
+			"osobaKierujaca": str(row.get("osoba_kierujaca") or "-").strip() or "-",
+			"rokPoczatku": year,
+			"poczatekInspekcji": row.get("poczatek_inspekcji"),
+			"koniecInspekcji": row.get("koniec_inspekcji"),
+			"data": row.get("data_protokolu_sprawozdania"),
+			"zespol": team_code,
+			"czas": diff,
+			"leadTeamId": row.get("lead_team_id"),
+			"stageGroupCode": stage_payload["stage_group_code"],
+			"stageGroupLabel": stage_payload["stage_group_label"],
+			"stageGroupOrder": stage_payload["stage_group_order"],
+			"stageSubgroupCode": stage_payload["stage_subgroup_code"],
+			"stageSubgroupLabel": stage_payload["stage_subgroup_label"],
+			"stageSubgroupOrder": stage_payload["stage_subgroup_order"],
 		}
 
-		const anchorRect = anchor.getBoundingClientRect();
-		const viewportPadding = 8;
-		const offset = 8;
-		const spaceBelow = window.innerHeight - anchorRect.bottom;
-		const canOpenUp =
-			spaceBelow < popupHeight + offset && anchorRect.top > popupHeight + offset;
-		const top = canOpenUp
-			? anchorRect.top - popupHeight - offset
-			: anchorRect.bottom + offset;
-		const left = Math.min(
-			Math.max(viewportPadding, anchorRect.right - popupWidth),
-			window.innerWidth - popupWidth - viewportPadding,
-		);
+		if _can_access_inspection_for_reports(conn, row, operator):
+			all_type_base_rows.append(normalized_row)
 
-		setPopupPosition({ top, left });
-	};
+		if row_type != inspection_type:
+			continue
 
-	useEffect(() => {
-		setTempDate(parseIsoDate(value) ?? null);
-	}, [value]);
+		typed_rows.append(normalized_row)
 
-	useEffect(() => {
-		if (!isCalendarOpen) {
-			setPopupPosition(null);
-			return;
-		}
+		if _can_access_inspection_for_reports(conn, row, operator):
+			base_rows.append(normalized_row)
 
-		updatePopupPosition();
-		const handleAnyScroll = (event: Event) => {
-			const target = event.target as Node | null;
-			if (target && popupRef.current?.contains(target)) {
-				return;
-			}
-			setIsCalendarOpen(false);
-		};
+	if year_filter:
+		rows_after_year = [row for row in base_rows if str(row.get("rokPoczatku") or "") in year_filter]
+	else:
+		rows_after_year = list(base_rows)
 
-		window.addEventListener("resize", updatePopupPosition);
-		window.addEventListener("scroll", handleAnyScroll, true);
-		return () => {
-			window.removeEventListener("resize", updatePopupPosition);
-			window.removeEventListener("scroll", handleAnyScroll, true);
-		};
-	}, [isCalendarOpen, calendarView]);
+	if team_filter:
+		filtered_rows = [row for row in rows_after_year if str(row.get("zespol") or "") in team_filter]
+	else:
+		filtered_rows = list(rows_after_year)
 
-	useEffect(() => {
-		if (!isCalendarOpen) {
-			return;
-		}
+	# Year-count section is intentionally based on all inspection types (K + W)
+	# and mirrors permission + team filtering used by this report.
+	rows_for_counts = list(all_type_base_rows)
+	if year_filter:
+		rows_for_counts = [row for row in rows_for_counts if str(row.get("rokPoczatku") or "") in year_filter]
+	if team_filter:
+		rows_for_counts = [row for row in rows_for_counts if str(row.get("zespol") or "") in team_filter]
 
-		const handlePointerDown = (event: MouseEvent) => {
-			const target = event.target as Node | null;
-			if (!target) {
-				return;
-			}
+	(
+		year_count_columns,
+		year_count_rows,
+		year_count_by_team_columns,
+		year_count_by_team_rows,
+	) = build_year_count_sections(rows_for_counts, inspection_type)
 
-			const isInsideAnchor =
-				containerRef.current && containerRef.current.contains(target);
-			const isInsidePopup = popupRef.current && popupRef.current.contains(target);
+	team_options = sorted({str(row["zespol"]) for row in base_rows if str(row.get("zespol") or "") not in {"", "-"}})
+	year_options = sorted({str(row["rokPoczatku"]) for row in base_rows if row.get("rokPoczatku") is not None}, reverse=True)
 
-			if (!isInsideAnchor && !isInsidePopup) {
-				setIsCalendarOpen(false);
-			}
-		};
+	def _is_valid_for_aggregations(row: dict[str, Any]) -> bool:
+		if row.get("rokPoczatku") is None:
+			return False
+		czas_value = row.get("czas")
+		return isinstance(czas_value, (int, float))
 
-		const handleEscape = (event: KeyboardEvent) => {
-			if (event.key === "Escape") {
-				setIsCalendarOpen(false);
-			}
-		};
+	agg_filtered_rows = [row for row in filtered_rows if _is_valid_for_aggregations(row)]
+	department_scope_rows = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
 
-		document.addEventListener("mousedown", handlePointerDown);
-		document.addEventListener("keydown", handleEscape);
+	summary_rows: list[dict[str, Any]] = []
+	overall_rows: list[dict[str, Any]] = []
+	all_year_metric_by_team: dict[str, float | None] = {}
+	overall_metric_key = "average" if trend_mode == "average" else "median"
+	overall_metric_label = "Srednia" if trend_mode == "average" else "Mediana"
 
-		return () => {
-			document.removeEventListener("mousedown", handlePointerDown);
-			document.removeEventListener("keydown", handleEscape);
-		};
-	}, [isCalendarOpen]);
+	if int(operator["rola_id"]) == 1:
+		if year_filter:
+			typed_rows_after_year = [row for row in typed_rows if str(row.get("rokPoczatku") or "") in year_filter]
+		else:
+			typed_rows_after_year = list(typed_rows)
+		typed_rows_all_year = list(typed_rows_after_year)
 
-	const handleClear = () => {
-		onChange("");
-		setTempDate(null);
-		setCalendarView("day");
-		setIsCalendarOpen(false);
-	};
+		department_user_scope_all_year = [row for row in typed_rows_all_year if _is_valid_for_aggregations(row)]
 
-	const handleToday = () => {
-		const today = clampDateToCalendarRange(new Date());
-		setTempDate(today);
-		onChange(toIsoDateValue(today));
-		setCalendarView("day");
-		setIsCalendarOpen(false);
-	};
+		department_user_scope = [row for row in typed_rows_after_year if _is_valid_for_aggregations(row)]
 
-	return (
-		<label className="text-slate-700 text-sm">
-			<span className="mb-1 block overflow-hidden text-ellipsis whitespace-nowrap">
-				{label}
-			</span>
-			<div ref={containerRef} className="relative">
-				<input
-					type="text"
-					value={formatDisplayDate(value)}
-					placeholder="dd.mm.rrrr"
-					readOnly
-					disabled={disabled}
-					onKeyDown={(event) => {
-						if (disabled || !value) {
-							return;
-						}
+		team_user_scope: list[dict[str, Any]] = []
+		team_user_scope_all_year: list[dict[str, Any]] = []
+		if operator_team_id is not None:
+			for row in typed_rows_all_year:
+				if not _is_valid_for_aggregations(row):
+					continue
+				lead_team_id = row.get("leadTeamId")
+				inspection_id = int(row["inspectionId"])
+				is_team_row = (lead_team_id is not None and int(lead_team_id) == int(operator_team_id)) or (inspection_id in operator_team_member_inspections)
+				if is_team_row:
+					team_user_scope_all_year.append(row)
 
-						if (event.key === "Backspace" || event.key === "Delete") {
-							event.preventDefault();
-							handleClear();
-						}
-					}}
-					onClick={() => {
-						if (!disabled) {
-							setIsCalendarOpen((prev) => {
-								const next = !prev;
-								if (next) {
-									setTempDate(parseIsoDate(value) ?? null);
-									setCalendarView("day");
-								}
-								return next;
-							});
-						}
-					}}
-					className="w-full cursor-pointer rounded-lg border border-slate-300 px-3 py-2 pr-10 text-sm outline-none transition-colors focus:border-blue-400 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-700"
-				/>
-				<button
-					type="button"
-					aria-label={`Otwórz kalendarz dla pola: ${label}`}
-					disabled={disabled}
-					onMouseDown={(event) => {
-						event.preventDefault();
-						event.stopPropagation();
-					}}
-					onClick={(event) => {
-						event.preventDefault();
-						event.stopPropagation();
-						if (disabled) {
-							return;
-						}
+			for row in typed_rows_after_year:
+				if not _is_valid_for_aggregations(row):
+					continue
+				lead_team_id = row.get("leadTeamId")
+				inspection_id = int(row["inspectionId"])
+				is_team_row = (lead_team_id is not None and int(lead_team_id) == int(operator_team_id)) or (inspection_id in operator_team_member_inspections)
+				if is_team_row:
+					team_user_scope.append(row)
 
-						setIsCalendarOpen((prev) => {
-							const next = !prev;
-							if (next) {
-								setTempDate(parseIsoDate(value) ?? null);
-								setCalendarView("day");
-							}
-							return next;
-						});
-					}}
-					className="absolute top-1/2 right-2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-600 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
-				>
-					<CalendarDays size={13} />
-				</button>
+		my_user_scope_all_year = [row for row in base_rows if _is_valid_for_aggregations(row)]
+		my_user_scope = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
 
-				{isCalendarOpen && !disabled && popupPosition
-					? createPortal(
-							<div
-								ref={popupRef}
-								className={`fixed z-[80] rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_16px_40px_rgba(15,23,42,0.14)] ${
-									calendarView === "day" ? "w-[18rem]" : "w-[21rem]"
-								}`}
-								style={{
-									top: popupPosition.top,
-									left: popupPosition.left,
-								}}
-							>
-								<LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={pl}>
-									<DateCalendar
-										value={tempDate}
-										onChange={(nextValue) => {
-											setTempDate(nextValue);
-											if (calendarView === "day" && nextValue) {
-												onChange(toIsoDateValue(nextValue));
-												setCalendarView("day");
-												setIsCalendarOpen(false);
-											}
-										}}
-										view={calendarView}
-										onViewChange={(nextView) => setCalendarView(nextView)}
-										views={["year", "month", "day"]}
-										openTo="day"
-										minDate={MIN_CALENDAR_DATE}
-										maxDate={MAX_CALENDAR_DATE}
-										referenceDate={tempDate ?? new Date()}
-										sx={{
-											width: "100%",
-											maxHeight: calendarView === "day" ? 336 : 356,
-											"& .MuiPickersCalendarHeader-root": {
-												paddingLeft: 0,
-												paddingRight: 0,
-												marginBottom: "0.35rem",
-											},
-											"& .MuiPickersCalendarHeader-label": {
-												fontSize: "1.05rem",
-												fontWeight: 700,
-												color: "#0f172a",
-											},
-											"& .MuiPickersArrowSwitcher-button": {
-												color: "#64748b",
-											},
-											"& .MuiDayCalendar-weekDayLabel": {
-												fontSize: "0.76rem",
-												fontWeight: 600,
-												color: "#64748b",
-											},
-											"& .MuiPickersDay-root": {
-												fontSize: "0.95rem",
-												fontWeight: 500,
-												color: "#0f172a",
-											},
-											"& .MuiPickersDay-root.Mui-selected": {
-												backgroundColor: "#1976d2",
-												color: "#fff",
-											},
-											"& .MuiPickersDay-root.MuiPickersDay-today": {
-												borderColor: "#94a3b8",
-											},
-											"& .MuiYearCalendar-button": {
-												fontSize: "0.98rem",
-												fontWeight: 500,
-												color: "#0f172a",
-											},
-											"& .MuiYearCalendar-button.Mui-selected": {
-												backgroundColor: "#1976d2",
-												color: "#fff",
-											},
-											"& .MuiMonthCalendar-button": {
-												fontSize: "0.98rem",
-												fontWeight: 600,
-												color: "#0f172a",
-											},
-											"& .MuiMonthCalendar-button.Mui-selected": {
-												backgroundColor: "#1976d2",
-												color: "#fff",
-											},
-											"& .MuiYearCalendar-root": {
-												height: 252,
-											},
-											"& .MuiMonthCalendar-root": {
-												height: 252,
-											},
-										}}
-									/>
-								</LocalizationProvider>
+		dept_groups: dict[str, list[int]] = defaultdict(list)
+		for row in department_user_scope:
+			dept_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
 
-								<div className="mt-3 flex items-center justify-between border-slate-100 border-t pt-3">
-									<button
-										type="button"
-										onClick={handleToday}
-										className="font-bold text-[11px] text-slate-400 uppercase tracking-wide transition-colors hover:text-slate-500"
-									>
-										Dzisiaj
-									</button>
-									<button
-										type="button"
-										onClick={handleClear}
-										className="rounded-lg bg-blue-50 px-4 py-2 font-bold text-[11px] text-blue-600 uppercase tracking-wide transition-colors hover:bg-blue-100"
-									>
-										Wyczyść
-									</button>
-								</div>
-							</div>,
-							document.body,
-						)
-					: null}
-			</div>
-		</label>
-	);
-}
+		team_groups: dict[str, list[int]] = defaultdict(list)
+		for row in team_user_scope:
+			team_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
 
-export function RecommendationsPanel({
-	operatorLogin,
-	authRole,
-	isObserver,
-}: RecommendationsPanelProps) {
-	const [items, setItems] = useState<RecommendationRead[]>([]);
-	const [total, setTotal] = useState(0);
-	const [isLoading, setIsLoading] = useState(true);
-	const [error, setError] = useState<string | null>(null);
-	const [advancedFilterAnchor, setAdvancedFilterAnchor] = useState({
-		top: 120,
-		left: 120,
-	});
-	const [isExporting, setIsExporting] = useState(false);
-	const [isExportConfigModalOpen, setIsExportConfigModalOpen] = useState(false);
-	const [includeInspectionsInExport, setIncludeInspectionsInExport] =
-		useState(false);
-	const [includeSanctionsInExport, setIncludeSanctionsInExport] = useState(false);
-	const [includeDecisionsInExport, setIncludeDecisionsInExport] = useState(false);
-	const [activeExportColumnsTab, setActiveExportColumnsTab] = useState<
-		"inspections" | "sanctions" | "decisions"
-	>("inspections");
-	const [selectedInspectionExportColumns, setSelectedInspectionExportColumns] =
-		useState<InspectionExportColumnKey[]>(
-			INSPECTION_EXPORT_COLUMNS.map((column) => column.key),
-		);
-	const [selectedSanctionExportColumns, setSelectedSanctionExportColumns] =
-		useState<SanctionExportColumnKey[]>(
-			SANCTION_EXPORT_COLUMNS.map((column) => column.key),
-		);
-	const [selectedDecisionExportColumns, setSelectedDecisionExportColumns] =
-		useState<DecisionExportColumnKey[]>(
-			DECISION_EXPORT_COLUMNS.map((column) => column.key),
-		);
+		my_groups: dict[str, list[int]] = defaultdict(list)
+		for row in my_user_scope:
+			my_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
 
-	const [selectedId, setSelectedId] = useState<number | null>(null);
-	const [pendingDashboardRecommendationCode, setPendingDashboardRecommendationCode] =
-		useState<string | null>(null);
-	const [isFormOpen, setIsFormOpen] = useState(false);
-	const [editingItem, setEditingItem] = useState<RecommendationRead | null>(
-		null,
-	);
-	const [form, setForm] = useState<RecommendationFormState>(EMPTY_FORM);
-	const [formError, setFormError] = useState<string | null>(null);
-	const [showRequiredFieldErrors, setShowRequiredFieldErrors] = useState(false);
-	const [versionConflictUpdatedAt, setVersionConflictUpdatedAt] = useState<string | null>(null);
-	const [saveLockConflict, setSaveLockConflict] =
-		useState<RecommendationLockConflict | null>(null);
-	const [isSubmitting, setIsSubmitting] = useState(false);
-	const [isSuccessModalOpen, setIsSuccessModalOpen] = useState(false);
-	const [successEntityName, setSuccessEntityName] = useState("");
-	const [successInspectionCode, setSuccessInspectionCode] = useState("");
-	const [successMode, setSuccessMode] = useState<"create" | "edit">(
-		"create",
-	);
-	const didNormalizeEditStatusRef = useRef(false);
-	const [isDeleteConfirmModalOpen, setIsDeleteConfirmModalOpen] =
-		useState(false);
-	const [isDeletingItem, setIsDeletingItem] = useState(false);
-	const [isDeleteSuccessModalOpen, setIsDeleteSuccessModalOpen] =
-		useState(false);
-	const [deleteSuccessEntityName, setDeleteSuccessEntityName] = useState("");
-	const [tablePageSize, setTablePageSize] = useState<number>(30);
-	const [inspectionOptions, setInspectionOptions] = useState<
-		InspectionOption[]
-	>([]);
-	const [isInspectionOptionsLoading, setIsInspectionOptionsLoading] =
-		useState(false);
-	const [recommendationStatusOptions, setRecommendationStatusOptions] =
-		useState<SelectOption[]>([]);
-	const [entityNameOptions, setEntityNameOptions] = useState<SelectOption[]>([]);
-	const [columnWidths, setColumnWidths] = useState<
-		Partial<Record<RecommendationColumnKey, number>>
-	>(DEFAULT_RECOMMENDATION_COLUMN_WIDTHS);
-	const [recommendationNameVariants, setRecommendationNameVariants] =
-		useState<RecommendationNameVariantByColumn>(
-			DEFAULT_RECOMMENDATION_NAME_VARIANTS,
-		);
-	const [draftRecommendationNameVariants, setDraftRecommendationNameVariants] =
-		useState<RecommendationNameVariantByColumn>(
-			DEFAULT_RECOMMENDATION_NAME_VARIANTS,
-		);
-	const [areNameVariantsHydrated, setAreNameVariantsHydrated] =
-		useState(false);
-	const [areColumnWidthsHydrated, setAreColumnWidthsHydrated] = useState(false);
-	const canManageRecommendations = authRole !== "external_user" && !isObserver;
-	const isDirector = authRole === "director";
-	const normalizedOperatorLogin = operatorLogin.trim().toLowerCase();
-	const columnWidthsStorageKey = `${RECOMMENDATIONS_COLUMN_WIDTHS_STORAGE_PREFIX}.${normalizedOperatorLogin}`;
-	const nameVariantsStorageKey = `${RECOMMENDATIONS_NAME_VARIANTS_STORAGE_PREFIX}.${normalizedOperatorLogin}`;
-	const tableViewStorageKey = `${RECOMMENDATIONS_TABLE_VIEW_STORAGE_PREFIX}.${normalizedOperatorLogin}`;
-
-	const selectedItem = useMemo(
-		() => items.find((item) => item.id === selectedId) ?? null,
-		[items, selectedId],
-	);
-
-	const selectedInspectionOption = useMemo(
-		() =>
-			inspectionOptions.find(
-				(option) => String(option.id) === form.inspectionId,
-			) ?? null,
-		[form.inspectionId, inspectionOptions],
-	);
-
-	const entityShortLabelByFullName = useMemo(() => {
-		const byFullName = new Map<string, string>();
-		for (const option of entityNameOptions) {
-			const normalizedFullName = option.value.trim().toLowerCase();
-			if (!normalizedFullName) {
-				continue;
-			}
-
-			if (!byFullName.has(normalizedFullName)) {
-				byFullName.set(normalizedFullName, option.label);
-			}
-		}
-
-		return byFullName;
-	}, [entityNameOptions]);
-
-	const inspectionSelectOptions = useMemo(
-		() =>
-			inspectionOptions.map((option) => {
-				const shortEntityNameFromDictionary = entityShortLabelByFullName.get(
-					option.nazwaPodmiotu.trim().toLowerCase(),
-				);
-				const displayEntityName =
-					option.nazwaPodmiotuSkrocona ||
-					shortEntityNameFromDictionary ||
-					option.nazwaPodmiotu;
-
-				return {
-					value: String(option.id),
-					label: `${option.inspectionCode}${displayEntityName ? ` - ${displayEntityName}` : ""}`,
-				};
-			}),
-		[entityShortLabelByFullName, inspectionOptions],
-	);
-
-	const displayEntityNameInForm = useMemo(() => {
-		if (form.isInspectionMissing) {
-			return form.nazwaPodmiotu;
-		}
-
-		if (selectedInspectionOption) {
-			const shortEntityNameFromDictionary = entityShortLabelByFullName.get(
-				selectedInspectionOption.nazwaPodmiotu.trim().toLowerCase(),
-			);
-
-			return (
-				selectedInspectionOption.nazwaPodmiotuSkrocona ||
-				shortEntityNameFromDictionary ||
-				selectedInspectionOption.nazwaPodmiotu
-			);
-		}
-
-		return form.nazwaPodmiotu;
-	}, [
-		entityShortLabelByFullName,
-		form.isInspectionMissing,
-		form.nazwaPodmiotu,
-		selectedInspectionOption,
-	]);
-
-	const isEditMode = Boolean(editingItem);
-	const editRecordLock = useRecordLock({
-		enabled: isFormOpen && isEditMode,
-		module: "recommendations",
-		recordId: editingItem?.id ?? null,
-		operatorLogin,
-		heartbeatIntervalMs: 20_000,
-	});
-	const shouldShowLockedByOtherUser = Boolean(saveLockConflict) || editRecordLock.isBlocked;
-	const isReadOnlyDueToLock = isEditMode && shouldShowLockedByOtherUser;
-	const isSaveDisabledDueToLock = isEditMode && (editRecordLock.isAcquireFailed || editRecordLock.isConnectionLost || editRecordLock.isExpired);
-	const lockOwnerDisplayName =
-		saveLockConflict?.ownerDisplayName || editRecordLock.owner?.displayName || "";
-	const lockOwnerLogin =
-		saveLockConflict?.ownerLogin || editRecordLock.owner?.login || "";
-	const lockOwnerLabel =
-		lockOwnerDisplayName || lockOwnerLogin
-			? `${lockOwnerDisplayName || "Nieznany użytkownik"}${
-					lockOwnerLogin ? ` (${lockOwnerLogin})` : ""
-			  }`
-			: "inny użytkownik";
-	const lockAcquiredAt =
-		saveLockConflict?.acquiredAt || editRecordLock.lockDetails?.acquiredAt || null;
-
-	const closeModalRef = useRef<() => void>(() => {});
-	const inactivityTimeout = useInactivityTimeout({
-		enabled: isFormOpen,
-		inactivityMs: INACTIVITY_TIMEOUT_MS,
-		warningMs: INACTIVITY_WARNING_MS,
-		onTimeout: () => closeModalRef.current(),
-	});
-
-	const inspectionCodeById = useMemo(
-		() => new Map(inspectionOptions.map((option) => [option.id, option.inspectionCode])),
-		[inspectionOptions],
-	);
-
-	const resolveInspectionCode = (payload: {
-		inspectionKod?: unknown;
-		kodInspekcji?: unknown;
-		inspectionLp?: unknown;
-		lp?: unknown;
-		inspectionId?: unknown;
-	}) => {
-		const inspectionKod = String(payload.inspectionKod ?? "").trim();
-		if (inspectionKod) {
-			return inspectionKod;
-		}
-
-		const kodInspekcji = String(payload.kodInspekcji ?? "").trim();
-		if (kodInspekcji) {
-			return kodInspekcji;
-		}
-
-		const inspectionLp = String(payload.inspectionLp ?? "").trim();
-		if (inspectionLp) {
-			return inspectionLp;
-		}
-
-		const lp = String(payload.lp ?? "").trim();
-		if (lp) {
-			return lp;
-		}
-
-		const numericInspectionId = Number(payload.inspectionId);
-		if (Number.isFinite(numericInspectionId) && numericInspectionId > 0) {
-			const mappedCode = inspectionCodeById.get(numericInspectionId);
-			if (mappedCode) {
-				return mappedCode;
-			}
-			return String(numericInspectionId);
-		}
-
-		return "";
-	};
-
-	const getCellValue = (
-		item: RecommendationRead,
-		columnKey: RecommendationColumnKey,
-	) => {
-		if (columnKey === "terminWykonaniaZalecen") {
-			return item.dataZalecen ?? item.terminWykonaniaZalecen ?? "";
-		}
-
-		if (columnKey === "inspectionId") {
-			return resolveInspectionCode({
-				inspectionKod: item.inspectionKod,
-				kodInspekcji: item.kodInspekcji,
-				inspectionLp: item.inspectionLp,
-				inspectionId: item.inspectionId,
-			});
-		}
-
-		if (columnKey === "kodZalecenia") {
-			return String(item.kodZalecenia ?? "").trim();
-		}
-
-		if (columnKey === "dataZalecenList") {
-			const source = item.terminyWykonaniaZalecenList.length > 0
-				? item.terminyWykonaniaZalecenList
-				: item.dataZalecenList;
-			return formatDateListDisplay(
-				source,
-				item.brakTerminowWykonaniaZalecen === true,
-			);
-		}
-
-		if (columnKey === "dataAkceptacjiNotyWeryfikacjiList") {
-			return formatDateListDisplay(
-				item.dataAkceptacjiNotyWeryfikacjiList,
-				item.brakDatAkceptacjiNotyWeryfikacji === true,
-			);
-		}
-
-		const raw = item[columnKey as keyof RecommendationRead];
-		if (raw === null || raw === undefined) {
-			return "";
-		}
-
-		return String(raw);
-	};
-
-	const recommendationRowsForDisplay = useMemo(
-		() =>
-			items.map((item) => {
-				const resolveDisplayText = (
-					columnKey: RecommendationNameVariantColumnKey,
-				) => {
-					if (recommendationNameVariants[columnKey] !== "short") {
-						return String(item[columnKey] ?? "").trim();
+		all_years = sorted(set(dept_groups.keys()) | set(team_groups.keys()) | set(my_groups.keys()))
+		for year in all_years:
+			for scope_name, values in (
+				("Departament", dept_groups.get(year, [])),
+				(operator_team_code, team_groups.get(year, [])),
+				("Moj czas", my_groups.get(year, [])),
+			):
+				if not values:
+					continue
+				avg_value = _safe_average(values)
+				med_value = float(median(values)) if values else None
+				metric_value = avg_value if trend_mode == "average" else med_value
+				summary_rows.append(
+					{
+						"rok": year,
+						"zespol": scope_name,
+						"year": year,
+						"team": scope_name,
+						"count": len(values),
+						"average": avg_value,
+						"median": med_value,
+						"min": min(values),
+						"max": max(values),
+						"metric": metric_value,
 					}
+				)
 
-					const shortValue =
-						columnKey === "nazwaPodmiotu"
-							? item.nazwaPodmiotuSkrocona
-							: item.statusSkrocona;
-
-					return String(shortValue ?? item[columnKey] ?? "").trim();
-				};
-
-				return {
-					...item,
-					nazwaPodmiotu: resolveDisplayText("nazwaPodmiotu"),
-					status: resolveDisplayText("status") || null,
-				};
-			}),
-		[items, recommendationNameVariants],
-	);
-
-	const setFormDataZalecenList = (nextValue: SetStateAction<string[]>) => {
-		setForm((prev) => ({
-			...prev,
-			dataZalecenList: resolveSetStateAction(nextValue, prev.dataZalecenList),
-		}));
-	};
-
-	const setFormDataAkceptacjiList = (nextValue: SetStateAction<string[]>) => {
-		setForm((prev) => ({
-			...prev,
-			dataAkceptacjiList: resolveSetStateAction(
-				nextValue,
-				prev.dataAkceptacjiList,
-			),
-		}));
-	};
-
-	const setFormIsDataZalecenBrak = (nextValue: SetStateAction<boolean>) => {
-		setForm((prev) => ({
-			...prev,
-			isDataZalecenBrak: resolveSetStateAction(
-				nextValue,
-				prev.isDataZalecenBrak,
-			),
-		}));
-	};
-
-	const setFormIsDataAkceptacjiBrak = (nextValue: SetStateAction<boolean>) => {
-		setForm((prev) => ({
-			...prev,
-			isDataAkceptacjiBrak: resolveSetStateAction(
-				nextValue,
-				prev.isDataAkceptacjiBrak,
-			),
-		}));
-	};
-
-	const statusOptionsForForm = useMemo(() => {
-		const fullStatusOptions = recommendationStatusOptions.map((option) => ({
-			value: option.value,
-			label: option.value,
-		}));
-		const normalizedCurrentStatus = form.status.trim();
-		if (!normalizedCurrentStatus) {
-			return fullStatusOptions;
-		}
-
-		return fullStatusOptions.some(
-			(option) => option.value === normalizedCurrentStatus,
-		)
-			? fullStatusOptions
-			: [
-				{ value: normalizedCurrentStatus, label: normalizedCurrentStatus },
-				...fullStatusOptions,
-		  ];
-	}, [form.status, recommendationStatusOptions]);
-
-	useEffect(() => {
-		if (!isFormOpen || !isEditMode) {
-			didNormalizeEditStatusRef.current = false;
-			return;
-		}
-
-		if (didNormalizeEditStatusRef.current) {
-			return;
-		}
-
-		didNormalizeEditStatusRef.current = true;
-		if (form.status.trim().toLowerCase() === "brak") {
-			setForm((prev) => ({ ...prev, status: "" }));
-		}
-	}, [form.status, isEditMode, isFormOpen]);
-
-	const {
-		advancedFilterColumnKey,
-		advancedFilterSearch,
-		advancedFilters,
-		canClearFilters,
-		clearAdvancedFilterForSelectedColumn,
-		clearFilters,
-		columnFilters,
-		draftHiddenColumns,
-		draftVisibleColumns: draftVisibleRecommendationColumns,
-		filteredAndSortedRows: filteredAndSortedItems,
-		paginatedRows: paginatedRecommendationItems,
-		currentPage,
-		totalPages,
-		pageSize,
-		paginationItems,
-		handlePageChange,
-		handleApplyViewChanges,
-		handleDraftColumnVisibilityChange,
-		handleDraftDeselectAllColumns,
-		handleDraftSelectAllColumns,
-		handleFilterChange,
-		handleOpenViewModal,
-		handleSortByColumn,
-		isAdvancedFilterModalOpen,
-		isColumnPickerOpen,
-		selectedAdvancedFilterDateRange,
-		selectedAdvancedFilterValues,
-		selectAllVisibleAdvancedFilterValues,
-		setAdvancedFilterColumnKey,
-		setAdvancedFilterDateRange,
-		setAdvancedFilterSearch,
-		setIsAdvancedFilterModalOpen,
-		setIsColumnPickerOpen,
-		sortColumnKey,
-		sortDirection,
-		toggleAdvancedFilterValue,
-		visibleAdvancedFilterValues,
-		visibleColumns: visibleRecommendationColumns,
-	} = useTableState<RecommendationRead, RecommendationColumnKey>({
-		rows: recommendationRowsForDisplay,
-		allColumnKeys: ALL_RECOMMENDATION_COLUMN_KEYS,
-		initialAdvancedFilterColumnKey: "nazwaPodmiotu",
-		getCellValue,
-		pageSize: tablePageSize,
-		hiddenColumnsStorageKey: tableViewStorageKey,
-		hiddenColumnsStorageArea: "localStorage",
-		sortComparators: {
-			lp: (left, right) => (Number(getCellValue(left, "lp")) || 0) - (Number(getCellValue(right, "lp")) || 0),
-			pozycja: (left, right) =>
-				(Number(getCellValue(left, "pozycja")) || 0) -
-				(Number(getCellValue(right, "pozycja")) || 0),
-		},
-	});
-
-	const columnDisplayModeOptionsByKey = useMemo(
-		() =>
-			Object.fromEntries(
-				RECOMMENDATION_NAME_VARIANT_COLUMN_KEYS.map((columnKey) => [
-					columnKey,
-					[...RECOMMENDATION_NAME_VARIANT_OPTIONS],
-				]),
-			) as Partial<
-				Record<
-					RecommendationColumnKey,
-					Array<{ value: string; label: string }>
-				>
-			>,
-		[],
-	);
-
-	const draftColumnDisplayModeValuesByKey = useMemo(
-		() =>
-			Object.fromEntries(
-				RECOMMENDATION_NAME_VARIANT_COLUMN_KEYS.map((columnKey) => [
-					columnKey,
-					draftRecommendationNameVariants[columnKey],
-				]),
-			) as Partial<Record<RecommendationColumnKey, string>>,
-		[draftRecommendationNameVariants],
-	);
-
-	const handleOpenRecommendationViewModal = () => {
-		setDraftRecommendationNameVariants(recommendationNameVariants);
-		handleOpenViewModal();
-	};
-
-	const handleApplyRecommendationViewChanges = () => {
-		setRecommendationNameVariants(draftRecommendationNameVariants);
-		handleApplyViewChanges();
-	};
-
-	const handleResetRecommendationViewSelection = () => {
-		handleDraftSelectAllColumns();
-		setDraftRecommendationNameVariants(DEFAULT_RECOMMENDATION_NAME_VARIANTS);
-	};
-
-	useEffect(() => {
-		if (typeof window === "undefined") {
-			return;
-		}
-
-		const raw = window.localStorage.getItem(nameVariantsStorageKey);
-		if (!raw) {
-			setAreNameVariantsHydrated(true);
-			return;
-		}
-
-		try {
-			const parsed = JSON.parse(raw) as Partial<Record<RecommendationColumnKey, unknown>>;
-			const next: RecommendationNameVariantByColumn = {
-				...DEFAULT_RECOMMENDATION_NAME_VARIANTS,
-			};
-
-			for (const columnKey of RECOMMENDATION_NAME_VARIANT_COLUMN_KEYS) {
-				const value = parsed[columnKey];
-				if (value === "full" || value === "short") {
-					next[columnKey] = value;
+		for scope_name, rows_scope in (
+			("Departament", department_user_scope),
+			(operator_team_code, team_user_scope),
+			("Moj czas", my_user_scope),
+		):
+			values = [int(item["czas"]) for item in rows_scope]
+			if not values:
+				continue
+			avg_value = _safe_average(values)
+			med_value = float(median(values)) if values else None
+			metric_value = avg_value if trend_mode == "average" else med_value
+			overall_rows.append(
+				{
+					"zespol": scope_name,
+					"count": len(values),
+					"average": avg_value,
+					"median": med_value,
+					"min": min(values),
+					"max": max(values),
+					"metric": metric_value,
 				}
-			}
-
-			setRecommendationNameVariants(next);
-		} catch {
-			// ignore invalid persisted data
-		}
-
-		setAreNameVariantsHydrated(true);
-	}, [nameVariantsStorageKey]);
-
-	useEffect(() => {
-		if (typeof window === "undefined") {
-			return;
-		}
-
-		if (!areNameVariantsHydrated) {
-			return;
-		}
-
-		window.localStorage.setItem(
-			nameVariantsStorageKey,
-			JSON.stringify(recommendationNameVariants),
-		);
-	}, [
-		areNameVariantsHydrated,
-		nameVariantsStorageKey,
-		recommendationNameVariants,
-	]);
-
-	useEffect(() => {
-		if (typeof window === "undefined") {
-			return;
-		}
-
-		const raw = window.localStorage.getItem(columnWidthsStorageKey);
-		if (!raw) {
-			setColumnWidths(DEFAULT_RECOMMENDATION_COLUMN_WIDTHS);
-			setAreColumnWidthsHydrated(true);
-			return;
-		}
-
-		try {
-			const parsed = JSON.parse(raw) as Record<string, unknown>;
-			const next: Partial<Record<RecommendationColumnKey, number>> = {};
-			for (const [key, value] of Object.entries(parsed)) {
-				const width = Number(value);
-				if (!Number.isFinite(width)) {
-					continue;
-				}
-
-				const columnKey = key as RecommendationColumnKey;
-				next[columnKey] = Math.max(
-					RECOMMENDATIONS_MIN_COLUMN_WIDTH,
-					Math.min(1200, Math.round(width)),
-				);
-			}
-
-			setColumnWidths({
-				...DEFAULT_RECOMMENDATION_COLUMN_WIDTHS,
-				...next,
-			});
-		} catch {
-			setColumnWidths(DEFAULT_RECOMMENDATION_COLUMN_WIDTHS);
-		}
-
-		setAreColumnWidthsHydrated(true);
-	}, [columnWidthsStorageKey]);
-
-	const hasCustomColumnWidths = useMemo(() => {
-		const keys = new Set<string>([
-			...Object.keys(DEFAULT_RECOMMENDATION_COLUMN_WIDTHS),
-			...Object.keys(columnWidths),
-		]);
-
-		for (const key of keys) {
-			const columnKey = key as RecommendationColumnKey;
-			const currentWidth = columnWidths[columnKey];
-			const defaultWidth = DEFAULT_RECOMMENDATION_COLUMN_WIDTHS[columnKey];
-
-			if (typeof currentWidth === "number") {
-				if (typeof defaultWidth !== "number" || currentWidth !== defaultWidth) {
-					return true;
-				}
-				continue;
-			}
-
-			if (typeof defaultWidth === "number") {
-				return true;
-			}
-		}
-
-		return false;
-	}, [columnWidths]);
-
-	useEffect(() => {
-		if (typeof window === "undefined" || !areColumnWidthsHydrated) {
-			return;
-		}
-
-		if (!hasCustomColumnWidths) {
-			window.localStorage.removeItem(columnWidthsStorageKey);
-			return;
-		}
-
-		window.localStorage.setItem(
-			columnWidthsStorageKey,
-			JSON.stringify(columnWidths),
-		);
-	}, [
-		areColumnWidthsHydrated,
-		columnWidths,
-		columnWidthsStorageKey,
-		hasCustomColumnWidths,
-	]);
-
-	const handleResizeColumn = (columnKey: RecommendationColumnKey, width: number) => {
-		setColumnWidths((prev) => ({
-			...prev,
-			[columnKey]: Math.max(
-				RECOMMENDATIONS_MIN_COLUMN_WIDTH,
-				Math.min(1200, Math.round(width)),
-			),
-		}));
-	};
-
-	const handleResetColumnWidths = () => {
-		setColumnWidths(DEFAULT_RECOMMENDATION_COLUMN_WIDTHS);
-		if (typeof window !== "undefined") {
-			window.localStorage.removeItem(columnWidthsStorageKey);
-		}
-	};
-
-	const handlePageSizeChange = (nextPageSize: number) => {
-		if (
-			!TABLE_PAGE_SIZE_OPTIONS.includes(
-				nextPageSize as (typeof TABLE_PAGE_SIZE_OPTIONS)[number],
 			)
-		) {
-			return;
-		}
 
-		setTablePageSize(nextPageSize);
-	};
+		for scope_name, rows_scope in (
+			("Departament", department_user_scope_all_year),
+			(operator_team_code, team_user_scope_all_year),
+			("Moj czas", my_user_scope_all_year),
+		):
+			values = [int(item["czas"]) for item in rows_scope]
+			if not values:
+				continue
+			all_year_metric_by_team[scope_name] = _metric_from_values(values, trend_mode)
+	else:
+		summary_groups: dict[tuple[str, str], list[int]] = defaultdict(list)
+		for row in agg_filtered_rows:
+			summary_groups[(str(row["rokPoczatku"]), str(row["zespol"]))].append(int(row["czas"]))
 
-	useEffect(() => {
-		if (typeof window === "undefined") {
-			return;
-		}
-
-		const fromSession = window.sessionStorage.getItem(
-			DASHBOARD_OPEN_RECOMMENDATION_CODE_KEY,
-		);
-		if (fromSession?.trim()) {
-			setPendingDashboardRecommendationCode(fromSession.trim());
-		}
-
-		const handleOpenRecommendationFromDashboard = (event: Event) => {
-			const customEvent = event as CustomEvent<{ recommendationCode?: unknown }>;
-			const recommendationCode =
-				typeof customEvent.detail?.recommendationCode === "string"
-					? customEvent.detail.recommendationCode.trim()
-					: "";
-			if (!recommendationCode) {
-				return;
-			}
-
-			window.sessionStorage.setItem(
-				DASHBOARD_OPEN_RECOMMENDATION_CODE_KEY,
-				recommendationCode,
-			);
-			setPendingDashboardRecommendationCode(recommendationCode);
-		};
-
-		window.addEventListener(
-			DASHBOARD_OPEN_RECOMMENDATION_EVENT,
-			handleOpenRecommendationFromDashboard,
-		);
-
-		return () => {
-			window.removeEventListener(
-				DASHBOARD_OPEN_RECOMMENDATION_EVENT,
-				handleOpenRecommendationFromDashboard,
-			);
-		};
-	}, []);
-
-	useEffect(() => {
-		if (!pendingDashboardRecommendationCode || isLoading) {
-			return;
-		}
-
-		const normalizedCode = pendingDashboardRecommendationCode.trim().toLowerCase();
-		if (!normalizedCode) {
-			setPendingDashboardRecommendationCode(null);
-			return;
-		}
-
-		const targetItem = filteredAndSortedItems.find(
-			(item) => String(item.kodZalecenia ?? "").trim().toLowerCase() === normalizedCode,
-		);
-
-		if (!targetItem) {
-			return;
-		}
-
-		const rowIndex = filteredAndSortedItems.findIndex((item) => item.id === targetItem.id);
-		if (rowIndex < 0) {
-			return;
-		}
-
-		const targetPage = Math.floor(rowIndex / pageSize) + 1;
-		handlePageChange(targetPage);
-		setSelectedId(targetItem.id);
-		setPendingDashboardRecommendationCode(null);
-
-		if (typeof window !== "undefined") {
-			window.sessionStorage.removeItem(DASHBOARD_OPEN_RECOMMENDATION_CODE_KEY);
-		}
-	}, [
-		filteredAndSortedItems,
-		handlePageChange,
-		isLoading,
-		pageSize,
-		pendingDashboardRecommendationCode,
-	]);
-
-	const visibleRecommendationColumnDefinitions = useMemo(
-		() =>
-			RECOMMENDATION_COLUMNS.filter((column) =>
-				visibleRecommendationColumns.includes(column.key),
-			),
-		[visibleRecommendationColumns],
-	);
-
-	const draftSelectableColumnDefinitions = RECOMMENDATION_COLUMNS;
-
-	const loadItems = async () => {
-		setError(null);
-		setIsLoading(true);
-
-		const result = await fetchRecommendations(operatorLogin, {
-			sortBy: "id",
-			sortOrder: "asc",
-		});
-
-		if (!result.ok) {
-			setItems([]);
-			setTotal(0);
-			setError(result.error);
-			setIsLoading(false);
-			return;
-		}
-
-		setItems(result.data.items);
-		setTotal(result.data.total);
-		setSelectedId((prev) =>
-			prev && result.data.items.some((item) => item.id === prev) ? prev : null,
-		);
-		setIsLoading(false);
-	};
-
-	const loadInspectionOptions = async () => {
-		setIsInspectionOptionsLoading(true);
-
-		try {
-			const structureResponsePromise = fetch(INSPECTIONS_API_URL, {
-				method: "GET",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Operator-Login": operatorLogin,
-				},
-				cache: "no-store",
-			}).catch(() => null);
-
-			const response = await fetch(AVAILABLE_INSPECTIONS_API_URL, {
-				method: "GET",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Operator-Login": operatorLogin,
-				},
-				cache: "no-store",
-			});
-
-			if (!response.ok) {
-				setInspectionOptions([]);
-				if (response.status === 401) {
-					setFormError(
-						"Brak autoryzacji operatora. Odśwież sesję i zaloguj się ponownie.",
-					);
-				} else if (response.status === 403) {
-					setFormError("Brak uprawnień do listy dostępnych inspekcji.");
+		for (year, team), values in sorted(summary_groups.items(), key=lambda item: (item[0][0], item[0][1])):
+			avg_value = _safe_average(values)
+			med_value = float(median(values)) if values else None
+			metric_value = avg_value if trend_mode == "average" else med_value
+			summary_rows.append(
+				{
+					"rok": year,
+					"zespol": team,
+					"year": year,
+					"team": team,
+					"count": len(values),
+					"average": avg_value,
+					"median": med_value,
+					"min": min(values) if values else None,
+					"max": max(values) if values else None,
+					"metric": metric_value,
 				}
-				return;
-			}
+			)
 
-			const payload = (await response.json()) as
-				| Array<{
-						id?: unknown;
-						lp?: unknown;
-						inspectionKod?: unknown;
-						kodInspekcji?: unknown;
-						inspectionStatusCode?: unknown;
-						statusCode?: unknown;
-						status?: unknown;
-						statusInspekcji?: unknown;
-						inspectionStatus?: unknown;
-						nazwaPodmiotu?: unknown;
-						nazwaPodmiotuSkrocona?: unknown;
-						nazwaPodmiotuSkrot?: unknown;
-				  }>
-				| {
-						items?: Array<{
-							id?: unknown;
-							lp?: unknown;
-							inspectionKod?: unknown;
-							kodInspekcji?: unknown;
-							inspectionStatusCode?: unknown;
-							statusCode?: unknown;
-							status?: unknown;
-							statusInspekcji?: unknown;
-							inspectionStatus?: unknown;
-							nazwaPodmiotu?: unknown;
-							nazwaPodmiotuSkrocona?: unknown;
-							nazwaPodmiotuSkrot?: unknown;
-						}>;
-				  };
-			const rawItems = Array.isArray(payload) ? payload : (payload.items ?? []);
+		department_groups: dict[str, list[int]] = defaultdict(list)
+		for row in department_scope_rows:
+			department_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
 
-			const mapped = rawItems
-				.map((item) => {
-					const id = Number(item.id);
-					const lp = Number(item.lp);
-					const inspectionCode = String(
-						(item as { inspectionKod?: unknown }).inspectionKod ??
-							(item as { kodInspekcji?: unknown }).kodInspekcji ??
-							(item as { inspectionCode?: unknown }).inspectionCode ??
-							item.lp ??
-							"",
-					).trim();
-					const inspectionStatus = String(
-						(item as { status?: unknown }).status ??
-							(item as { statusInspekcji?: unknown }).statusInspekcji ??
-							(item as { inspectionStatus?: unknown }).inspectionStatus ??
-							"",
-					).trim();
-					const inspectionStatusCode = String(
-						(item as { inspectionStatusCode?: unknown }).inspectionStatusCode ??
-							(item as { statusCode?: unknown }).statusCode ??
-							"",
-					).trim();
-					const nazwaPodmiotu = String(item.nazwaPodmiotu ?? "").trim();
-					const nazwaPodmiotuSkrocona = String(
-						(item as { nazwaPodmiotuSkrocona?: unknown }).nazwaPodmiotuSkrocona ??
-							(item as { nazwaPodmiotuSkrot?: unknown }).nazwaPodmiotuSkrot ??
-							"",
-					).trim();
-
-					const normalizedInspectionStatusCode = inspectionStatusCode
-						.toUpperCase()
-						.trim();
-					const normalizedInspectionStatus = normalizeInspectionStatusLabel(
-						inspectionStatus,
-					);
-					if (
-						(normalizedInspectionStatusCode &&
-							BLOCKING_INSPECTION_STATUS_CODES.has(normalizedInspectionStatusCode)) ||
-						(normalizedInspectionStatus &&
-							BLOCKING_INSPECTION_STATUS_FALLBACK_LABELS.has(
-								normalizedInspectionStatus,
-							))
-					) {
-						return null;
-					}
-
-					if (!Number.isFinite(id) || id <= 0 || !inspectionCode) {
-						return null;
-					}
-
-					return {
-						id,
-						lp: Number.isFinite(lp) && lp > 0 ? lp : id,
-						inspectionCode,
-						nazwaPodmiotu,
-						nazwaPodmiotuSkrocona,
-					};
-				})
-				.filter((item): item is InspectionOption => Boolean(item))
-				.sort((left, right) =>
-					left.inspectionCode.localeCompare(right.inspectionCode, "pl", {
-						numeric: true,
-						sensitivity: "base",
-					}),
-				);
-
-			const blockedInspectionIds = new Set<number>();
-			const structureResponse = await structureResponsePromise;
-
-			if (structureResponse?.ok) {
-				const structurePayload = (await structureResponse.json()) as
-					| Array<{
-							id?: unknown;
-							inspectionStatusCode?: unknown;
-							statusCode?: unknown;
-							status?: unknown;
-							statusInspekcji?: unknown;
-							inspectionStatus?: unknown;
-					  }>
-					| {
-							items?: Array<{
-								id?: unknown;
-								inspectionStatusCode?: unknown;
-								statusCode?: unknown;
-								status?: unknown;
-								statusInspekcji?: unknown;
-								inspectionStatus?: unknown;
-							}>;
-					  };
-
-				const structureItems = Array.isArray(structurePayload)
-					? structurePayload
-					: (structurePayload.items ?? []);
-
-				for (const item of structureItems) {
-					const id = Number(item.id);
-					if (!Number.isFinite(id) || id <= 0) {
-						continue;
-					}
-
-					const inspectionStatus = String(
-						(item as { status?: unknown }).status ??
-							(item as { statusInspekcji?: unknown }).statusInspekcji ??
-							(item as { inspectionStatus?: unknown }).inspectionStatus ??
-							"",
-					).trim();
-					const inspectionStatusCode = String(
-						(item as { inspectionStatusCode?: unknown }).inspectionStatusCode ??
-							(item as { statusCode?: unknown }).statusCode ??
-							"",
-					).trim();
-
-					const normalizedInspectionStatusCode = inspectionStatusCode
-						.toUpperCase()
-						.trim();
-					const normalizedInspectionStatus = normalizeInspectionStatusLabel(
-						inspectionStatus,
-					);
-
-					if (
-						(normalizedInspectionStatusCode &&
-							BLOCKING_INSPECTION_STATUS_CODES.has(normalizedInspectionStatusCode)) ||
-						(normalizedInspectionStatus &&
-							BLOCKING_INSPECTION_STATUS_FALLBACK_LABELS.has(
-								normalizedInspectionStatus,
-							))
-					) {
-						blockedInspectionIds.add(id);
-					}
+		for year, values in sorted(department_groups.items(), key=lambda item: item[0]):
+			avg_value = _safe_average(values)
+			med_value = float(median(values)) if values else None
+			metric_value = avg_value if trend_mode == "average" else med_value
+			summary_rows.append(
+				{
+					"rok": year,
+					"zespol": "Departament",
+					"year": year,
+					"team": "Departament",
+					"count": len(values),
+					"average": avg_value,
+					"median": med_value,
+					"min": min(values) if values else None,
+					"max": max(values) if values else None,
+					"metric": metric_value,
 				}
-			}
+			)
 
-			setInspectionOptions(
-				mapped.filter((option) => !blockedInspectionIds.has(option.id)),
-			);
-		} catch {
-			setInspectionOptions([]);
-			setFormError("Nie udało się pobrać dostępnych inspekcji.");
-		} finally {
-			setIsInspectionOptionsLoading(false);
-		}
-	};
+		team_all_year_groups: dict[str, list[int]] = defaultdict(list)
+		for row in rows_after_year:
+			if not _is_valid_for_aggregations(row):
+				continue
+			if team_filter and str(row.get("zespol") or "") not in team_filter:
+				continue
+			team_all_year_groups[str(row["zespol"])].append(int(row["czas"]))
 
-	const loadRecommendationStatusOptions = async () => {
-		try {
-			const result = await fetchDictionaryEntries("statusy_zalecen");
-			if (!result.ok) {
-				setRecommendationStatusOptions([]);
-				return;
-			}
+		for team_name, values in team_all_year_groups.items():
+			all_year_metric_by_team[team_name] = _metric_from_values(values, trend_mode)
 
-			setRecommendationStatusOptions(
-				mapDictionaryEntriesToOptions(result.data),
-			);
-		} catch {
-			setRecommendationStatusOptions([]);
-		}
-	};
+		department_all_year_values = [int(row["czas"]) for row in rows_after_year if _is_valid_for_aggregations(row)]
+		if department_all_year_values:
+			all_year_metric_by_team["Departament"] = _metric_from_values(department_all_year_values, trend_mode)
 
-	const loadEntityNameOptions = async () => {
-		try {
-			const result = await fetchDictionaryEntries("nazwy_podmiotow");
-			if (!result.ok) {
-				setEntityNameOptions([]);
-				return;
-			}
-
-			setEntityNameOptions(mapDictionaryEntriesToOptions(result.data));
-		} catch {
-			setEntityNameOptions([]);
-		}
-	};
-
-	useEffect(() => {
-		void loadItems();
-		void loadRecommendationStatusOptions();
-		void loadEntityNameOptions();
-	}, []);
-
-	useEffect(() => {
-		void loadInspectionOptions();
-	}, [operatorLogin]);
-
-	useEffect(() => {
-		const handleInspectionsChanged = () => {
-			void loadInspectionOptions();
-		};
-
-		window.addEventListener(INSPECTIONS_CHANGED_EVENT, handleInspectionsChanged);
-		return () => {
-			window.removeEventListener(INSPECTIONS_CHANGED_EVENT, handleInspectionsChanged);
-		};
-	}, [operatorLogin]);
-
-	useEffect(() => {
-		if (form.isInspectionMissing) {
-			return;
-		}
-
-		if (!selectedInspectionOption) {
-			setForm((prev) => ({
-				...prev,
-				nazwaPodmiotu: "",
-			}));
-			return;
-		}
-
-		setForm((prev) => ({
-			...prev,
-			nazwaPodmiotu: selectedInspectionOption.nazwaPodmiotu,
-		}));
-	}, [form.isInspectionMissing, selectedInspectionOption]);
-
-	const openAdvancedFilterForColumn = (
-		columnKey: RecommendationColumnKey,
-		triggerElement: HTMLElement,
-	) => {
-		setAdvancedFilterAnchor(getFloatingPanelAnchor(triggerElement));
-		setAdvancedFilterColumnKey(columnKey);
-		setAdvancedFilterSearch("");
-		setIsAdvancedFilterModalOpen(true);
-	};
-
-	const handleExportCurrentView = async (
-		inspectionColumnKeys: InspectionExportColumnKey[],
-		sanctionColumnKeys: SanctionExportColumnKey[],
-		decisionColumnKeys: DecisionExportColumnKey[],
-		includeInspections: boolean,
-		includeSanctions: boolean,
-		includeDecisions: boolean,
-	) => {
-		if (
-			isExporting ||
-			filteredAndSortedItems.length === 0 ||
-			visibleRecommendationColumnDefinitions.length === 0
-		) {
-			return;
-		}
-
-		setIsExporting(true);
-		setError(null);
-
-		try {
-			const workbook = await createStyledExportWorkbook("Ewidencja zaleceń");
-
-			const linkedInspectionIds = new Set(
-				filteredAndSortedItems
-					.map((item) => item.inspectionId)
-					.filter(
-						(value): value is number =>
-							typeof value === "number" && Number.isFinite(value) && value > 0,
-					),
-			);
-
-			const loadInspectionLpMap = async (url: string) => {
-				try {
-					const response = await fetch(url, {
-						method: "GET",
-						headers: {
-							"Content-Type": "application/json",
-							"X-Operator-Login": operatorLogin,
-						},
-						cache: "no-store",
-					});
-
-					if (!response.ok) {
-						return new Map<number, number>();
-					}
-
-					const payload = (await response.json()) as
-						| Array<{ id?: unknown; lp?: unknown }>
-						| { items?: Array<{ id?: unknown; lp?: unknown }> };
-					const rawItems = Array.isArray(payload)
-						? payload
-						: (payload.items ?? []);
-
-					return new Map(
-						rawItems
-							.map((item) => {
-								const id = Number(item.id);
-								const lp = Number(item.lp);
-								if (
-									!Number.isFinite(id) ||
-									id <= 0 ||
-									!Number.isFinite(lp) ||
-									lp <= 0
-								) {
-									return null;
-								}
-
-								return [id, lp] as const;
-							})
-							.filter((entry): entry is readonly [number, number] => entry !== null),
-					);
-				} catch {
-					return new Map<number, number>();
+		# Overall rows for general summary table (all years, same dataset for count/metric).
+		for team_name, values in sorted(team_all_year_groups.items(), key=lambda item: item[0]):
+			if not values:
+				continue
+			avg_value = _safe_average(values)
+			med_value = float(median(values)) if values else None
+			overall_rows.append(
+				{
+					"zespol": team_name,
+					"count": len(values),
+					"average": avg_value,
+					"median": med_value,
+					overall_metric_key: avg_value if trend_mode == "average" else med_value,
+					"metric": avg_value if trend_mode == "average" else med_value,
 				}
-			};
+			)
 
-			const [inspectionsResponse, sanctionsResult, decisionsResult, sanctionsLpById] =
-				await Promise.all([
-					fetch(INSPECTIONS_API_URL, {
-						method: "GET",
-						headers: {
-							"Content-Type": "application/json",
-							"X-Operator-Login": operatorLogin,
-						},
-						cache: "no-store",
-					}),
-					fetchSanctionRequests(operatorLogin, {
-						sortBy: "id",
-						sortOrder: "asc",
-					}),
-					fetchObligatingDecisions(operatorLogin),
-					loadInspectionLpMap(INSPECTIONS_API_URL),
-				]);
-
-			const rawInspectionRows: unknown[] = [];
-
-			if (inspectionsResponse.ok) {
-				const payload = (await inspectionsResponse.json()) as
-					| unknown[]
-					| { items?: unknown[] };
-				const items = Array.isArray(payload) ? payload : (payload.items ?? []);
-				rawInspectionRows.push(...items);
-			}
-
-			const mappedInspections = rawInspectionRows.map((rawRow, index) =>
-				normalizeInspectionRow((rawRow ?? {}) as RawInspectionRow, index),
-			);
-
-			const relatedInspections = mappedInspections.filter((row) =>
-				linkedInspectionIds.has(Number(row.id)),
-			);
-
-			const relatedSanctionsSource = sanctionsResult.ok
-				? sanctionsResult.data.items
-				: [];
-			const relatedDecisionsSource = decisionsResult.ok
-				? decisionsResult.data.items
-				: [];
-			const relatedSanctions = relatedSanctionsSource.filter(
-				(item) =>
-					typeof item.inspectionId === "number" &&
-					linkedInspectionIds.has(item.inspectionId),
-			);
-
-			const inspectionCodeByIdForExport = new Map(
-				relatedInspections.map((row) => [Number(row.id), row.kodInspekcji]),
-			);
-
-			const inspectionCodeByRecommendationCode = new Map<string, string>();
-			for (const recommendation of filteredAndSortedItems) {
-				const recommendationCode = String(recommendation.kodZalecenia ?? "")
-					.trim()
-					.toUpperCase();
-				if (!recommendationCode) {
-					continue;
+		if department_all_year_values:
+			dept_avg = _safe_average(department_all_year_values)
+			dept_median = float(median(department_all_year_values)) if department_all_year_values else None
+			overall_rows.append(
+				{
+					"zespol": "Departament",
+					"count": len(department_all_year_values),
+					"average": dept_avg,
+					"median": dept_median,
+					overall_metric_key: dept_avg if trend_mode == "average" else dept_median,
+					"metric": dept_avg if trend_mode == "average" else dept_median,
 				}
+			)
 
-				const inspectionId = recommendation.inspectionId ?? null;
-				const inspectionCode =
-					resolveInspectionCode({
-						inspectionKod: recommendation.inspectionKod,
-						kodInspekcji: recommendation.kodInspekcji,
-						inspectionLp: recommendation.inspectionLp,
-						inspectionId,
-					}) ||
-					(typeof inspectionId === "number"
-						? String(
-								inspectionCodeByIdForExport.get(inspectionId) ??
-								sanctionsLpById.get(inspectionId) ??
-								"",
-							)
-						: "");
+	trend_groups: dict[str, list[int]] = defaultdict(list)
+	for row in agg_filtered_rows:
+		trend_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
 
-				inspectionCodeByRecommendationCode.set(recommendationCode, inspectionCode);
+	trend_rows: list[dict[str, Any]] = []
+	for year, values in sorted(trend_groups.items(), key=lambda item: item[0]):
+		if not str(year).isdigit():
+			continue
+		avg_value = _safe_average(values)
+		med_value = float(median(values)) if values else None
+		trend_rows.append(
+			{
+				"year": int(year),
+				"count": len(values),
+				"average": avg_value,
+				"median": med_value,
+				"min": min(values) if values else None,
+				"max": max(values) if values else None,
+				"trend": avg_value if trend_mode == "average" else med_value,
 			}
+		)
 
-			const relatedDecisions = relatedDecisionsSource.filter((item) => {
-				const recommendationCode = String(item.recommendationKodZalecenia ?? "")
-					.trim()
-					.toUpperCase();
-				return recommendationCode.length > 0 &&
-					inspectionCodeByRecommendationCode.has(recommendationCode);
-			});
+	summary_pivot_years = sorted({str(row.get("rok")) for row in summary_rows if row.get("rok") not in {None, ""}})
+	pivot_team_order: list[str] = []
+	pivot_team_values: dict[str, dict[str, float]] = {}
+	for row in summary_rows:
+		team_name = str(row.get("zespol") or "").strip()
+		year_value = str(row.get("rok") or "").strip()
+		metric_value = row.get("metric")
+		if not team_name or not year_value or not isinstance(metric_value, (int, float)):
+			continue
+		if team_name not in pivot_team_values:
+			pivot_team_values[team_name] = {}
+			pivot_team_order.append(team_name)
+		pivot_team_values[team_name][year_value] = float(metric_value)
 
-			const recommendationHeaders = visibleRecommendationColumnDefinitions.map(
-				(column) => column.label,
-			);
-			const recommendationRows = filteredAndSortedItems.map((item) =>
-				visibleRecommendationColumnDefinitions.map((column) =>
-					getCellValue(item, column.key),
+	summary_pivot_rows: list[dict[str, Any]] = []
+	for team_name in all_year_metric_by_team.keys():
+		if team_name not in pivot_team_order:
+			pivot_team_order.append(team_name)
+	if "allYears" not in summary_pivot_years:
+		summary_pivot_years.append("allYears")
+	for team_name in pivot_team_order:
+		values = {year: float(pivot_team_values[team_name].get(year) or 0) for year in summary_pivot_years if year != "allYears"}
+		values["allYears"] = float(all_year_metric_by_team.get(team_name) or 0)
+		summary_pivot_rows.append(
+			{
+				"zespol": team_name,
+				"values": values,
+			}
+		)
+
+	detail_rows = [
+		{
+			"inspectionId": row["inspectionId"],
+			"inspekcja": row["inspekcja"],
+			"kontrola": row["kodInspekcji"],
+			"kodInspekcji": row["kodInspekcji"],
+			"kod_inspekcji": row["kodInspekcji"],
+			"year": row.get("rokPoczatku") or "-",
+			"rokPoczatku": row.get("rokPoczatku") or "-",
+			"statusInspekcjiId": row.get("statusInspekcjiId"),
+			"statusInspekcji": row.get("statusInspekcji") or "-",
+			"status": row.get("statusInspekcji") or "-",
+			"stage_group_code": row.get("stageGroupCode"),
+			"stage_group_label": row.get("stageGroupLabel"),
+			"stage_group_order": row.get("stageGroupOrder"),
+			"stage_subgroup_code": row.get("stageSubgroupCode"),
+			"stage_subgroup_label": row.get("stageSubgroupLabel"),
+			"stage_subgroup_order": row.get("stageSubgroupOrder"),
+			"nazwaPodmiotu": row["nazwaPodmiotu"],
+			"poczatekInspekcji": row.get("poczatekInspekcji") or "-",
+			"koniecInspekcji": row.get("koniecInspekcji") or "-",
+			"osobaKierujaca": row.get("osobaKierujaca", "-"),
+			"zespol": row["zespol"],
+			"data": row.get("data") or "-",
+			"czas": int(row["czas"]) if isinstance(row.get("czas"), (int, float)) else 0,
+		}
+		for row in filtered_rows
+	]
+
+	scatter_rows = [
+		{
+			"inspectionId": row["inspectionId"],
+			"year": int(row["rokPoczatku"]),
+			"time": float(row["czas"]),
+			"nazwaPodmiotu": row["nazwaPodmiotu"],
+			"kontrola": row["kodInspekcji"],
+			"osobaKierujaca": row.get("osobaKierujaca", "-"),
+			"zespol": row["zespol"],
+		}
+		for row in agg_filtered_rows
+	]
+
+	status_counter: dict[tuple[int | None, str], int] = defaultdict(int)
+	piszemy_protokol_count = 0
+	piszemy_key = "piszemy protokol"
+	for row in all_type_base_rows:
+		status_id = row.get("statusInspekcjiId")
+		status_label_raw = str(row.get("statusInspekcji") or "-").strip()
+		status_label = status_label_raw if status_label_raw else "-"
+		status_counter[(status_id if isinstance(status_id, int) else None, status_label)] += 1
+		if _normalize_text_key(status_label) == piszemy_key:
+			piszemy_protokol_count += 1
+
+	alert_status_counts = [
+		{
+			"statusInspekcjiId": status_id,
+			"statusInspekcji": status_label,
+			"count": count,
+		}
+		for (status_id, status_label), count in sorted(
+			status_counter.items(),
+			key=lambda item: (-item[1], str(item[0][1]).lower()),
+		)
+	]
+
+	return {
+		"inspectionType": inspection_type,
+		"trendMode": trend_mode,
+		"selectedMetric": trend_mode,
+		"selectedMetricLabel": metric_label,
+		"baseCount": len(base_rows),
+		"filteredCount": len(filtered_rows),
+		"teamOptions": team_options,
+		"yearOptions": year_options,
+		"detailRows": detail_rows,
+		"summaryColumns": [
+			{"key": "zespol", "label": "Zespol"},
+			{"key": "rok", "label": "Rok"},
+			{"key": "metric", "label": f"{metric_label} czasu"},
+			{"key": "average", "label": "Srednia"},
+			{"key": "median", "label": "Mediana"},
+			{"key": "count", "label": "Liczba"},
+		],
+		"summaryRows": summary_rows,
+		"summaryPivotYears": summary_pivot_years,
+		"summaryPivotRows": summary_pivot_rows,
+		"trendRows": trend_rows,
+		"scatterRows": scatter_rows,
+		"overallColumns": [
+			{"key": "zespol", "label": "Zespol"},
+			{"key": overall_metric_key, "label": f"{overall_metric_label}"},
+			{"key": "count", "label": "Liczba"},
+		],
+		"overallRows": overall_rows,
+		"yearCountColumns": year_count_columns,
+		"yearCountRows": year_count_rows,
+		"yearCountByTeamColumns": year_count_by_team_columns,
+		"yearCountByTeamRows": year_count_by_team_rows,
+		"alertStatusCounts": alert_status_counts,
+		"alertPiszemyProtokolCount": piszemy_protokol_count,
+	}
+
+
+@router.get("/api/reports/inspections-matrix", response_model=InspectionsMatrixResponse)
+def get_inspections_matrix(
+	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+	rodzaj_podmiotu: str | list[str] | None = Query(default=None, alias="rodzaj_podmiotu"),
+	rodzajPodmiotu: str | list[str] | None = Query(default=None),
+) -> dict[str, Any]:
+	raw_entity_type_filters = _parse_csv_values(rodzaj_podmiotu) + _parse_csv_values(rodzajPodmiotu)
+	entity_type_filter_keys = {_normalize_text_key(item) for item in raw_entity_type_filters if _normalize_text_key(item)}
+
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+		require_permission(conn, operator, PERMISSION_REPORTS_EXECUTED_INSPECTIONS_READ)
+
+		rows = conn.execute(
+			"""
+			SELECT
+				i.id,
+				i.kod_inspekcji,
+				i.created_by_user_id,
+				COALESCE(ss.kod_pozycji, '') AS status_inspekcji_kod,
+				COALESCE(ss.nazwa_pozycji, '-') AS status_inspekcji,
+				COALESCE(NULLIF(trim(np.skrot_pozycji), ''), np.nazwa_pozycji, '-') AS nazwa_podmiotu,
+				COALESCE(NULLIF(trim(rp.nazwa_pozycji), ''), '-') AS rodzaj_podmiotu,
+				ti.nazwa_pozycji AS typ_inspekcji,
+				(
+					SELECT group_concat(x.scope_name, '; ')
+					FROM (
+						SELECT COALESCE(NULLIF(trim(sp.skrot_pozycji), ''), sp.nazwa_pozycji, '-') AS scope_name
+						FROM inspection_scopes isc
+						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
+						WHERE isc.inspection_id = i.id
+						ORDER BY lower(COALESCE(NULLIF(trim(sp.skrot_pozycji), ''), sp.nazwa_pozycji, '-')), sp.id
+					) x
+				) AS zakres_inspekcji,
+				i.poczatek_inspekcji AS poczatek_inspekcji,
+				u.zespol_id AS lead_team_id
+			FROM inspections i
+			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
+			LEFT JOIN slownik_pozycje rp ON rp.id = i.rodzaj_podmiotu_id
+			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
+			LEFT JOIN slownik_pozycje ss ON ss.id = i.status_inspekcji_id
+			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
+			ORDER BY lower(np.nazwa_pozycji) ASC, i.poczatek_inspekcji ASC, i.id ASC
+			"""
+		).fetchall()
+
+	values_map: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+	entries_map: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+	entity_type_map: dict[str, list[str]] = defaultdict(list)
+	years_set: set[str] = set()
+
+	for row in rows:
+		row_data = dict(row)
+		nazwa_podmiotu = str(row["nazwa_podmiotu"] or "-").strip() or "-"
+		resolved_entity_type = str(row["rodzaj_podmiotu"] or "-").strip() or "-"
+		if entity_type_filter_keys and _normalize_text_key(resolved_entity_type) not in entity_type_filter_keys:
+			continue
+		year = _year_from_date(row["poczatek_inspekcji"])
+		if year is None:
+			continue
+
+		years_set.add(year)
+		cell_value = _matrix_cell_value(row["typ_inspekcji"], row["zakres_inspekcji"])
+		values_map[nazwa_podmiotu][year].append(cell_value)
+		entries_map[nazwa_podmiotu][year].append(
+			{
+				"type": _matrix_type_code(row["typ_inspekcji"]),
+				"scopes": _normalize_matrix_scopes(row["zakres_inspekcji"]),
+				"inspectionId": int(row["id"]),
+				"kodInspekcji": str(row_data.get("kod_inspekcji") or "-").strip() or "-",
+				"date": str(row_data.get("poczatek_inspekcji") or "-").strip() or "-",
+			}
+		)
+		entity_type_map[nazwa_podmiotu].append(resolved_entity_type)
+
+	lata = sorted(years_set)
+	result_rows: list[dict[str, Any]] = []
+
+	for nazwa_podmiotu in sorted(values_map.keys(), key=lambda value: value.lower()):
+		wartosci: dict[str, str] = {}
+		cells: dict[str, list[dict[str, Any]]] = {}
+		for year in lata:
+			cell_values = values_map[nazwa_podmiotu].get(year, [])
+			entries = entries_map[nazwa_podmiotu].get(year, [])
+			cells[year] = sorted(
+				entries,
+				key=lambda item: (
+					str(item.get("date") or "9999-99-99"),
+					0 if str(item.get("type") or "") == "K" else 1,
+					int(item.get("inspectionId") or 0),
 				),
-			);
+			)
+			if not cell_values:
+				wartosci[year] = "-"
+				continue
 
-			addWorksheetWithStyles(
-				workbook,
-				"Zalecenia",
-				recommendationHeaders,
-				recommendationRows,
-			);
+			# Keep insertion order while removing duplicates.
+			deduplicated = list(dict.fromkeys(cell_values))
+			if len(deduplicated) > 1:
+				deduplicated = [value for value in deduplicated if value != "-"]
+			wartosci[year] = ", ".join(deduplicated)
 
-			if (includeInspections && inspectionColumnKeys.length > 0) {
-				const inspectionHeaders = inspectionColumnKeys.map(
-					(key) =>
-						INSPECTION_EXPORT_COLUMNS.find((column) => column.key === key)?.label ??
-						key,
-				);
-				const inspectionRowsForExport = relatedInspections.map((row) =>
-					inspectionColumnKeys.map((key) => String(row[key] ?? "")),
-				);
-				addWorksheetWithStyles(
-					workbook,
-					"Inspekcje",
-					inspectionHeaders,
-					inspectionRowsForExport,
-				);
+		entity_types = list(dict.fromkeys(entity_type_map.get(nazwa_podmiotu, ["-"])))
+		if len(entity_types) > 1:
+			entity_types = [value for value in entity_types if value != "-"]
+		resolved_entity_types = ", ".join(entity_types) if entity_types else "-"
+
+		result_rows.append(
+			{
+				"nazwa_podmiotu": nazwa_podmiotu,
+				"rodzaj_podmiotu": resolved_entity_types,
+				"wartosci": wartosci,
+				"cells": cells,
+			}
+		)
+
+	return {
+		"formatVersion": "2.0",
+		"lata": lata,
+		"rows": result_rows,
+	}
+
+
+@router.get("/api/reports/inspections-detailed", response_model=InspectionsDetailedResponse)
+def get_inspections_detailed(
+	manager_user_id: int | None = Query(default=None, alias="managerUserId"),
+	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> dict[str, Any]:
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+		require_permission(conn, operator, PERMISSION_REPORTS_EXECUTED_INSPECTIONS_READ)
+		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
+			raise HTTPException(status_code=403, detail="Brak uprawnien")
+
+		manager_context: dict[str, Any] | None = None
+		if int(operator["rola_id"]) == 2:
+			manager_context = operator
+		elif int(operator["rola_id"]) == 3 and manager_user_id is not None:
+			manager_row = conn.execute(
+				"""
+				SELECT id, login, rola_id, zespol_id, aktywny
+				FROM users
+				WHERE id = ?
+				LIMIT 1
+				""",
+				(int(manager_user_id),),
+			).fetchone()
+			if manager_row is None:
+				raise HTTPException(status_code=404, detail="Kierownik nie istnieje")
+			manager_data = dict(manager_row)
+			if int(manager_data.get("aktywny") or 0) != 1:
+				raise HTTPException(status_code=400, detail="Kierownik jest nieaktywny")
+			if int(manager_data.get("rola_id") or 0) != 2:
+				raise HTTPException(status_code=400, detail="managerUserId musi wskazywac kierownika")
+			manager_context = {
+				"id": int(manager_data["id"]),
+				"login": manager_data["login"],
+				"rola_id": int(manager_data["rola_id"]),
+				"zespol_id": manager_data["zespol_id"],
+			}
+		elif manager_user_id is not None:
+			raise HTTPException(status_code=400, detail="managerUserId jest dozwolone tylko dla dyrektora")
+
+		rows = conn.execute(
+			"""
+			SELECT
+				i.id AS id,
+				i.created_by_user_id AS created_by_user_id,
+				i.osoba_kierujaca_user_id AS osoba_kierujaca_user_id,
+				i.kod_inspekcji AS kod_inspekcji,
+				i.status_inspekcji_id AS status_inspekcji_id,
+				COALESCE(si.kod_pozycji, '') AS status_inspekcji_kod,
+				COALESCE(si.nazwa_pozycji, '-') AS status_inspekcji,
+				COALESCE(NULLIF(trim(si.skrot_pozycji), ''), si.nazwa_pozycji, '-') AS status_inspekcji_skrot,
+				COALESCE(NULLIF(trim(np.skrot_pozycji), ''), np.nazwa_pozycji, '-') AS nazwa_podmiotu,
+				COALESCE(rp.nazwa_pozycji, '-') AS rodzaj_podmiotu,
+				ti.nazwa_pozycji AS typ_inspekcji,
+				(
+					SELECT group_concat(x.scope_name, '; ')
+					FROM (
+						SELECT COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-') AS scope_name
+						FROM inspection_scopes isc
+						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
+						WHERE isc.inspection_id = i.id
+						ORDER BY lower(COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-')), sp.id
+					) x
+				) AS zakres_inspekcji,
+				i.poczatek_inspekcji AS poczatek_inspekcji,
+				i.koniec_inspekcji AS koniec_inspekcji,
+				i.data_protokolu_sprawozdania AS data_protokolu_sprawozdania,
+				COALESCE(
+					nullif(trim(u.imie || ' ' || u.nazwisko), ''),
+					'-'
+				) AS osoba_kierujaca,
+				COALESCE(t.kod, '-') AS zespol_osoby_kierujacej_kod,
+				u.zespol_id AS lead_team_id
+			FROM inspections i
+			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
+			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
+			LEFT JOIN slownik_pozycje rp ON rp.id = i.rodzaj_podmiotu_id
+			LEFT JOIN slownik_pozycje si ON si.id = i.status_inspekcji_id
+			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
+			LEFT JOIN teams t ON t.id = u.zespol_id
+			ORDER BY lower(np.nazwa_pozycji) ASC, i.poczatek_inspekcji ASC, i.id ASC
+			"""
+		).fetchall()
+
+	result_rows: list[dict[str, Any]] = []
+	for row in rows:
+		if _is_hidden_status_code(row["status_inspekcji_kod"]):
+			continue
+		if manager_context is not None:
+			in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, int(row["id"]), manager_context)
+			if not (in_team_scope or in_added_scope):
+				continue
+		else:
+			if int(operator["rola_id"]) != 3 and not _can_access_inspection_for_reports(conn, dict(row), operator):
+				continue
+		poczatek_inspekcji = str(row["poczatek_inspekcji"] or "-")
+		koniec_inspekcji = str(row["koniec_inspekcji"] or "-")
+		data_protokolu = row["data_protokolu_sprawozdania"]
+		end_to_today_days = _days_from_end_to_today(row["koniec_inspekcji"])
+		status_label = _public_status_label(row["status_inspekcji"])
+		bucket_value = _end_to_today_bucket(end_to_today_days) if _should_compute_bucket_code(row["status_inspekcji_kod"]) else None
+		bucket_value_alt = _end_to_today_bucket_alt(end_to_today_days) if _should_compute_bucket_code(row["status_inspekcji_kod"]) else None
+		inspection_id = int(row["id"])
+		leader_user_id = int(row["osoba_kierujaca_user_id"]) if row["osoba_kierujaca_user_id"] is not None else None
+		is_leader_current_user = leader_user_id is not None and int(operator["id"]) == leader_user_id
+		is_member_current_user = _is_member_current_user(conn, inspection_id, int(operator["id"]))
+		scope_operator = manager_context if manager_context is not None else operator
+		is_leader_in_manager_team = _is_leader_in_manager_scope(conn, leader_user_id, scope_operator)
+		is_member_in_manager_team = _is_member_in_manager_scope(conn, inspection_id, scope_operator)
+
+		result_rows.append(
+			{
+				"kod_inspekcji": str(row["kod_inspekcji"] or "-").strip() or "-",
+				"nazwa_podmiotu": str(row["nazwa_podmiotu"] or "-").strip() or "-",
+				"nazwa_podmiotu_skrocona": str(row["nazwa_podmiotu"] or "-").strip() or "-",
+				"nazwa_podmiotu_skrot": str(row["nazwa_podmiotu"] or "-").strip() or "-",
+				"nazwaPodmiotuSkrocona": str(row["nazwa_podmiotu"] or "-").strip() or "-",
+				"nazwaPodmiotuSkrot": str(row["nazwa_podmiotu"] or "-").strip() or "-",
+				"rodzaj_podmiotu": str(row["rodzaj_podmiotu"] or "-").strip() or "-",
+				"inspekcja": _inspekcja_code(row["typ_inspekcji"]),
+				"typ_inspekcji": str(row["typ_inspekcji"] or "-").strip() or "-",
+				"status": status_label,
+				"status_inspekcji_skrot": str(row["status_inspekcji_skrot"] or status_label or "-").strip() or "-",
+				"status_inspekcji_id": int(row["status_inspekcji_id"]) if row["status_inspekcji_id"] is not None else None,
+				"status_inspekcji": status_label,
+				"zakres_inspekcji": str(row["zakres_inspekcji"] or "-").strip() or "-",
+				"typ_zakres_inspekcji": _matrix_cell_value(row["typ_inspekcji"], row["zakres_inspekcji"]),
+				"rok_poczatku": _year_from_date(row["poczatek_inspekcji"]) or "-",
+				"poczatek_inspekcji": poczatek_inspekcji,
+				"koniec_inspekcji": koniec_inspekcji,
+				"inspektor_kierujacy": str(row["osoba_kierujaca"] or "-").strip() or "-",
+				"is_leader_current_user": bool(is_leader_current_user),
+				"is_leader_in_manager_team": bool(is_leader_in_manager_team),
+				"is_member_current_user": bool(is_member_current_user),
+				"is_member_in_manager_team": bool(is_member_in_manager_team),
+				"liczba_dni_od_konca_inspekcji_do_dzis": end_to_today_days,
+				"wartosc_liczbowa_przedzialu": bucket_value,
+				"wartosc_liczbowa_przedzialu_alt": bucket_value_alt,
+				"osoba_kierujaca": str(row["osoba_kierujaca"] or "-").strip() or "-",
+				"zespol_osoby_kierujacej_kod": str(row["zespol_osoby_kierujacej_kod"] or "-").strip() or "-",
+				"data_protokolu_sprawozdania": data_protokolu,
+				"roznica_dni_miedzy_data_protokolu_a_koncem": _days_difference(data_protokolu, row["koniec_inspekcji"]),
+			}
+		)
+
+	return {
+		"rows": result_rows,
+	}
+
+
+@router.get("/api/reports/inspections-stage-summary", response_model=InspectionsStageSummaryResponse)
+def get_inspections_stage_summary(
+	manager_user_id: int | None = Query(default=None, alias="managerUserId"),
+	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> dict[str, Any]:
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+		require_permission(conn, operator, PERMISSION_REPORTS_EXECUTED_INSPECTIONS_READ)
+		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
+			raise HTTPException(status_code=403, detail="Brak uprawnien")
+
+		manager_context: dict[str, Any] | None = None
+		if int(operator["rola_id"]) == 2:
+			manager_context = operator
+		elif int(operator["rola_id"]) == 3 and manager_user_id is not None:
+			manager_row = conn.execute(
+				"""
+				SELECT id, login, rola_id, zespol_id, aktywny
+				FROM users
+				WHERE id = ?
+				LIMIT 1
+				""",
+				(int(manager_user_id),),
+			).fetchone()
+			if manager_row is None:
+				raise HTTPException(status_code=404, detail="Kierownik nie istnieje")
+			manager_data = dict(manager_row)
+			if int(manager_data.get("aktywny") or 0) != 1:
+				raise HTTPException(status_code=400, detail="Kierownik jest nieaktywny")
+			if int(manager_data.get("rola_id") or 0) != 2:
+				raise HTTPException(status_code=400, detail="managerUserId musi wskazywac kierownika")
+			manager_context = {
+				"id": int(manager_data["id"]),
+				"login": manager_data["login"],
+				"rola_id": int(manager_data["rola_id"]),
+				"zespol_id": manager_data["zespol_id"],
+			}
+		elif manager_user_id is not None:
+			raise HTTPException(status_code=400, detail="managerUserId jest dozwolone tylko dla dyrektora")
+
+		status_rows = conn.execute(
+			"""
+			SELECT
+				id,
+				COALESCE(nazwa_pozycji, 'brak') AS nazwa_pozycji,
+				COALESCE(kolejnosc, 999999) AS kolejnosc
+			FROM slownik_pozycje
+			WHERE lower(kod_typu) = 'statusy_inspekcji'
+			ORDER BY COALESCE(kolejnosc, 999999) ASC, id ASC
+			"""
+		).fetchall()
+
+		status_stats: dict[str, dict[str, Any]] = {}
+		status_id_index: dict[int, str] = {}
+		for status_row in status_rows:
+			status_id = int(status_row["id"])
+			status_name = str(status_row["nazwa_pozycji"] or "").strip() or f"status_{status_id}"
+			status_code = _normalize_code_key(status_name) or f"status_{status_id}"
+			status_stats[status_code] = {
+				"statusId": status_id,
+				"stageGroupCode": status_code,
+				"stageGroupLabel": status_name,
+				"stageGroupShortLabel": status_name,
+				"stageGroupOrder": int(status_row["kolejnosc"]),
+				"count": 0,
+				"countTeam": 0,
+				"countManagerAdded": 0,
+				"countTeamAndManagerAdded": 0,
+			}
+			status_id_index[status_id] = status_code
+
+		unknown_code = "unknown_unmapped"
+		if unknown_code not in status_stats:
+			status_stats[unknown_code] = {
+				"statusId": None,
+				"stageGroupCode": unknown_code,
+				"stageGroupLabel": "Nieprzypisany status",
+				"stageGroupShortLabel": "Nieprzypisany status",
+				"stageGroupOrder": 999999,
+				"count": 0,
+				"countTeam": 0,
+				"countManagerAdded": 0,
+				"countTeamAndManagerAdded": 0,
 			}
 
-			if (includeSanctions && sanctionColumnKeys.length > 0) {
-				const sanctionHeaders = sanctionColumnKeys.map(
-					(key) =>
-						SANCTION_EXPORT_COLUMNS.find((column) => column.key === key)?.label ??
-						key,
-				);
-				const sanctionRowsForExport = relatedSanctions.map((item) => {
-					const inspectionId = item.inspectionId ?? null;
-					const inspectionCode =
-						resolveInspectionCode({
-							inspectionKod: item.inspectionKod,
-							kodInspekcji: item.kodInspekcji,
-							inspectionLp: item.inspectionLp,
-							inspectionId,
-						}) ||
-						(typeof inspectionId === "number"
-							? String(
-									inspectionCodeByIdForExport.get(inspectionId) ??
-										sanctionsLpById.get(inspectionId) ??
-										"",
-								)
-							: "");
+		rows = conn.execute(
+			"""
+			SELECT
+				i.id,
+				i.created_by_user_id,
+				i.status_inspekcji_id,
+				COALESCE(si.kod_pozycji, '') AS status_inspekcji_kod
+			FROM inspections i
+			LEFT JOIN slownik_pozycje si ON si.id = i.status_inspekcji_id
+			ORDER BY i.id ASC
+			"""
+		).fetchall()
 
-					return sanctionColumnKeys.map((key) => {
-						switch (key) {
-							case "lp":
-								return String(item.lp);
-							case "requestId":
-								return String(item.kodSankcji ?? item.lp ?? "").trim();
-							case "inspectionLp":
-								return inspectionCode;
-							case "nazwaPodmiotuObjetegoInspekcja":
-								return item.nazwaPodmiotuObjetegoInspekcja ?? "";
-							case "nazwaPodmiotuObjetegoSankcjaList":
-								return item.nazwaPodmiotuObjetegoSankcjaList.join(", ");
-							case "dataWniosku":
-								return item.dataWniosku ?? "";
-							case "wniosekDo":
-								return item.wniosekDo ?? "";
-							case "sankcjaList":
-								return item.sankcjaList.join(", ");
-							case "podstawaPrawnaSankcjiList":
-								return item.podstawaPrawnaSankcjiList.join(", ");
-							case "naruszeniaSkutkujaceSankcjaList":
-								return item.naruszeniaSkutkujaceSankcjaList.join(", ");
-							case "czyMamyInformacjeOWszczeciuPostepowania":
-								return item.czyMamyInformacjeOWszczeciuPostepowania ?? "";
-							case "rozstrzygniecie":
-								return item.rozstrzygniecie ?? "";
-							case "komentarz":
-								return item.komentarz ?? "";
-						}
-					});
-				});
-				addWorksheetWithStyles(
-					workbook,
-					"Wnioski sankcyjne",
-					sanctionHeaders,
-					sanctionRowsForExport,
-				);
+		total_inspections = 0
+		quality_error_count = 0
+
+		for row in rows:
+			row_dict = dict(row)
+			inspection_id = int(row_dict["id"])
+			in_team_scope = False
+			in_added_scope = False
+
+			if _is_hidden_status_code(row_dict.get("status_inspekcji_kod")):
+				continue
+
+			if manager_context is not None:
+				in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, inspection_id, manager_context)
+				if not (in_team_scope or in_added_scope):
+					continue
+			else:
+				if int(operator["rola_id"]) != 3 and not _can_access_inspection_for_reports(conn, row_dict, operator):
+					continue
+
+			status_id = row_dict.get("status_inspekcji_id")
+			group_code = unknown_code
+			if status_id is not None:
+				group_code = status_id_index.get(int(status_id), unknown_code)
+
+			if group_code == unknown_code:
+				quality_error_count += 1
+
+			total_inspections += 1
+			group_item = status_stats[group_code]
+
+			group_item["count"] += 1
+
+			if manager_context is not None:
+				if in_team_scope:
+					group_item["countTeam"] += 1
+				if in_added_scope:
+					group_item["countManagerAdded"] += 1
+				if in_team_scope and in_added_scope:
+					group_item["countTeamAndManagerAdded"] += 1
+
+		statuses_payload = [
+			{
+				"stageGroupCode": item["stageGroupCode"],
+				"stageGroupLabel": item["stageGroupLabel"],
+				"stageGroupShortLabel": item.get("stageGroupShortLabel"),
+				"stageGroupOrder": item["stageGroupOrder"],
+				"count": item["count"],
+				"countTeam": item["countTeam"],
+				"countManagerAdded": item["countManagerAdded"],
+				"countTeamAndManagerAdded": item["countTeamAndManagerAdded"],
+			}
+			for item in sorted(status_stats.values(), key=lambda x: (int(x["stageGroupOrder"]), str(x["stageGroupLabel"]).lower()))
+		]
+
+	return {
+		"generatedAt": datetime.now().isoformat(timespec="seconds"),
+		"stageDictionaryVersion": "2.0.0",
+		"totalInspections": int(total_inspections),
+		"qualityErrorCount": int(quality_error_count),
+		"statuses": statuses_payload,
+	}
+
+
+@router.get("/api/reports/recommendations-stage-summary", response_model=RecommendationsStageSummaryResponse)
+def get_recommendations_stage_summary(
+	manager_user_id: int | None = Query(default=None, alias="managerUserId"),
+	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> dict[str, Any]:
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+		require_permission(conn, operator, PERMISSION_RECOMMENDATIONS_READ)
+		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
+			raise HTTPException(status_code=403, detail="Brak uprawnien")
+
+		manager_context: dict[str, Any] | None = None
+		if int(operator["rola_id"]) == 2:
+			manager_context = operator
+		elif int(operator["rola_id"]) == 3 and manager_user_id is not None:
+			manager_row = conn.execute(
+				"""
+				SELECT id, login, rola_id, zespol_id, aktywny
+				FROM users
+				WHERE id = ?
+				LIMIT 1
+				""",
+				(int(manager_user_id),),
+			).fetchone()
+			if manager_row is None:
+				raise HTTPException(status_code=404, detail="Kierownik nie istnieje")
+			manager_data = dict(manager_row)
+			if int(manager_data.get("aktywny") or 0) != 1:
+				raise HTTPException(status_code=400, detail="Kierownik jest nieaktywny")
+			if int(manager_data.get("rola_id") or 0) != 2:
+				raise HTTPException(status_code=400, detail="managerUserId musi wskazywac kierownika")
+			manager_context = {
+				"id": int(manager_data["id"]),
+				"login": manager_data["login"],
+				"rola_id": int(manager_data["rola_id"]),
+				"zespol_id": manager_data["zespol_id"],
+			}
+		elif manager_user_id is not None:
+			raise HTTPException(status_code=400, detail="managerUserId jest dozwolone tylko dla dyrektora")
+
+		status_rows = conn.execute(
+			"""
+			SELECT
+				id,
+				COALESCE(kod_pozycji, '') AS kod_pozycji,
+				COALESCE(nazwa_pozycji, 'brak') AS nazwa_pozycji,
+				COALESCE(kolejnosc, 999999) AS kolejnosc
+			FROM slownik_pozycje
+			WHERE lower(kod_typu) = 'statusy_zalecen'
+			ORDER BY COALESCE(kolejnosc, 999999) ASC, id ASC
+			"""
+		).fetchall()
+
+		group_stats: dict[str, dict[str, Any]] = {}
+		for status_row in status_rows:
+			status_id = int(status_row["id"])
+			status_code = str(status_row["kod_pozycji"] or "").strip() or f"status_{status_id}"
+			group_stats[status_code] = {
+				"statusId": status_id,
+				"stageGroupCode": status_code,
+				"stageGroupLabel": str(status_row["nazwa_pozycji"]),
+				"stageGroupShortLabel": status_row["nazwa_pozycji"],
+				"stageGroupOrder": int(status_row["kolejnosc"]),
+				"count": 0,
+				"countTeam": 0,
+				"countManagerAdded": 0,
+				"countTeamAndManagerAdded": 0,
 			}
 
-			if (includeDecisions && decisionColumnKeys.length > 0) {
-				const decisionHeaders = decisionColumnKeys.map(
-					(key) =>
-						DECISION_EXPORT_COLUMNS.find((column) => column.key === key)?.label ??
-						key,
-				);
-				const decisionRowsForExport = relatedDecisions.map((item, index) =>
-					decisionColumnKeys.map((key) => {
-						const recommendationCode = String(
-							item.recommendationKodZalecenia ?? "",
-						)
-							.trim()
-							.toUpperCase();
-						switch (key) {
-							case "lp":
-								return String(index + 1);
-							case "kodDecyzji":
-								return item.kodDecyzji ?? "";
-							case "kodZalecenia":
-								return recommendationCode;
-							case "inspectionLp":
-								return (
-									inspectionCodeByRecommendationCode.get(recommendationCode) ?? ""
-								);
-							case "nazwaPodmiotu":
-								return item.nazwaPodmiotu ?? "";
-							case "liczbaZalecen":
-								return item.liczbaZalecen === null ? "" : String(item.liczbaZalecen);
-							case "dataWszczeciaPostepowaniaIInstancji":
-								return item.dataWszczeciaPostepowaniaIInstancji ?? "";
-							case "osobyProwadzaceIInstancjeList":
-								return (item.osobyProwadzaceIInstancjeList ?? []).join(", ");
-							case "dataDecyzjiIInstancji":
-								return item.dataDecyzjiIInstancji ?? "";
-							case "dataDoreczeniaDecyzjiIInstancji":
-								return item.dataDoreczeniaDecyzjiIInstancji ?? "";
-							case "rozstrzygniecieI":
-								return item.rozstrzygniecieI ?? "";
-							case "dataWnioskuPonowneRozpatrzenie":
-								return item.dataWnioskuPonowneRozpatrzenie ?? "";
-							case "dataWplywuWnioskuPonowneRozpatrzenie":
-								return item.dataWplywuWnioskuPonowneRozpatrzenie ?? "";
-							case "osobyProwadzaceIIInstancjeList":
-								return (item.osobyProwadzaceIIInstancjeList ?? []).join(", ");
-							case "dataDecyzjiIIInstancji":
-								return item.dataDecyzjiIIInstancji ?? "";
-							case "dataDoreczeniaDecyzjiIIInstancji":
-								return item.dataDoreczeniaDecyzjiIIInstancji ?? "";
-							case "rozstrzygniecieII":
-								return item.rozstrzygniecieII ?? "";
-							case "komentarz":
-								return item.komentarz ?? "";
-						}
-					}),
-				);
-				addWorksheetWithStyles(
-					workbook,
-					"Decyzje zobowiązujące",
-					decisionHeaders,
-					decisionRowsForExport,
-				);
+		unknown_code = "unknown_unmapped"
+		if unknown_code not in group_stats:
+			group_stats[unknown_code] = {
+				"statusId": None,
+				"stageGroupCode": unknown_code,
+				"stageGroupLabel": "Nieprzypisany status",
+				"stageGroupShortLabel": "Nieprzypisany status",
+				"stageGroupOrder": 999999,
+				"count": 0,
+				"countTeam": 0,
+				"countManagerAdded": 0,
+				"countTeamAndManagerAdded": 0,
 			}
 
-			const fileName = "zalecenia-inspekcje-sankcje-decyzje.xlsx";
-			await saveWorkbookAsXlsx(workbook, fileName);
-		} catch (caughtError) {
-			if (
-				caughtError instanceof DOMException &&
-				caughtError.name === "AbortError"
-			) {
-				return;
+		recommendation_rows = conn.execute(
+			"""
+			SELECT
+				r.id,
+				r.inspection_id,
+				r.created_by_user_id AS recommendation_created_by_user_id,
+				r.status_zalecenia_id,
+				i.created_by_user_id AS inspection_created_by_user_id,
+				ru.zespol_id AS recommendation_author_team_id,
+				ru.created_by_user_id AS recommendation_author_created_by_user_id
+			FROM recommendations r
+			LEFT JOIN inspections i ON i.id = r.inspection_id
+			LEFT JOIN users ru ON ru.id = r.created_by_user_id
+			ORDER BY r.id ASC
+			"""
+		).fetchall()
+
+		total_recommendations = 0
+		quality_error_count = 0
+
+		for row in recommendation_rows:
+			row_dict = dict(row)
+
+			in_team_scope = False
+			in_added_scope = False
+			inspection_id_raw = row_dict.get("inspection_id")
+
+			if manager_context is not None:
+				if inspection_id_raw is not None:
+					in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, int(inspection_id_raw), manager_context)
+				else:
+					author_team_id = row_dict.get("recommendation_author_team_id")
+					author_created_by = row_dict.get("recommendation_author_created_by_user_id")
+					team_id = manager_context.get("zespol_id")
+					if team_id is not None and author_team_id is not None and int(author_team_id) == int(team_id):
+						in_team_scope = True
+					if author_created_by is not None and int(author_created_by) == int(manager_context["id"]):
+						in_added_scope = True
+				if not (in_team_scope or in_added_scope):
+					continue
+			else:
+				if not _can_access_recommendation_for_reports(conn, row_dict, operator):
+					continue
+
+			status_id = row_dict.get("status_zalecenia_id")
+			group_code = unknown_code
+			if status_id is not None:
+				for code, payload in group_stats.items():
+					if payload.get("statusId") is not None and int(payload["statusId"]) == int(status_id):
+						group_code = code
+						break
+
+			if group_code == unknown_code:
+				quality_error_count += 1
+
+			total_recommendations += 1
+			group_item = group_stats[group_code]
+			group_item["count"] += 1
+
+			if manager_context is not None:
+				if in_team_scope:
+					group_item["countTeam"] += 1
+				if in_added_scope:
+					group_item["countManagerAdded"] += 1
+				if in_team_scope and in_added_scope:
+					group_item["countTeamAndManagerAdded"] += 1
+
+		groups_payload = [
+			{
+				"stageGroupCode": item["stageGroupCode"],
+				"stageGroupLabel": item["stageGroupLabel"],
+				"stageGroupShortLabel": item.get("stageGroupShortLabel"),
+				"stageGroupOrder": item["stageGroupOrder"],
+				"count": item["count"],
+				"countTeam": item["countTeam"],
+				"countManagerAdded": item["countManagerAdded"],
+				"countTeamAndManagerAdded": item["countTeamAndManagerAdded"],
 			}
+			for item in sorted(group_stats.values(), key=lambda x: (int(x["stageGroupOrder"]), str(x["stageGroupCode"])))
+		]
 
-			setError("Nie udało się wyeksportować danych do Excela.");
-		} finally {
-			setIsExporting(false);
-		}
-	};
+	return {
+		"generatedAt": datetime.now().isoformat(timespec="seconds"),
+		"stageDictionaryVersion": RECOMMENDATIONS_STAGE_DICTIONARY_VERSION,
+		"totalRecommendations": int(total_recommendations),
+		"qualityErrorCount": int(quality_error_count),
+		"groups": groups_payload,
+	}
 
-	const handleOpenExportConfigModal = () => {
-		if (isExporting || filteredAndSortedItems.length === 0) {
-			return;
-		}
 
-		setIncludeInspectionsInExport(false);
-		setIncludeSanctionsInExport(false);
-		setIncludeDecisionsInExport(false);
-		setActiveExportColumnsTab("inspections");
-		setIsExportConfigModalOpen(true);
-	};
+@router.get("/api/reports/recommendations-detailed", response_model=RecommendationsDetailedResponse)
+def get_recommendations_detailed(
+	manager_user_id: int | None = Query(default=None, alias="managerUserId"),
+	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> dict[str, Any]:
+	with get_connection() as conn:
+		operator = _resolve_operator(conn, x_operator_login)
+		require_permission(conn, operator, PERMISSION_RECOMMENDATIONS_READ)
+		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
+			raise HTTPException(status_code=403, detail="Brak uprawnien")
 
-	const toggleInspectionExportColumn = (
-		columnKey: InspectionExportColumnKey,
-		isSelected: boolean,
-	) => {
-		setSelectedInspectionExportColumns((prev) => {
-			const nextSet = new Set(prev);
-			if (isSelected) {
-				nextSet.add(columnKey);
-			} else {
-				if (prev.length <= 1) {
-					return prev;
-				}
-				nextSet.delete(columnKey);
+		manager_context: dict[str, Any] | None = None
+		if int(operator["rola_id"]) == 2:
+			manager_context = operator
+		elif int(operator["rola_id"]) == 3 and manager_user_id is not None:
+			manager_row = conn.execute(
+				"""
+				SELECT id, login, rola_id, zespol_id, aktywny
+				FROM users
+				WHERE id = ?
+				LIMIT 1
+				""",
+				(int(manager_user_id),),
+			).fetchone()
+			if manager_row is None:
+				raise HTTPException(status_code=404, detail="Kierownik nie istnieje")
+			manager_data = dict(manager_row)
+			if int(manager_data.get("aktywny") or 0) != 1:
+				raise HTTPException(status_code=400, detail="Kierownik jest nieaktywny")
+			if int(manager_data.get("rola_id") or 0) != 2:
+				raise HTTPException(status_code=400, detail="managerUserId musi wskazywac kierownika")
+			manager_context = {
+				"id": int(manager_data["id"]),
+				"login": manager_data["login"],
+				"rola_id": int(manager_data["rola_id"]),
+				"zespol_id": manager_data["zespol_id"],
 			}
+		elif manager_user_id is not None:
+			raise HTTPException(status_code=400, detail="managerUserId jest dozwolone tylko dla dyrektora")
 
-			return INSPECTION_EXPORT_COLUMNS.map((column) => column.key).filter((key) =>
-				nextSet.has(key),
-			);
-		});
-	};
+		rows = conn.execute(
+			"""
+			SELECT
+				r.kod_zalecenia,
+				r.inspection_id,
+				i.kod_inspekcji,
+				r.created_by_user_id AS recommendation_created_by_user_id,
+				r.status_zalecenia_id,
+				r.data_zalecen,
+				COALESCE(st.nazwa_pozycji, 'brak') AS status_nazwa,
+				COALESCE(NULLIF(trim(st.skrot_pozycji), ''), st.nazwa_pozycji, 'brak') AS status_skrot,
+				COALESCE(
+					NULLIF(trim(np_rec.skrot_pozycji), ''),
+					np_rec.nazwa_pozycji,
+					NULLIF(trim(np_ins.skrot_pozycji), ''),
+					np_ins.nazwa_pozycji,
+					'brak'
+				) AS nazwa_podmiotu,
+				i.created_by_user_id AS inspection_created_by_user_id,
+				ru.zespol_id AS recommendation_author_team_id,
+				ru.created_by_user_id AS recommendation_author_created_by_user_id,
+				(
+					SELECT group_concat(x.dv, ',')
+					FROM (
+						SELECT rmd.date_value AS dv
+						FROM recommendation_multi_dates rmd
+						WHERE rmd.recommendation_id = r.id
+							AND rmd.date_type = 'TERMIN_WYKONANIA_ZALECEN'
+						ORDER BY rmd.date_value ASC
+					) x
+				) AS terminy_wykonania_csv,
+				COALESCE(r.pozycja, 0) AS liczba_zalecen
+			FROM recommendations r
+			LEFT JOIN inspections i ON i.id = r.inspection_id
+			LEFT JOIN users ru ON ru.id = r.created_by_user_id
+			LEFT JOIN slownik_pozycje st ON st.id = r.status_zalecenia_id
+			LEFT JOIN slownik_pozycje np_rec ON np_rec.id = r.nazwa_podmiotu_id
+			LEFT JOIN slownik_pozycje np_ins ON np_ins.id = i.nazwa_podmiotu_id
+			ORDER BY r.id DESC
+			"""
+		).fetchall()
 
-	const toggleSanctionExportColumn = (
-		columnKey: SanctionExportColumnKey,
-		isSelected: boolean,
-	) => {
-		setSelectedSanctionExportColumns((prev) => {
-			const nextSet = new Set(prev);
-			if (isSelected) {
-				nextSet.add(columnKey);
-			} else {
-				if (prev.length <= 1) {
-					return prev;
+		def _first_deadline(csv_value: str | None) -> str | None:
+			if csv_value is None:
+				return None
+			parts = [p.strip() for p in str(csv_value).split(",") if p.strip()]
+			if not parts:
+				return None
+			return parts[0]
+
+		payload_rows: list[dict[str, Any]] = []
+		for row in rows:
+			row_dict = dict(row)
+
+			in_team_scope = False
+			in_added_scope = False
+			inspection_id_raw = row_dict.get("inspection_id")
+
+			if manager_context is not None:
+				if inspection_id_raw is not None:
+					in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, int(inspection_id_raw), manager_context)
+				else:
+					author_team_id = row_dict.get("recommendation_author_team_id")
+					author_created_by = row_dict.get("recommendation_author_created_by_user_id")
+					team_id = manager_context.get("zespol_id")
+					if team_id is not None and author_team_id is not None and int(author_team_id) == int(team_id):
+						in_team_scope = True
+					if author_created_by is not None and int(author_created_by) == int(manager_context["id"]):
+						in_added_scope = True
+				if not (in_team_scope or in_added_scope):
+					continue
+			else:
+				if not _can_access_recommendation_for_reports(conn, row_dict, operator):
+					continue
+
+			terminy_csv = row_dict.get("terminy_wykonania_csv")
+			payload_rows.append(
+				{
+					"status": str(row_dict.get("status_nazwa") or "brak"),
+					"status_skrot": str(row_dict.get("status_skrot") or row_dict.get("status_nazwa") or "brak"),
+					"statusSkrot": str(row_dict.get("status_skrot") or row_dict.get("status_nazwa") or "brak"),
+					"kod_zalecenia": row_dict.get("kod_zalecenia"),
+					"kod_inspekcji": row_dict.get("kod_inspekcji"),
+					"kodZalecenia": row_dict.get("kod_zalecenia"),
+					"kodInspekcji": row_dict.get("kod_inspekcji"),
+					"nazwa_podmiotu": str(row_dict.get("nazwa_podmiotu") or "brak"),
+					"nazwa_podmiotu_skrocona": str(row_dict.get("nazwa_podmiotu") or "brak"),
+					"nazwa_podmiotu_skrot": str(row_dict.get("nazwa_podmiotu") or "brak"),
+					"nazwaPodmiotuSkrocona": str(row_dict.get("nazwa_podmiotu") or "brak"),
+					"nazwaPodmiotuSkrot": str(row_dict.get("nazwa_podmiotu") or "brak"),
+					"data_zalecen": row_dict.get("data_zalecen"),
+					"termin_zalecen": _first_deadline(terminy_csv),
+					"termin_wykonania_zalecen": terminy_csv,
+					"liczba_zalecen": int(row_dict.get("liczba_zalecen") or 0),
 				}
-				nextSet.delete(columnKey);
-			}
+			)
 
-			return SANCTION_EXPORT_COLUMNS.map((column) => column.key).filter((key) =>
-				nextSet.has(key),
-			);
-		});
-	};
-
-	const toggleDecisionExportColumn = (
-		columnKey: DecisionExportColumnKey,
-		isSelected: boolean,
-	) => {
-		setSelectedDecisionExportColumns((prev) => {
-			const nextSet = new Set(prev);
-			if (isSelected) {
-				nextSet.add(columnKey);
-			} else {
-				if (prev.length <= 1) {
-					return prev;
-				}
-				nextSet.delete(columnKey);
-			}
-
-			return DECISION_EXPORT_COLUMNS.map((column) => column.key).filter((key) =>
-				nextSet.has(key),
-			);
-		});
-	};
-
-	const handleConfirmExportFromModal = () => {
-		if (
-			(includeInspectionsInExport && selectedInspectionExportColumns.length === 0) ||
-			(includeSanctionsInExport && selectedSanctionExportColumns.length === 0) ||
-			(includeDecisionsInExport && selectedDecisionExportColumns.length === 0)
-		) {
-			return;
-		}
-
-		const orderedInspectionColumns = INSPECTION_EXPORT_COLUMNS.map(
-			(column) => column.key,
-		).filter((key) => selectedInspectionExportColumns.includes(key));
-
-		const orderedSanctionColumns = SANCTION_EXPORT_COLUMNS.map(
-			(column) => column.key,
-		).filter((key) => selectedSanctionExportColumns.includes(key));
-
-		const orderedDecisionColumns = DECISION_EXPORT_COLUMNS.map(
-			(column) => column.key,
-		).filter((key) => selectedDecisionExportColumns.includes(key));
-
-		setIsExportConfigModalOpen(false);
-		void handleExportCurrentView(
-			orderedInspectionColumns,
-			orderedSanctionColumns,
-			orderedDecisionColumns,
-			includeInspectionsInExport,
-			includeSanctionsInExport,
-			includeDecisionsInExport,
-		);
-	};
-
-	const openCreateModal = async () => {
-		if (!canManageRecommendations) {
-			setError("Konto zewnętrzne ma dostęp tylko do odczytu.");
-			return;
-		}
-
-		setEditingItem(null);
-		setForm(EMPTY_FORM);
-		setFormError(null);
-		setShowRequiredFieldErrors(false);
-		setVersionConflictUpdatedAt(null);
-		setSaveLockConflict(null);
-		setIsFormOpen(true);
-		await loadInspectionOptions();
-	};
-
-	const openEditModal = async () => {
-		if (!canManageRecommendations) {
-			setError("Konto zewnętrzne ma dostęp tylko do odczytu.");
-			return;
-		}
-
-		if (!selectedItem || !selectedItem.canEdit) {
-			return;
-		}
-
-		setEditingItem(selectedItem);
-		setForm(recommendationToForm(selectedItem));
-		setFormError(null);
-		setShowRequiredFieldErrors(false);
-		setVersionConflictUpdatedAt(null);
-		setSaveLockConflict(null);
-		await loadInspectionOptions();
-		setIsFormOpen(true);
-	};
-
-	const closeModal = () => {
-		if (editRecordLock.lockToken) {
-			void editRecordLock.release();
-		}
-
-		setIsFormOpen(false);
-		setEditingItem(null);
-		setFormError(null);
-		setShowRequiredFieldErrors(false);
-		setVersionConflictUpdatedAt(null);
-		setSaveLockConflict(null);
-		setIsSubmitting(false);
-	};
-	closeModalRef.current = closeModal;
-
-	const handleRefreshAfterConflict = async () => {
-		if (!editingItem) {
-			return;
-		}
-
-		const result = await fetchRecommendations(operatorLogin, {
-			sortBy: "id",
-			sortOrder: "asc",
-		});
-
-		if (!result.ok) {
-			setFormError(result.error);
-			return;
-		}
-
-		setItems(result.data.items);
-		setTotal(result.data.total);
-		const refreshed = result.data.items.find((item) => item.id === editingItem.id);
-		if (!refreshed) {
-			closeModal();
-			return;
-		}
-
-		setEditingItem(refreshed);
-		setForm(recommendationToForm(refreshed));
-		setFormError(null);
-		setVersionConflictUpdatedAt(null);
-		setSaveLockConflict(null);
-	};
-
-	const openDeleteModal = () => {
-		if (!isDirector || !selectedItem) {
-			return;
-		}
-
-		setError(null);
-		setIsDeleteConfirmModalOpen(true);
-	};
-
-	const handleDeleteItem = async () => {
-		if (!isDirector || !selectedItem || isDeletingItem) {
-			return;
-		}
-
-		const deletedEntityName = selectedItem.nazwaPodmiotu?.trim() ?? "";
-
-		setIsDeletingItem(true);
-		setError(null);
-
-		const result = await deleteRecommendation(operatorLogin, selectedItem.id);
-		if (!result.ok) {
-			setError(result.error);
-			setIsDeletingItem(false);
-			return;
-		}
-
-		setIsDeleteConfirmModalOpen(false);
-		setSelectedId(null);
-		await loadItems();
-		window.dispatchEvent(new CustomEvent(RECOMMENDATIONS_CHANGED_EVENT));
-		setDeleteSuccessEntityName(deletedEntityName);
-		setIsDeleteSuccessModalOpen(true);
-		setIsDeletingItem(false);
-	};
-
-	const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-		event.preventDefault();
-		if (!canManageRecommendations) {
-			setFormError("Konto zewnętrzne ma dostęp tylko do odczytu.");
-			return;
-		}
-
-		if (shouldShowLockedByOtherUser) {
-			setFormError(
-				"Nie możesz teraz edytować tego wpisu, ponieważ jest edytowany przez innego użytkownika.",
-			);
-			return;
-		}
-
-		const wasEditing = Boolean(editingItem);
-		const isRequiredInspectionMissing =
-			!form.isInspectionMissing && !form.inspectionId.trim();
-		const isRequiredEntityNameMissing =
-			form.isInspectionMissing && !form.nazwaPodmiotu.trim();
-		const isRequiredPositionMissing = !form.pozycja.trim();
-		const isRequiredRecommendationDateMissing =
-			!form.terminWykonaniaZalecen.trim();
-		const isRequiredStatusMissing = !form.status.trim();
-		const hasMissingRequiredFields =
-			isRequiredInspectionMissing ||
-			isRequiredEntityNameMissing ||
-			isRequiredPositionMissing ||
-			isRequiredRecommendationDateMissing ||
-			isRequiredStatusMissing;
-
-		setShowRequiredFieldErrors(true);
-
-		if (hasMissingRequiredFields) {
-			setFormError(null);
-			return;
-		}
-
-		const payload = formToPayload(form);
-		if (!payload) {
-			setFormError(
-				"Wprowadź poprawne wartości: id inspekcji i liczba zaleceń muszą być poprawne.",
-			);
-			return;
-		}
-
-		if (!payload.nazwaPodmiotu.trim()) {
-			setFormError(null);
-			return;
-		}
-
-		setShowRequiredFieldErrors(false);
-
-		if (editingItem) {
-			const basePayload = formToPayload(recommendationToForm(editingItem));
-			if (basePayload && JSON.stringify(payload) === JSON.stringify(basePayload)) {
-				setFormError("Brak zmian do zapisania.");
-				return;
-			}
-		}
-
-		setIsSubmitting(true);
-		setFormError(null);
-		setVersionConflictUpdatedAt(null);
-		setSaveLockConflict(null);
-
-		try {
-			const result = editingItem
-				? await updateRecommendation(operatorLogin, editingItem.id, payload, {
-						expectedUpdatedAt: editingItem.zaktualizowanoO,
-						lockToken: editRecordLock.lockToken,
-				  })
-				: await createRecommendation(operatorLogin, payload);
-
-			if (!result.ok) {
-				if (
-					result.status === 409 &&
-					result.errorCode === "INSPECTION_STATUS_BLOCKS_OPERATION"
-				) {
-					setVersionConflictUpdatedAt(null);
-					setSaveLockConflict(null);
-					setFormError(result.error);
-					await loadInspectionOptions();
-					return;
-				}
-
-				if (result.status === 423) {
-					if (result.lockErrorCode === "RECORD_LOCKED") {
-						setSaveLockConflict(result.lockConflict ?? null);
-						setFormError(
-							"Nie możesz teraz edytować tego wpisu, ponieważ jest edytowany przez innego użytkownika.",
-						);
-						return;
-					}
-
-					setSaveLockConflict(null);
-					setFormError(result.error);
-					return;
-				}
-
-				if (result.status === 409) {
-					if (wasEditing) {
-						setVersionConflictUpdatedAt(result.currentUpdatedAt ?? null);
-						setFormError(
-							"Dane zostały zmienione przez innego użytkownika. Odśwież widok i spróbuj ponownie.",
-						);
-					} else {
-						setFormError(result.error);
-					}
-					return;
-				}
-
-				setFormError(result.error);
-				return;
-			}
-
-			closeModal();
-			setSelectedId(result.data.id);
-			setSuccessEntityName(payload.nazwaPodmiotu.trim());
-			setSuccessInspectionCode(
-				resolveInspectionCode({
-					inspectionKod: result.data.inspectionKod,
-					kodInspekcji: result.data.kodInspekcji,
-					inspectionLp: result.data.inspectionLp,
-					inspectionId: result.data.inspectionId,
-				}) ||
-				(selectedInspectionOption?.inspectionCode ?? ""),
-			);
-			setSuccessMode(wasEditing ? "edit" : "create");
-			setIsSuccessModalOpen(true);
-			void loadItems();
-			window.dispatchEvent(new CustomEvent(RECOMMENDATIONS_CHANGED_EVENT));
-		} catch {
-			setFormError("Nie udało się zapisać zalecenia.");
-		} finally {
-			setIsSubmitting(false);
-		}
-	};
-
-	const isRequiredInspectionMissing =
-		showRequiredFieldErrors && !form.isInspectionMissing && !form.inspectionId.trim();
-	const isRequiredEntityNameMissing =
-		showRequiredFieldErrors && form.isInspectionMissing && !form.nazwaPodmiotu.trim();
-	const isRequiredPositionMissing =
-		showRequiredFieldErrors && !form.pozycja.trim();
-	const isRequiredRecommendationDateMissing =
-		showRequiredFieldErrors && !form.terminWykonaniaZalecen.trim();
-	const isRequiredStatusMissing = showRequiredFieldErrors && !form.status.trim();
-
-	return (
-		<section className="rounded-2xl border border-slate-700/70 bg-[#101f39] p-4 sm:p-5">
-			<TablePanelToolbar
-				title="Zalecenia"
-				canClearFilters={canClearFilters}
-				canResetColumnWidths={hasCustomColumnWidths}
-				isExporting={isExporting}
-				hasRowsToExport={
-					filteredAndSortedItems.length > 0 &&
-					visibleRecommendationColumnDefinitions.length > 0
-				}
-				onOpenViewModal={handleOpenRecommendationViewModal}
-				onClearFilters={clearFilters}
-				onResetColumnWidths={handleResetColumnWidths}
-				onExport={handleOpenExportConfigModal}
-				actions={
-					<>
-						{canManageRecommendations ? (
-							<>
-								<button
-									type="button"
-									onClick={() => void openCreateModal()}
-									className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#8ec5a1] bg-[#b9e8c9] px-3.5 font-semibold text-[#1f5130] text-sm transition-colors hover:bg-[#a5debb]"
-								>
-									<Plus size={15} />
-									Dodaj zalecenie
-								</button>
-
-								<button
-									type="button"
-									onClick={() => void openEditModal()}
-									disabled={!selectedItem || !selectedItem.canEdit}
-									className="inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 font-semibold text-sm transition-colors enabled:border-[#7ea8e7] enabled:bg-[#c7dcff] enabled:text-[#1d4882] enabled:hover:bg-[#b7d3ff] disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#1a2946] disabled:text-slate-500"
-								>
-									<Pencil size={15} />
-									Edytuj
-								</button>
-							</>
-						) : null}
-
-						{isDirector ? (
-							<button
-								type="button"
-								onClick={openDeleteModal}
-								disabled={!selectedItem || isDeletingItem}
-								className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#f2a3a3] bg-[#6f2a36] px-3.5 font-semibold text-[#ffe5e8] text-sm transition-colors hover:bg-[#833242] disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#1a2946] disabled:text-slate-500"
-							>
-								<Trash2 size={15} />
-								Usuń
-							</button>
-						) : null}
-					</>
-				}
-			/>
-
-			{error ? (
-				<p className="mb-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 font-medium text-rose-700 text-sm">
-					{error}
-				</p>
-			) : null}
-
-			<RegistryDataTable
-				isLoading={isLoading}
-				errorMessage={null}
-				containerClassName="-mt-1"
-				scrollAreaClassName="h-[calc(96vh-11rem)] min-h-88"
-				tableClassName="min-w-350 table-fixed border-collapse text-slate-900 text-sm"
-				visibleColumns={visibleRecommendationColumnDefinitions.map((column) => ({
-					...column,
-					tooltip: RECOMMENDATION_COLUMN_TOOLTIPS[column.key],
-				}))}
-				sortColumnKey={sortColumnKey}
-				sortDirection={sortDirection}
-				advancedFilters={advancedFilters}
-				columnFilters={columnFilters}
-				onSortByColumn={handleSortByColumn}
-				onOpenAdvancedFilter={openAdvancedFilterForColumn}
-				onFilterChange={handleFilterChange}
-				columnWidths={columnWidths}
-				minColumnWidth={RECOMMENDATIONS_MIN_COLUMN_WIDTH}
-				onResizeColumn={handleResizeColumn}
-				wrapHeaderLabels
-				controlsInFilterRow
-				showInfoIcon
-				infoIconSize={11}
-				footer={
-					<TablePagination
-						currentPage={currentPage}
-						totalPages={totalPages}
-						paginationItems={paginationItems}
-						totalItems={filteredAndSortedItems.length}
-						pageSize={pageSize}
-						onPageChange={handlePageChange}
-						pageSizeOptions={[...TABLE_PAGE_SIZE_OPTIONS]}
-						onPageSizeChange={handlePageSizeChange}
-						showWhenSinglePage
-					/>
-				}
-			>
-					<tbody>
-						{paginatedRecommendationItems.map((item) => {
-							const isSelected = selectedId === item.id;
-							return (
-								<tr
-									key={item.id}
-									onClick={() => setSelectedId(item.id)}
-									className={`cursor-pointer border-slate-200 border-b transition-colors last:border-b-0 ${
-										isSelected
-											? "bg-blue-100 text-slate-900 ring-1 ring-blue-300 ring-inset"
-											: "bg-white text-slate-900 hover:bg-slate-50"
-									}`}
-								>
-									{visibleRecommendationColumnDefinitions.map((column) => {
-										const rawValue = getCellValue(item, column.key);
-										const normalizedRawValue = rawValue.trim();
-										const inspectionCode =
-											column.key === "inspectionId"
-												? resolveInspectionCode({
-													inspectionKod: item.inspectionKod,
-													kodInspekcji: item.kodInspekcji,
-													inspectionLp: item.inspectionLp,
-													inspectionId: item.inspectionId,
-												}).trim()
-												: "";
-										const hasInspectionLink =
-											column.key === "inspectionId" && inspectionCode.length > 0;
-										const value =
-											column.key === "inspectionId"
-												? normalizedRawValue || "Brak powiązania"
-												: column.key === "status"
-													? normalizedRawValue.toLowerCase() === "brak"
-														? "-"
-														: normalizedRawValue || "-"
-													: normalizedRawValue || "-";
-										const formattedValue = formatDatesInDisplayText(value);
-										const shouldWrapValue =
-											column.key === "komentarz" || column.key === "status";
-										const isScrollableValue =
-											column.key === "dataZalecenList" ||
-											column.key === "dataAkceptacjiNotyWeryfikacjiList";
-										const scrollableValueLines =
-											column.key === "dataZalecenList"
-												? formatDateListDisplayLines(
-													item.terminyWykonaniaZalecenList.length > 0
-														? item.terminyWykonaniaZalecenList
-														: item.dataZalecenList,
-													item.brakTerminowWykonaniaZalecen === true,
-												)
-												: column.key === "dataAkceptacjiNotyWeryfikacjiList"
-													? formatDateListDisplayLines(
-														item.dataAkceptacjiNotyWeryfikacjiList,
-														item.brakDatAkceptacjiNotyWeryfikacji === true,
-													)
-													: [];
-
-										return (
-											<td
-												key={column.key}
-												className="px-3 py-2.5 font-normal whitespace-normal break-words align-top"
-											>
-												{isScrollableValue ? (
-													<div className="space-y-1 whitespace-normal break-words">
-														{scrollableValueLines.map((line, index) => (
-															<div key={`${column.key}-${item.id}-${index}`}>{line}</div>
-														))}
-													</div>
-												) : shouldWrapValue ? (
-													<div className="whitespace-normal break-words">{formattedValue}</div>
-												) : hasInspectionLink ? (
-													<button
-														type="button"
-														onClick={(event) => {
-															event.stopPropagation();
-															openInspectionFromDashboard(inspectionCode);
-														}}
-														className="cursor-pointer rounded px-1 text-left text-[#1f4f8f] underline decoration-[#9bb8de] underline-offset-2 transition-colors hover:text-[#163a68]"
-														title="Przejdź do rejestru Inspekcje i zaznacz ten rekord"
-													>
-														{formattedValue}
-													</button>
-												) : (
-													formattedValue
-												)}
-											</td>
-										);
-									})}
-								</tr>
-							);
-						})}
-						{!isLoading && filteredAndSortedItems.length === 0 ? (
-							<tr>
-								<td
-									colSpan={visibleRecommendationColumnDefinitions.length}
-									className="px-3 py-6 text-center text-slate-500 text-sm"
-								>
-									Brak rekordów. Łącznie: {total}.
-								</td>
-							</tr>
-						) : null}
-					</tbody>
-			</RegistryDataTable>
-
-			<ExportConfigModal
-				isOpen={isExportConfigModalOpen}
-				description="Zalecenia eksportują aktualny widok tabeli. Wybierz dane powiązane."
-				relationsLabel="Powiąż wybrane zalecenia z:"
-				relations={[
-					{
-						id: "inspections",
-						label: "Inspekcje",
-						enabled: includeInspectionsInExport,
-						selectedCount: selectedInspectionExportColumns.length,
-						onToggle: () => {
-							setIncludeInspectionsInExport((prev) => {
-								const next = !prev;
-								if (next) {
-									setActiveExportColumnsTab("inspections");
-								}
-								return next;
-							});
-						},
-					},
-					{
-						id: "sanctions",
-						label: "Wnioski sankcyjne",
-						enabled: includeSanctionsInExport,
-						selectedCount: selectedSanctionExportColumns.length,
-						onToggle: () => {
-							setIncludeSanctionsInExport((prev) => {
-								const next = !prev;
-								if (next) {
-									setActiveExportColumnsTab("sanctions");
-								}
-								return next;
-							});
-						},
-					},
-					{
-						id: "decisions",
-						label: "Decyzje zobowiązujące",
-						enabled: includeDecisionsInExport,
-						selectedCount: selectedDecisionExportColumns.length,
-						onToggle: () => {
-							setIncludeDecisionsInExport((prev) => {
-								const next = !prev;
-								if (next) {
-									setActiveExportColumnsTab("decisions");
-								}
-								return next;
-							});
-						},
-					},
-				]}
-				tabs={[
-					{
-						id: "inspections",
-						label: "Inspekcje",
-						columns: INSPECTION_EXPORT_COLUMNS.map((column) => ({
-							key: column.key,
-							label: column.label,
-						})),
-						selectedKeys: selectedInspectionExportColumns,
-						onToggleKey: (key, isSelected) =>
-							toggleInspectionExportColumn(
-								key as InspectionExportColumnKey,
-								isSelected,
-							),
-						onSelectAll: () =>
-							setSelectedInspectionExportColumns(
-								INSPECTION_EXPORT_COLUMNS.map((column) => column.key),
-							),
-					},
-					{
-						id: "sanctions",
-						label: "Wnioski sankcyjne",
-						columns: SANCTION_EXPORT_COLUMNS.map((column) => ({
-							key: column.key,
-							label: column.label,
-						})),
-						selectedKeys: selectedSanctionExportColumns,
-						onToggleKey: (key, isSelected) =>
-							toggleSanctionExportColumn(key as SanctionExportColumnKey, isSelected),
-						onSelectAll: () =>
-							setSelectedSanctionExportColumns(
-								SANCTION_EXPORT_COLUMNS.map((column) => column.key),
-							),
-					},
-					{
-						id: "decisions",
-						label: "Decyzje zobowiązujące",
-						columns: DECISION_EXPORT_COLUMNS.map((column) => ({
-							key: column.key,
-							label: column.label,
-						})),
-						selectedKeys: selectedDecisionExportColumns,
-						onToggleKey: (key, isSelected) =>
-							toggleDecisionExportColumn(key as DecisionExportColumnKey, isSelected),
-						onSelectAll: () =>
-							setSelectedDecisionExportColumns(
-								DECISION_EXPORT_COLUMNS.map((column) => column.key),
-							),
-					},
-				]}
-				activeTabId={activeExportColumnsTab}
-				onActiveTabChange={(tabId) =>
-					setActiveExportColumnsTab(tabId as "inspections" | "sanctions" | "decisions")
-				}
-				onClose={() => setIsExportConfigModalOpen(false)}
-				onConfirm={handleConfirmExportFromModal}
-				isConfirmDisabled={
-					isExporting ||
-					(includeInspectionsInExport && selectedInspectionExportColumns.length === 0) ||
-					(includeSanctionsInExport && selectedSanctionExportColumns.length === 0) ||
-					(includeDecisionsInExport && selectedDecisionExportColumns.length === 0)
-				}
-				isExporting={isExporting}
-			/>
-
-			<TableAdvancedFilterModal
-				isOpen={isAdvancedFilterModalOpen}
-				anchor={advancedFilterAnchor}
-				columnLabel={
-					RECOMMENDATION_COLUMNS.find(
-						(column) => column.key === advancedFilterColumnKey,
-					)?.label ?? "Kolumna"
-				}
-				searchValue={advancedFilterSearch}
-				visibleValues={visibleAdvancedFilterValues}
-				selectedValues={selectedAdvancedFilterValues}
-				selectedDateRange={selectedAdvancedFilterDateRange}
-				onDateRangeChange={setAdvancedFilterDateRange}
-				onClose={() => setIsAdvancedFilterModalOpen(false)}
-				onSearchChange={setAdvancedFilterSearch}
-				onSelectAllVisible={selectAllVisibleAdvancedFilterValues}
-				onClearSelectedColumn={clearAdvancedFilterForSelectedColumn}
-				onToggleValue={toggleAdvancedFilterValue}
-				onClearAllFilters={clearFilters}
-			/>
-
-			<TableColumnPickerModal<RecommendationColumnKey, never>
-				isOpen={isColumnPickerOpen}
-				columns={draftSelectableColumnDefinitions}
-				hiddenColumns={draftHiddenColumns}
-				visibleColumnsCount={draftVisibleRecommendationColumns.length}
-				onClose={() => setIsColumnPickerOpen(false)}
-				onChangeColumnVisibility={handleDraftColumnVisibilityChange}
-				onChangeColumnDisplayMode={(columnKey, value) => {
-					if (!isRecommendationNameVariantColumnKey(columnKey)) {
-						return;
-					}
-
-					if (value !== "full" && value !== "short") {
-						return;
-					}
-
-					setDraftRecommendationNameVariants((prev) => ({
-						...prev,
-						[columnKey]: value,
-					}));
-				}}
-				columnDisplayModeOptions={columnDisplayModeOptionsByKey}
-				columnDisplayModeValues={draftColumnDisplayModeValuesByKey}
-				onResetSelection={handleResetRecommendationViewSelection}
-				onShowAllColumns={handleDraftSelectAllColumns}
-				onHideAllColumns={handleDraftDeselectAllColumns}
-				onApply={handleApplyRecommendationViewChanges}
-			/>
-
-			<RegistryFormScaffold
-				isOpen={isFormOpen}
-				title={editingItem ? "Edytuj zalecenie" : "Dodaj zalecenie"}
-				subtitle={editingItem ? `Id zalecenia: ${editingItem.kodZalecenia}` : undefined}
-				onClose={closeModal}
-				onSubmit={(event) => void handleSubmit(event)}
-				isContentReadOnly={isReadOnlyDueToLock}
-				closeOnBackdropClick={false}
-				headerNotices={
-					<>
-						{inactivityTimeout.isWarning ? (
-							<div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900 text-sm">
-								<p className="font-semibold">
-									Nie wykryto aktywności. Formularz zostanie zamknięty za{" "}
-									<span className="tabular-nums">{inactivityTimeout.secondsRemaining}</span> s.
-								</p>
-								<button
-									type="button"
-									onClick={inactivityTimeout.resetTimer}
-									className="mt-2 inline-flex h-7 items-center rounded border border-amber-400 bg-amber-100 px-2 font-semibold text-amber-900 text-xs transition-colors hover:bg-amber-200"
-								>
-									Kontynuuj edycję
-								</button>
-							</div>
-						) : null}
-
-						{isEditMode && shouldShowLockedByOtherUser ? (
-							<div className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-rose-800 text-sm">
-								<p className="font-semibold">
-									Nie możesz teraz edytować tego wpisu, ponieważ jest edytowany przez innego użytkownika.
-								</p>
-								<p className="mt-1">
-									Rekord edytuje teraz: {lockOwnerLabel}, od {formatLockStartHourMinute(lockAcquiredAt)}.
-								</p>
-							</div>
-						) : null}
-
-						{isEditMode && editRecordLock.isConnectionLost ? (
-							<p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 font-medium text-amber-800 text-sm">
-								{editRecordLock.error ?? "Utracono połączenie z serwerem — trwa próba odnowienia blokady..."}
-							</p>
-						) : null}
-
-						{isEditMode && editRecordLock.isExpired ? (
-							<p className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 font-medium text-rose-800 text-sm">
-								{editRecordLock.error ?? "Czas edycji wygasł — połączenie zostało przerwane zbyt długo. Zamknij formularz i otwórz ponownie."}
-							</p>
-						) : null}
-
-						{isEditMode && editRecordLock.isAcquireFailed ? (
-							<div className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-rose-800 text-sm">
-								<p className="font-medium">
-									{editRecordLock.error ?? "Nie udało się założyć blokady rekordu."}
-								</p>
-								<button
-									type="button"
-									onClick={() => editRecordLock.retryAcquire()}
-									className="mt-2 inline-flex h-7 items-center rounded border border-rose-300 bg-rose-100 px-2 font-semibold text-rose-800 text-xs transition-colors hover:bg-rose-200"
-								>
-									Spróbuj ponownie
-								</button>
-							</div>
-						) : null}
-					</>
-				}
-				footerContent={
-					<>
-						{formError ? (
-							<div className="mb-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700 text-sm">
-								<p className="font-medium">{formError}</p>
-								{versionConflictUpdatedAt ? (
-									<p className="mt-1 text-rose-700/90">
-										Aktualna wersja rekordu: {versionConflictUpdatedAt}
-									</p>
-								) : null}
-							</div>
-						) : null}
-
-						{versionConflictUpdatedAt ? (
-							<div className="mb-2">
-								<button
-									type="button"
-									onClick={() => void handleRefreshAfterConflict()}
-									className="inline-flex h-8 items-center rounded-md border border-amber-300 bg-amber-50 px-3 font-semibold text-amber-800 text-xs transition-colors hover:bg-amber-100"
-								>
-									Odśwież dane
-								</button>
-							</div>
-						) : null}
-					</>
-				}
-				isSubmitDisabled={isSubmitting || isReadOnlyDueToLock || isSaveDisabledDueToLock}
-				cancelLabel={"Anuluj"}
-				submitLabel={
-					isSubmitting
-						? "Zapisywanie..."
-						: isReadOnlyDueToLock
-							? "Tylko podgląd"
-							: isSaveDisabledDueToLock
-								? "Brak blokady"
-								: editingItem
-									? "Zapisz"
-									: "Dodaj"
-				}
-			>
-				<div className="grid gap-3 sm:grid-cols-2">
-								<div className="text-slate-700 text-sm">
-									<SingleSelectPortalField
-										label="Powiązanie z inspekcją *"
-										value={form.inspectionId}
-										options={inspectionSelectOptions}
-										placeholder={
-											isInspectionOptionsLoading
-												? "Ładowanie listy inspekcji..."
-												: "Wybierz id inspekcji"
-										}
-										enableSearch
-										searchPlaceholder="Wyszukaj id inspekcji..."
-										invalid={isRequiredInspectionMissing}
-										errorMessage={
-											isRequiredInspectionMissing ? "Pole wymagane." : null
-										}
-										onChange={(next) => {
-											const selectedOption = inspectionOptions.find(
-												(option) => String(option.id) === next,
-											);
-											setForm((prev) => ({
-												...prev,
-												inspectionId: next,
-												nazwaPodmiotu: selectedOption?.nazwaPodmiotu ?? prev.nazwaPodmiotu,
-											}));
-										}}
-										disabled={form.isInspectionMissing || isInspectionOptionsLoading}
-									/>
-									<label className="mt-2 inline-flex items-center gap-2 font-medium text-slate-700 text-xs">
-										<input
-											type="checkbox"
-											checked={form.isInspectionMissing}
-											onChange={(event) => {
-												const checked = event.target.checked;
-												setForm((prev) => ({
-													...prev,
-													isInspectionMissing: checked,
-													inspectionId: checked ? "" : prev.inspectionId,
-													nazwaPodmiotu: checked
-														? prev.nazwaPodmiotu
-														: prev.nazwaPodmiotu,
-												}));
-											}}
-										/>
-										Brak powiązania z kodem inspekcji
-									</label>
-									<input
-										readOnly
-										tabIndex={-1}
-										aria-hidden="true"
-										value={form.inspectionId}
-										className="sr-only"
-									/>
-								</div>
-
-								<div className="text-slate-700 text-sm">
-									{form.isInspectionMissing ? (
-										<SingleSelectPortalField
-											label="Nazwa podmiotu *"
-											value={form.nazwaPodmiotu}
-											options={entityNameOptions}
-											placeholder="Wybierz podmiot"
-											enableSearch
-											searchPlaceholder="Wyszukaj podmiot..."
-											invalid={isRequiredEntityNameMissing}
-											errorMessage={
-												isRequiredEntityNameMissing ? "Pole wymagane." : null
-											}
-											onChange={(next) =>
-												setForm((prev) => ({
-													...prev,
-													nazwaPodmiotu: next,
-												}))
-											}
-											disabled={isReadOnlyDueToLock}
-										/>
-									) : (
-										<label className="text-slate-700 text-sm">
-											<span className="mb-1 block">Nazwa podmiotu *</span>
-											<input
-												disabled
-												value={displayEntityNameInForm}
-												className="w-full cursor-not-allowed rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-slate-700 text-sm outline-none"
-											/>
-										</label>
-									)}
-								</div>
-
-								<label className="text-slate-700 text-sm">
-									<span className="mb-1 block">Liczba zaleceń *</span>
-									<input
-										value={form.pozycja}
-										onChange={(event) =>
-											setForm((prev) => ({
-												...prev,
-												pozycja: event.target.value,
-											}))
-										}
-										className={`w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors ${
-											isRequiredPositionMissing ? "border-rose-300 focus:border-rose-400" : "border-slate-300 focus:border-blue-400"
-										}`}
-									/>
-									{isRequiredPositionMissing ? (
-										<span className="mt-1 block text-rose-700 text-xs">Pole wymagane.</span>
-									) : null}
-								</label>
-
-								<div>
-									<DateFieldWithClear
-										label="Data zaleceń *"
-										value={form.terminWykonaniaZalecen}
-										onChange={(next) =>
-											setForm((prev) => ({
-												...prev,
-												terminWykonaniaZalecen: next,
-											}))
-										}
-									/>
-									{isRequiredRecommendationDateMissing ? (
-										<span className="mt-1 block text-rose-700 text-xs">Pole wymagane.</span>
-									) : null}
-								</div>
-
-								<div className="sm:col-span-2">
-									<DateListEditor
-										title="Termin wykonania zaleceń"
-										addButtonLabel="Dodaj datę"
-										noDatesLabel="Brak terminów wykonania zaleceń"
-										noDatesMessage="Oznaczono brak terminów wykonania zaleceń."
-										values={form.dataZalecenList}
-										setValues={setFormDataZalecenList}
-										isNoDates={form.isDataZalecenBrak}
-										setIsNoDates={setFormIsDataZalecenBrak}
-										itemKeyPrefix="zalecenia"
-									/>
-								</div>
-
-								<div className="sm:col-span-2">
-									<DateListEditor
-										title="Data akceptacji noty z weryfikacji wykonania zaleceń"
-										addButtonLabel="Dodaj datę"
-										noDatesLabel="Brak dat akceptacji noty"
-										noDatesMessage="Oznaczono brak dat akceptacji noty."
-										values={form.dataAkceptacjiList}
-										setValues={setFormDataAkceptacjiList}
-										isNoDates={form.isDataAkceptacjiBrak}
-										setIsNoDates={setFormIsDataAkceptacjiBrak}
-										itemKeyPrefix="akceptacja-noty"
-									/>
-								</div>
-
-								<div className="sm:col-span-2">
-									<SingleSelectPortalField
-										label="Status *"
-										value={form.status}
-										options={statusOptionsForForm}
-										placeholder="Wybierz status"
-										invalid={isRequiredStatusMissing}
-										errorMessage={
-											isRequiredStatusMissing ? "Pole wymagane." : null
-										}
-										onChange={(next) =>
-											setForm((prev) => ({
-												...prev,
-												status: next,
-											}))
-										}
-										disabled={isReadOnlyDueToLock}
-									/>
-								</div>
-
-								<label className="text-slate-700 text-sm sm:col-span-2">
-									<span className="mb-1 block">Komentarz</span>
-									<textarea
-										rows={2}
-										value={form.komentarz}
-										onChange={(event) =>
-											setForm((prev) => ({
-												...prev,
-												komentarz: event.target.value,
-											}))
-										}
-										className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-400"
-									/>
-								</label>
-				</div>
-			</RegistryFormScaffold>
-
-			<RecommendationsSuccessModal
-				isOpen={isSuccessModalOpen}
-				entityName={successEntityName}
-				inspectionCode={successInspectionCode}
-				mode={successMode}
-				onClose={() => {
-					setIsSuccessModalOpen(false);
-					setSuccessEntityName("");
-					setSuccessInspectionCode("");
-					setSuccessMode("create");
-				}}
-			/>
-
-			<DeleteSuccessModal
-				isOpen={isDeleteSuccessModalOpen}
-				heading="Zalecenie zostało usunięte"
-				detailsMessage={
-					deleteSuccessEntityName
-						? `Dla podmiotu ${deleteSuccessEntityName}.`
-						: "Rekord został usunięty z tabeli."
-				}
-				onClose={() => {
-					setIsDeleteSuccessModalOpen(false);
-					setDeleteSuccessEntityName("");
-				}}
-			/>
-
-			{isDeleteConfirmModalOpen ? (
-				<div className="fixed inset-0 z-60 flex items-center justify-center p-4">
-					<button
-						type="button"
-						aria-label="Zamknij potwierdzenie usunięcia zalecenia"
-						className="absolute inset-0 bg-slate-950/65"
-						onClick={() => {
-							if (isDeletingItem) {
-								return;
-							}
-
-							setIsDeleteConfirmModalOpen(false);
-						}}
-					/>
-
-					<div
-						role="dialog"
-						aria-modal="true"
-						aria-label="Potwierdzenie usunięcia zalecenia"
-						className="relative z-10 w-full max-w-lg rounded-2xl border border-slate-300 bg-white p-5 text-slate-900 shadow-[0_24px_56px_rgba(2,8,23,0.35)]"
-					>
-						<h3 className="font-semibold text-base text-slate-900">
-							Usuń zalecenie
-						</h3>
-						<p className="mt-2 text-slate-700 text-sm">Czy usunąć zalecenie?</p>
-
-						<div className="mt-5 flex items-center justify-end gap-2">
-							<button
-								type="button"
-								onClick={() => setIsDeleteConfirmModalOpen(false)}
-								disabled={isDeletingItem}
-								className="inline-flex h-10 items-center rounded-lg border border-slate-300 bg-white px-4 font-semibold text-slate-700 text-sm transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
-							>
-								Anuluj
-							</button>
-							<button
-								type="button"
-								onClick={() => void handleDeleteItem()}
-								disabled={isDeletingItem}
-								className="inline-flex h-10 items-center rounded-lg border border-[#f2a3a3] bg-[#6f2a36] px-4 font-semibold text-[#ffe5e8] text-sm transition-colors hover:bg-[#833242] disabled:cursor-not-allowed disabled:opacity-60"
-							>
-								{isDeletingItem ? "Usuwanie..." : "Usuń"}
-							</button>
-						</div>
-					</div>
-				</div>
-			) : null}
-		</section>
-	);
-}
+	return {"rows": payload_rows}
