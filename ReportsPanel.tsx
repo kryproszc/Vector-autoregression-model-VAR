@@ -1,1798 +1,802 @@
-"use client";
+import { useEffect, useMemo, useState } from "react";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle } from "lucide-react";
 import {
-        Cell,
-        Pie,
-        PieChart,
-        ResponsiveContainer,
-        Tooltip,
-} from "recharts";
-
-import { getStoredAuthSession } from "@/features/auth/session";
-import { normalizeAuthRole } from "@/features/auth/types";
-import {
-        fetchInspectionsDetailedReport,
-        fetchInspectionsStageSummary,
-        fetchRecommendationsDetailedReport,
-        fetchRecommendationsStageSummary,
-} from "@/features/reports/api";
-import { TableSurface } from "@/shared/components/table/TableSurface";
-import { formatDatesInDisplayText } from "@/shared/utils/date";
+	getBaseInspectionColumnKeys,
+	toSafeString,
+} from "@/features/inspections/components/inspections-panel.utils";
+import { INSPECTION_COLUMNS } from "@/features/inspections/data";
 import type {
-        ReportInspectionDetailedRow,
-        ReportRecommendationDetailedRow,
-        ReportsRecommendationsStageSummaryResponse,
-        ReportsInspectionsStageSummaryResponse,
-} from "@/features/reports/types";
+	InspectionColumnKey,
+	InspectionRow,
+	InspectionViewId,
+} from "@/features/inspections/types";
+import { getFloatingPanelAnchor } from "@/shared/utils/floating-panel";
+import {
+	createAdvancedDateRangeFilterToken,
+	getAdvancedDateRangeFromSelectedValues,
+	hasActiveTableFilters,
+	isAdvancedDateRangeFilterToken,
+	matchesAdvancedFilterCellValue,
+	splitAdvancedFilterCellValue,
+} from "@/shared/utils/table-filters";
 
-type WelcomeStartPanelProps = {
-        operatorLogin: string;
+type SortDirection = "asc" | "desc";
+
+type UseInspectionsTableStateArgs = {
+	inspectionRows: InspectionRow[];
+	tableViewStorageKey?: string;
+	tableViewStorageArea?: "localStorage" | "sessionStorage";
 };
 
-const DASHBOARD_OPEN_INSPECTION_EVENT = "dashboard:open-inspection";
-const DASHBOARD_OPEN_INSPECTION_CODE_KEY = "triangle.dashboard.openInspectionCode";
-const DASHBOARD_OPEN_RECOMMENDATION_EVENT = "dashboard:open-recommendation";
-const DASHBOARD_OPEN_RECOMMENDATION_CODE_KEY =
-        "triangle.dashboard.openRecommendationCode";
-const DASHBOARD_ACTIVE_TOP_SECTION_KEY = "triangle.dashboard.activeTopSection";
-const DASHBOARD_SELECTED_INSPECTION_STAGE_FILTERS_KEY =
-        "triangle.dashboard.selectedInspectionStageFilters";
-const DASHBOARD_SELECTED_RECOMMENDATION_STATUSES_KEY =
-        "triangle.dashboard.selectedRecommendationStatuses";
-const STAGE_OVERVIEW_COLORS = [
-	"#b4534b", // muted red
-	"#c96a4b", // terracotta
-	"#d48746", // muted orange
-	"#d9a441", // amber
-	"#c8b24a", // olive yellow
-	"#8aa652", // moss green
-	"#4f9a70", // soft green
-	"#2f8f8a", // teal
-	"#3f86b8", // muted blue
-	"#5e73b8", // indigo blue
-] as const;
-const ENABLE_DASHBOARD_DEBUG_LOGS = false;
+type HiddenColumnsByView = Record<InspectionViewId, InspectionColumnKey[]>;
 
-function getStoredDashboardActiveSection(): "inspections" | "recommendations" {
-        if (typeof window === "undefined") {
-                return "inspections";
-        }
+const DEFAULT_INSPECTIONS_PAGE_SIZE = 25;
 
-        const saved = window.sessionStorage.getItem(DASHBOARD_ACTIVE_TOP_SECTION_KEY);
-        return saved === "recommendations" ? "recommendations" : "inspections";
+function getResponsiveInspectionsPageSize(viewportHeight: number) {
+	if (viewportHeight < 860) {
+		return 19;
+	}
+
+	if (viewportHeight < 1080) {
+		return 25;
+	}
+
+	return 30;
 }
 
-function getStoredInspectionStageFilters(): StageFilter[] {
-        if (typeof window === "undefined") {
-                return [];
-        }
-
-        const raw = window.sessionStorage.getItem(
-                DASHBOARD_SELECTED_INSPECTION_STAGE_FILTERS_KEY,
-        );
-        if (!raw) {
-                return [];
-        }
-
-        try {
-                const parsed = JSON.parse(raw);
-                if (!Array.isArray(parsed)) {
-                        return [];
-                }
-
-                return parsed
-                        .map((item) => {
-                                if (!item || typeof item !== "object") {
-                                        return null;
-                                }
-
-                                const record = item as Record<string, unknown>;
-                                const stageCode =
-                                        typeof record.stageCode === "string"
-                                                ? record.stageCode
-                                                : typeof record.stageGroupCode === "string"
-                                                        ? record.stageGroupCode
-                                                        : typeof record.stageSubgroupCode === "string"
-                                                                ? record.stageSubgroupCode
-                                                                : "";
-                                const stageLabel =
-                                        typeof record.stageLabel === "string"
-                                                ? record.stageLabel
-                                                : typeof record.stageGroupLabel === "string"
-                                                        ? record.stageGroupLabel
-                                                        : typeof record.stageSubgroupLabel === "string"
-                                                                ? record.stageSubgroupLabel
-                                                                : "";
-
-                                if (!stageCode.trim() || !stageLabel.trim()) {
-                                        return null;
-                                }
-
-                                return {
-                                        stageCode,
-                                        stageLabel,
-                                };
-                        })
-                        .filter((item): item is StageFilter => item !== null);
-        } catch {
-                window.sessionStorage.removeItem(DASHBOARD_SELECTED_INSPECTION_STAGE_FILTERS_KEY);
-                return [];
-        }
+function createRange(start: number, end: number) {
+	const length = end - start + 1;
+	return Array.from({ length }, (_, index) => index + start);
 }
 
-function getStoredRecommendationStatusFilters(): RecommendationStatusFilter[] {
-        if (typeof window === "undefined") {
-                return [];
-        }
+type PaginationItem = number | "ellipsis";
 
-        const raw = window.sessionStorage.getItem(
-                DASHBOARD_SELECTED_RECOMMENDATION_STATUSES_KEY,
-        );
-        if (!raw) {
-                return [];
-        }
+function buildPaginationItems(
+	currentPage: number,
+	totalPages: number,
+	siblingCount = 1,
+): PaginationItem[] {
+	const totalPageNumbers = siblingCount + 5;
 
-        try {
-                const parsed = JSON.parse(raw);
-                if (!Array.isArray(parsed)) {
-                        return [];
-                }
+	if (totalPageNumbers >= totalPages) {
+		return createRange(1, totalPages);
+	}
 
-                return parsed
-                        .filter(
-                                (item) =>
-                                        item &&
-                                        typeof item === "object" &&
-                                        typeof (item as RecommendationStatusFilter).stageGroupCode === "string" &&
-                                        typeof (item as RecommendationStatusFilter).stageGroupLabel === "string",
-                        )
-                        .map((item) => ({
-                                stageGroupCode: (item as RecommendationStatusFilter).stageGroupCode,
-                                stageGroupLabel: (item as RecommendationStatusFilter).stageGroupLabel,
-                        }));
-        } catch {
-                window.sessionStorage.removeItem(DASHBOARD_SELECTED_RECOMMENDATION_STATUSES_KEY);
-                return [];
-        }
+	const leftSiblingIndex = Math.max(currentPage - siblingCount, 1);
+	const rightSiblingIndex = Math.min(currentPage + siblingCount, totalPages);
+
+	const shouldShowLeftDots = leftSiblingIndex > 2;
+	const shouldShowRightDots = rightSiblingIndex < totalPages - 2;
+
+	if (!shouldShowLeftDots && shouldShowRightDots) {
+		const leftItemCount = 3 + 2 * siblingCount;
+		const leftRange = createRange(1, leftItemCount);
+		return [...leftRange, "ellipsis", totalPages];
+	}
+
+	if (shouldShowLeftDots && !shouldShowRightDots) {
+		const rightItemCount = 3 + 2 * siblingCount;
+		const rightRange = createRange(totalPages - rightItemCount + 1, totalPages);
+		return [1, "ellipsis", ...rightRange];
+	}
+
+	if (shouldShowLeftDots && shouldShowRightDots) {
+		const middleRange = createRange(leftSiblingIndex, rightSiblingIndex);
+		return [1, "ellipsis", ...middleRange, "ellipsis", totalPages];
+	}
+
+	return createRange(1, totalPages);
 }
 
-function normalizePolishLabel(label: string) {
-        return label
-                .replace(/inspekcja\b/gi, "inspekcja")
-                .replace(/inspekcji\b/gi, "inspekcji")
-                .replace(/przed inspekcja\b/gi, "Przed inspekcją")
-                .replace(/w trakcie inspekcji\b/gi, "W trakcie inspekcji")
-                .replace(/po inspekcji\b/gi, "Po inspekcji")
-                .replace(/rekomendacje\b/gi, "Rekomendacje")
-                .replace(/wplynely\b/gi, "Wpłynęły")
-                .replace(/wplynela\b/gi, "Wpłynęła")
-                .replace(/zastrzezenia\b/gi, "zastrzeżenia")
-                .replace(/odpowiedz\b/gi, "odpowiedź")
-                .replace(/zamkniete\b/gi, "zamknięte")
-                .replace(/piszemy zalecenia\b/gi, "Piszemy zalecenia")
-                .replace(/pismo ustalenia\b/gi, "Pismo ustalenia");
+function getAllInspectionColumnKeys() {
+	return INSPECTION_COLUMNS.map((column) => column.key);
 }
 
-function shouldHideInspectionStageStatus(stageLabel: string) {
-        const normalized = normalizePolishLabel(stageLabel).trim().toLowerCase();
-        if (!normalized) {
-                return false;
-        }
+function getDefaultHiddenColumnsForView(viewId: InspectionViewId) {
+	if (viewId === "calosc") {
+		return [] as InspectionColumnKey[];
+	}
 
-        return normalized.includes("zamknięte") || normalized.includes("nieprzypis");
+	const baseColumns = new Set(getBaseInspectionColumnKeys(viewId));
+	return getAllInspectionColumnKeys().filter(
+		(columnKey) => !baseColumns.has(columnKey),
+	);
 }
 
-function shouldHideRecommendationStatus(stageLabel: string) {
-	const normalized = normalizePolishLabel(stageLabel).trim().toLowerCase();
-	if (!normalized) {
+function createDefaultHiddenColumnsByView(): HiddenColumnsByView {
+	return {
+		calosc: getDefaultHiddenColumnsForView("calosc"),
+		podstawowe: getDefaultHiddenColumnsForView("podstawowe"),
+		terminy: getDefaultHiddenColumnsForView("terminy"),
+	};
+}
+
+function splitInspectionAdvancedFilterCellValue(
+	columnKey: InspectionColumnKey,
+	rawValue: string,
+) {
+	if (columnKey !== "zakresInspekcji") {
+		return splitAdvancedFilterCellValue(rawValue);
+	}
+
+	const normalizedValue = rawValue.trim();
+	if (!normalizedValue) {
+		return ["(puste)"];
+	}
+
+	const tokens = normalizedValue
+		.split(/[;\n]/)
+		.map((item) => item.trim())
+		.filter(Boolean);
+
+	if (tokens.length === 0) {
+		return ["(puste)"];
+	}
+
+	return Array.from(new Set(tokens));
+}
+
+function matchesInspectionAdvancedFilterCellValue(
+	columnKey: InspectionColumnKey,
+	rawValue: string,
+	selectedValues: string[],
+) {
+	if (columnKey !== "zakresInspekcji") {
+		return matchesAdvancedFilterCellValue(rawValue, selectedValues);
+	}
+
+	if (selectedValues.length === 0) {
+		return true;
+	}
+
+	const selectedDateRange = getAdvancedDateRangeFromSelectedValues(selectedValues);
+	const selectedDiscreteValues = selectedValues.filter(
+		(value) => !isAdvancedDateRangeFilterToken(value),
+	);
+
+	const cellTokens = splitInspectionAdvancedFilterCellValue(columnKey, rawValue);
+	const hasDiscreteMatch =
+		selectedDiscreteValues.length === 0 ||
+		cellTokens.some((token) => selectedDiscreteValues.includes(token));
+
+	if (!hasDiscreteMatch) {
 		return false;
 	}
 
-	return (
-		normalized.includes("zalecenia wykonano") ||
-		normalized.includes("nieprzypisany status") ||
-		normalized.includes("nieprzypisany")
-	);
+	if (selectedDateRange) {
+		return false;
+	}
+
+	return true;
 }
 
-function shortenDuplicatedStatusLabel(label: string) {
-        const normalized = String(label ?? "").trim();
-        if (!normalized || normalized === "-") {
-                return "-";
-        }
-
-        const separators = [/\s+i\s+/i, /\s*\/\s*/i, /\s*\|\s*/i, /\s*,\s*/i] as const;
-        for (const separator of separators) {
-                const parts = normalized
-                        .split(separator)
-                        .map((part) => part.trim())
-                        .filter(Boolean);
-
-                if (parts.length === 2) {
-                        const left = parts[0] ?? "";
-                        const right = parts[1] ?? "";
-                        const leftKey = left.toLowerCase().replace(/\s+/g, " ");
-                        const rightKey = right.toLowerCase().replace(/\s+/g, " ");
-                        if (leftKey && leftKey === rightKey) {
-                                return left;
-                        }
-                }
-        }
-
-        return normalized;
-}
-
-type StageFilter = {
-        stageCode: string;
-        stageLabel: string;
-};
-
-type StageOverviewSlice = {
-        stageGroupCode: string;
-        stageGroupLabel: string;
-        count: number;
-};
-
-type RecommendationStatusFilter = {
-        stageGroupCode: string;
-        stageGroupLabel: string;
-        stageGroupShortLabel?: string;
-};
-
-// Zmieniaj te wartości, aby ustawić startowe szerokości kolumn.
-const DEFAULT_COLUMN_WIDTHS = {
-	statusInspekcji: 240,
-	kodInspekcji: 160,
-	nazwaPodmiotu: 240,
-	rodzajPodmiotu: 230,
-	zakresInspekcji: 200,
-	inspektorKierujacy: 240,
-	poczatekInspekcji: 170,
-	koniecInspekcji: 170,
-} as const;
-
-// Zmieniaj te wartości, aby ustawić minimalne szerokości kolumn.
-const MIN_COLUMN_WIDTHS = {
-	statusInspekcji: 160,
-	kodInspekcji: 120,
-	nazwaPodmiotu: 220,
-	rodzajPodmiotu: 180,
-	zakresInspekcji: 200,
-	inspektorKierujacy: 180,
-	poczatekInspekcji: 140,
-	koniecInspekcji: 140,
-} as const;
-
-function resolveMinWidth(key: keyof typeof DEFAULT_COLUMN_WIDTHS) {
-	// If default width is smaller than configured minimum, honor the default.
-	return Math.min(MIN_COLUMN_WIDTHS[key], DEFAULT_COLUMN_WIDTHS[key]);
-}
-
-const TABLE_COLUMNS: Array<{
-	key: keyof ReportInspectionDetailedRow;
-	label: string;
-	defaultWidth: number;
-	minWidth: number;
-}> = [
-	{
-		key: "statusInspekcji",
-		label: "Status",
-		defaultWidth: DEFAULT_COLUMN_WIDTHS.statusInspekcji,
-		minWidth: resolveMinWidth("statusInspekcji"),
-	},
-	{
-		key: "kodInspekcji",
-		label: "Kod inspekcji",
-		defaultWidth: DEFAULT_COLUMN_WIDTHS.kodInspekcji,
-		minWidth: resolveMinWidth("kodInspekcji"),
-	},
-	{
-		key: "nazwaPodmiotu",
-		label: "Nazwa podmiotu",
-		defaultWidth: DEFAULT_COLUMN_WIDTHS.nazwaPodmiotu,
-		minWidth: resolveMinWidth("nazwaPodmiotu"),
-	},
-	{
-		key: "rodzajPodmiotu",
-		label: "Rodzaj podmiotu",
-		defaultWidth: DEFAULT_COLUMN_WIDTHS.rodzajPodmiotu,
-		minWidth: resolveMinWidth("rodzajPodmiotu"),
-	},
-	{
-		key: "zakresInspekcji",
-		label: "Zakres inspekcji",
-		defaultWidth: DEFAULT_COLUMN_WIDTHS.zakresInspekcji,
-		minWidth: resolveMinWidth("zakresInspekcji"),
-	},
-	{
-		key: "inspektorKierujacy",
-		label: "Inspektor kierujący",
-		defaultWidth: DEFAULT_COLUMN_WIDTHS.inspektorKierujacy,
-		minWidth: resolveMinWidth("inspektorKierujacy"),
-	},
-	{
-		key: "poczatekInspekcji",
-		label: "Początek inspekcji",
-		defaultWidth: DEFAULT_COLUMN_WIDTHS.poczatekInspekcji,
-		minWidth: resolveMinWidth("poczatekInspekcji"),
-	},
-	{
-		key: "koniecInspekcji",
-		label: "Koniec inspekcji",
-		defaultWidth: DEFAULT_COLUMN_WIDTHS.koniecInspekcji,
-		minWidth: resolveMinWidth("koniecInspekcji"),
-	},
-];
-
-const INITIAL_COLUMN_WIDTHS: Record<keyof ReportInspectionDetailedRow, number> =
-	TABLE_COLUMNS.reduce(
-		(accumulator, column) => ({
-			...accumulator,
-			[column.key]: column.defaultWidth,
-		}),
-		{} as Record<keyof ReportInspectionDetailedRow, number>,
+export function useInspectionsTableState({
+	inspectionRows,
+	tableViewStorageKey,
+	tableViewStorageArea = "sessionStorage",
+}: UseInspectionsTableStateArgs) {
+	const [hiddenColumnsByView, setHiddenColumnsByView] =
+		useState<HiddenColumnsByView>(() => createDefaultHiddenColumnsByView());
+	const [hiddenColumns, setHiddenColumns] = useState<InspectionColumnKey[]>(
+		() => getDefaultHiddenColumnsForView("calosc"),
 	);
-
-const RECOMMENDATION_DEFAULT_COLUMN_WIDTHS = {
-	status: 200,
-	recommendationId: 140,
-	inspectionId: 140,
-	nazwaPodmiotu: 240,
-	dataZalecen: 150,
-	terminZalecen: 150,
-	terminWykonaniaZalecen: 230,
-	liczbaZalecen: 140,
-} as const;
-
-const RECOMMENDATION_MIN_COLUMN_WIDTHS = {
-	status: 150,
-	recommendationId: 120,
-	inspectionId: 120,
-	nazwaPodmiotu: 180,
-	dataZalecen: 130,
-	terminZalecen: 130,
-	terminWykonaniaZalecen: 180,
-	liczbaZalecen: 120,
-} as const;
-
-function resolveRecommendationMinWidth(
-	key: keyof typeof RECOMMENDATION_DEFAULT_COLUMN_WIDTHS,
-) {
-	return Math.min(
-		RECOMMENDATION_MIN_COLUMN_WIDTHS[key],
-		RECOMMENDATION_DEFAULT_COLUMN_WIDTHS[key],
-	);
-}
-
-const RECOMMENDATION_TABLE_COLUMNS: Array<{
-	key: keyof ReportRecommendationDetailedRow;
-	label: string;
-	defaultWidth: number;
-	minWidth: number;
-}> = [
-	{
-		key: "status",
-		label: "Status",
-		defaultWidth: RECOMMENDATION_DEFAULT_COLUMN_WIDTHS.status,
-		minWidth: resolveRecommendationMinWidth("status"),
-	},
-	{
-		key: "recommendationId",
-		label: "Id zalecenia",
-		defaultWidth: RECOMMENDATION_DEFAULT_COLUMN_WIDTHS.recommendationId,
-		minWidth: resolveRecommendationMinWidth("recommendationId"),
-	},
-	{
-		key: "inspectionId",
-		label: "Id inspekcji",
-		defaultWidth: RECOMMENDATION_DEFAULT_COLUMN_WIDTHS.inspectionId,
-		minWidth: resolveRecommendationMinWidth("inspectionId"),
-	},
-	{
-		key: "nazwaPodmiotu",
-		label: "Nazwa podmiotu",
-		defaultWidth: RECOMMENDATION_DEFAULT_COLUMN_WIDTHS.nazwaPodmiotu,
-		minWidth: resolveRecommendationMinWidth("nazwaPodmiotu"),
-	},
-	{
-		key: "dataZalecen",
-		label: "Data zaleceń",
-		defaultWidth: RECOMMENDATION_DEFAULT_COLUMN_WIDTHS.dataZalecen,
-		minWidth: resolveRecommendationMinWidth("dataZalecen"),
-	},
-	{
-		key: "terminZalecen",
-		label: "Termin zaleceń",
-		defaultWidth: RECOMMENDATION_DEFAULT_COLUMN_WIDTHS.terminZalecen,
-		minWidth: resolveRecommendationMinWidth("terminZalecen"),
-	},
-	{
-		key: "terminWykonaniaZalecen",
-		label: "Termin wykonania zaleceń",
-		defaultWidth: RECOMMENDATION_DEFAULT_COLUMN_WIDTHS.terminWykonaniaZalecen,
-		minWidth: resolveRecommendationMinWidth("terminWykonaniaZalecen"),
-	},
-	{
-		key: "liczbaZalecen",
-		label: "Liczba zaleceń",
-		defaultWidth: RECOMMENDATION_DEFAULT_COLUMN_WIDTHS.liczbaZalecen,
-		minWidth: resolveRecommendationMinWidth("liczbaZalecen"),
-	},
-];
-
-const INITIAL_RECOMMENDATION_COLUMN_WIDTHS: Record<
-	keyof ReportRecommendationDetailedRow,
-	number
-> = RECOMMENDATION_TABLE_COLUMNS.reduce(
-	(accumulator, column) => ({
-		...accumulator,
-		[column.key]: column.defaultWidth,
-	}),
-	{} as Record<keyof ReportRecommendationDetailedRow, number>,
-);
-
-export function WelcomeStartPanel({ operatorLogin }: WelcomeStartPanelProps) {
-	const [activeTopSection, setActiveTopSection] = useState<"inspections" | "recommendations">(
-		getStoredDashboardActiveSection,
-	);
-	const [rows, setRows] = useState<ReportInspectionDetailedRow[]>([]);
-	const [isLoading, setIsLoading] = useState(true);
-	const [error, setError] = useState<string | null>(null);
-	const [stageSummary, setStageSummary] =
-		useState<ReportsInspectionsStageSummaryResponse | null>(null);
-	const [isStageSummaryLoading, setIsStageSummaryLoading] = useState(true);
-	const [stageSummaryError, setStageSummaryError] = useState<string | null>(null);
-	const [selectedStageFilters, setSelectedStageFilters] = useState<StageFilter[]>(
-		getStoredInspectionStageFilters,
-	);
-	const [columnWidths, setColumnWidths] = useState(INITIAL_COLUMN_WIDTHS);
-	const [recommendationRows, setRecommendationRows] = useState<ReportRecommendationDetailedRow[]>(
-		[],
-	);
-	const [isRecommendationsLoading, setIsRecommendationsLoading] = useState(true);
-	const [recommendationsError, setRecommendationsError] = useState<string | null>(null);
-	const [recommendationSummary, setRecommendationSummary] =
-		useState<ReportsRecommendationsStageSummaryResponse | null>(null);
-	const [isRecommendationSummaryLoading, setIsRecommendationSummaryLoading] = useState(true);
-	const [recommendationSummaryError, setRecommendationSummaryError] = useState<string | null>(
+	const [selectedInspectionView, setSelectedInspectionView] =
+		useState<InspectionViewId>("calosc");
+	const [isColumnPickerOpen, setIsColumnPickerOpen] = useState(false);
+	const [isAdvancedFilterModalOpen, setIsAdvancedFilterModalOpen] =
+		useState(false);
+	const [advancedFilterColumnKey, setAdvancedFilterColumnKey] =
+		useState<InspectionColumnKey>("nazwaPodmiotu");
+	const [advancedFilterSearch, setAdvancedFilterSearch] = useState("");
+	const [advancedFilterAnchor, setAdvancedFilterAnchor] = useState({
+		top: 120,
+		left: 120,
+	});
+	const [advancedFilters, setAdvancedFilters] = useState<
+		Partial<Record<InspectionColumnKey, string[]>>
+	>({});
+	const [draftSelectedInspectionView, setDraftSelectedInspectionView] =
+		useState<InspectionViewId>("calosc");
+	const [draftHiddenColumns, setDraftHiddenColumns] = useState<
+		InspectionColumnKey[]
+	>([]);
+	const [draftHiddenColumnsByView, setDraftHiddenColumnsByView] =
+		useState<HiddenColumnsByView>(() => createDefaultHiddenColumnsByView());
+	const [sortColumnKey, setSortColumnKey] =
+		useState<InspectionColumnKey | null>(null);
+	const [sortDirection, setSortDirection] = useState<SortDirection | null>(
 		null,
 	);
-	const [selectedRecommendationStatuses, setSelectedRecommendationStatuses] = useState<
-		RecommendationStatusFilter[]
-	>(getStoredRecommendationStatusFilters);
-	const [recommendationColumnWidths, setRecommendationColumnWidths] = useState(
-		INITIAL_RECOMMENDATION_COLUMN_WIDTHS,
-	);
-	const [hoveredStageSliceIndex, setHoveredStageSliceIndex] = useState<number | null>(
-		null,
-	);
-	const [hoveredRecommendationSliceIndex, setHoveredRecommendationSliceIndex] = useState<
-		number | null
-	>(null);
+	const [currentPage, setCurrentPage] = useState(1);
+	const [pageSize, setPageSize] = useState(() => {
+		if (typeof window === "undefined") {
+			return DEFAULT_INSPECTIONS_PAGE_SIZE;
+		}
 
-	const authRole = useMemo(() => {
-		const storedRole = getStoredAuthSession()?.user?.rola;
-		return normalizeAuthRole(storedRole);
-	}, []);
+		return getResponsiveInspectionsPageSize(window.innerHeight);
+	});
+	const [columnFilters, setColumnFilters] = useState<
+		Partial<Record<InspectionColumnKey, string>>
+	>({});
+	const [areTableViewSettingsHydrated, setAreTableViewSettingsHydrated] =
+		useState(() => !tableViewStorageKey);
 
 	useEffect(() => {
 		if (typeof window === "undefined") {
 			return;
 		}
 
-		window.sessionStorage.setItem(DASHBOARD_ACTIVE_TOP_SECTION_KEY, activeTopSection);
-	}, [activeTopSection]);
+		if (!tableViewStorageKey) {
+			setAreTableViewSettingsHydrated(true);
+			return;
+		}
+
+		const storage =
+			tableViewStorageArea === "localStorage"
+				? window.localStorage
+				: window.sessionStorage;
+		const raw = storage.getItem(tableViewStorageKey);
+
+		if (!raw) {
+			setAreTableViewSettingsHydrated(true);
+			return;
+		}
+
+		try {
+			const parsed = JSON.parse(raw) as {
+				selectedInspectionView?: unknown;
+				hiddenColumnsByView?: unknown;
+			};
+			const allColumnKeys = new Set(getAllInspectionColumnKeys());
+			const normalizeHiddenColumns = (value: unknown) =>
+				Array.isArray(value)
+					? value.filter(
+							(columnKey): columnKey is InspectionColumnKey =>
+								typeof columnKey === "string" &&
+								allColumnKeys.has(columnKey as InspectionColumnKey),
+					  )
+					: [];
+			const parsedHiddenColumnsByView =
+				parsed.hiddenColumnsByView &&
+				typeof parsed.hiddenColumnsByView === "object" &&
+				!Array.isArray(parsed.hiddenColumnsByView)
+					? (parsed.hiddenColumnsByView as Partial<
+						Record<InspectionViewId, unknown>
+					  >)
+					: {};
+			const nextHiddenColumnsByView: HiddenColumnsByView = {
+				calosc: normalizeHiddenColumns(parsedHiddenColumnsByView.calosc),
+				podstawowe: normalizeHiddenColumns(parsedHiddenColumnsByView.podstawowe),
+				terminy: normalizeHiddenColumns(parsedHiddenColumnsByView.terminy),
+			};
+
+			const nextSelectedView: InspectionViewId =
+				parsed.selectedInspectionView === "podstawowe" ||
+				parsed.selectedInspectionView === "terminy" ||
+				parsed.selectedInspectionView === "calosc"
+					? parsed.selectedInspectionView
+					: "calosc";
+
+			setHiddenColumnsByView(nextHiddenColumnsByView);
+			setSelectedInspectionView(nextSelectedView);
+			setHiddenColumns(nextHiddenColumnsByView[nextSelectedView]);
+		} catch {
+			setHiddenColumnsByView(createDefaultHiddenColumnsByView());
+			setSelectedInspectionView("calosc");
+			setHiddenColumns(getDefaultHiddenColumnsForView("calosc"));
+		}
+
+		setAreTableViewSettingsHydrated(true);
+	}, [tableViewStorageArea, tableViewStorageKey]);
 
 	useEffect(() => {
 		if (typeof window === "undefined") {
 			return;
 		}
 
-		window.sessionStorage.setItem(
-			DASHBOARD_SELECTED_INSPECTION_STAGE_FILTERS_KEY,
-			JSON.stringify(selectedStageFilters),
-		);
-	}, [selectedStageFilters]);
-
-	useEffect(() => {
-		if (typeof window === "undefined") {
+		if (!tableViewStorageKey || !areTableViewSettingsHydrated) {
 			return;
 		}
 
-		window.sessionStorage.setItem(
-			DASHBOARD_SELECTED_RECOMMENDATION_STATUSES_KEY,
-			JSON.stringify(selectedRecommendationStatuses),
-		);
-	}, [selectedRecommendationStatuses]);
-
-	const loadInspections = useCallback(async () => {
-		setIsLoading(true);
-		setIsStageSummaryLoading(true);
-		setError(null);
-		setStageSummaryError(null);
-
-		const [detailedResult, summaryResult] = await Promise.all([
-			fetchInspectionsDetailedReport(operatorLogin),
-			fetchInspectionsStageSummary(operatorLogin),
-		]);
-
-		if (!detailedResult.ok) {
-			setRows([]);
-			setError(detailedResult.error);
-		} else {
-			setRows(detailedResult.data.rows);
-		}
-
-		if (!summaryResult.ok) {
-			setStageSummary(null);
-			setStageSummaryError(summaryResult.error);
-		} else {
-			setStageSummary(summaryResult.data);
-		}
-
-		setIsLoading(false);
-		setIsStageSummaryLoading(false);
-	}, [operatorLogin]);
-
-	const loadRecommendations = useCallback(async () => {
-		setIsRecommendationsLoading(true);
-		setIsRecommendationSummaryLoading(true);
-		setRecommendationsError(null);
-		setRecommendationSummaryError(null);
-
-		const [detailedResult, summaryResult] = await Promise.all([
-			fetchRecommendationsDetailedReport(operatorLogin),
-			fetchRecommendationsStageSummary(operatorLogin),
-		]);
-
-		if (!detailedResult.ok) {
-			setRecommendationRows([]);
-			setRecommendationsError(detailedResult.error);
-		} else {
-			setRecommendationRows(detailedResult.data.rows);
-		}
-
-		if (!summaryResult.ok) {
-			setRecommendationSummary(null);
-			setRecommendationSummaryError(summaryResult.error);
-		} else {
-			setRecommendationSummary(summaryResult.data);
-		}
-
-		setIsRecommendationsLoading(false);
-		setIsRecommendationSummaryLoading(false);
-	}, [operatorLogin]);
-
-	useEffect(() => {
-		void loadInspections();
-	}, [loadInspections]);
-
-	useEffect(() => {
-		void loadRecommendations();
-	}, [loadRecommendations]);
-
-	useEffect(() => {
-		if (isLoading || rows.length === 0) {
-			return;
-		}
-
-		const leaderCurrentCount = rows.filter((row) => row.isLeaderCurrentUser).length;
-		const leaderInManagerTeamCount = rows.filter(
-			(row) => row.isLeaderInManagerTeam,
-		).length;
-		const memberCurrentCount = rows.filter((row) => row.isMemberCurrentUser).length;
-		const memberInManagerTeamCount = rows.filter(
-			(row) => row.isMemberInManagerTeam,
-		).length;
-
-		if (ENABLE_DASHBOARD_DEBUG_LOGS) {
-			console.groupCollapsed("[Dashboard][inspections-detailed] flags summary");
-			console.info("role", authRole);
-			console.info("rows", rows.length);
-			console.info("isLeaderCurrentUser", leaderCurrentCount);
-			console.info("isLeaderInManagerTeam", leaderInManagerTeamCount);
-			console.info("isMemberCurrentUser", memberCurrentCount);
-			console.info("isMemberInManagerTeam", memberInManagerTeamCount);
-			console.table(
-				rows.slice(0, 15).map((row) => ({
-					kodInspekcji: row.kodInspekcji,
-					status: row.statusInspekcji,
-					inspektorKierujacy: row.inspektorKierujacy,
-					isLeaderCurrentUser: row.isLeaderCurrentUser,
-					isLeaderInManagerTeam: row.isLeaderInManagerTeam,
-					isMemberCurrentUser: row.isMemberCurrentUser,
-					isMemberInManagerTeam: row.isMemberInManagerTeam,
-				})),
-			);
-			console.groupEnd();
-		}
-	}, [authRole, isLoading, rows]);
-
-	const orderedStageStatuses = useMemo(
-		() =>
-			(stageSummary?.statuses ?? [])
-				.slice()
-				.sort((left, right) => left.stageGroupOrder - right.stageGroupOrder)
-				.map((status) => ({
-					stageCode: status.stageGroupCode,
-					stageLabel: normalizePolishLabel(status.stageGroupLabel),
-					count: status.count,
-				}))
-				.filter(
-					(status) =>
-						status.stageLabel.trim().length > 0 &&
-						!shouldHideInspectionStageStatus(status.stageLabel),
-				),
-		[stageSummary],
-	);
-
-	const stageOverviewData = useMemo<StageOverviewSlice[]>(
-		() =>
-			orderedStageStatuses.map((status) => ({
-				stageGroupCode: status.stageCode,
-				stageGroupLabel: status.stageLabel,
-				count: status.count,
-			})),
-		[orderedStageStatuses],
-	);
-
-	const stageOverviewTotal = useMemo(
-		() => stageOverviewData.reduce((sum, slice) => sum + slice.count, 0),
-		[stageOverviewData],
-	);
-
-	useEffect(() => {
-		if (
-			hoveredStageSliceIndex !== null &&
-			(hoveredStageSliceIndex < 0 || hoveredStageSliceIndex >= stageOverviewData.length)
-		) {
-			setHoveredStageSliceIndex(null);
-		}
-	}, [hoveredStageSliceIndex, stageOverviewData.length]);
-
-	const visibleStageStatuses = useMemo(
-		() =>
-			orderedStageStatuses.map((status) => ({
-				stageCode: status.stageCode,
-				stageLabel: status.stageLabel,
-				count: status.count,
-			})),
-		[orderedStageStatuses],
-	);
-
-	const inspectionStageLabelByCode = useMemo(() => {
-		const map = new Map<string, string>();
-		for (const status of stageSummary?.statuses ?? []) {
-			const code = String(status.stageGroupCode ?? "").trim().toLowerCase();
-			const label = normalizePolishLabel(String(status.stageGroupLabel ?? "").trim());
-			if (!code || !label || label === "-") {
-				continue;
-			}
-			map.set(code, label);
-		}
-		return map;
-	}, [stageSummary]);
-
-	const resolveInspectionStatusLabel = useCallback(
-		(row: ReportInspectionDetailedRow) => {
-			const groupCode = row.stageGroupCode.trim().toLowerCase();
-			const subgroupCode = row.stageSubgroupCode.trim().toLowerCase();
-			const mappedLabel =
-				inspectionStageLabelByCode.get(groupCode) ??
-				inspectionStageLabelByCode.get(subgroupCode);
-
-			if (mappedLabel) {
-				return mappedLabel;
-			}
-
-			return shortenDuplicatedStatusLabel(String(row.statusInspekcji ?? "-"));
-		},
-		[inspectionStageLabelByCode],
-	);
-
-	useEffect(() => {
-		if (visibleStageStatuses.length === 0) {
-			if (selectedStageFilters.length > 0) {
-				setSelectedStageFilters([]);
-			}
-			return;
-		}
-
-		const allowedCodes = new Set(
-			visibleStageStatuses.map((status) => status.stageCode.trim().toLowerCase()),
-		);
-		const nextFilters = selectedStageFilters.filter((filter) =>
-			allowedCodes.has(filter.stageCode.trim().toLowerCase()),
-		);
-
-		if (nextFilters.length !== selectedStageFilters.length) {
-			setSelectedStageFilters(nextFilters);
-		}
-	}, [selectedStageFilters, visibleStageStatuses]);
-
-	const orderedRecommendationGroups = useMemo(
-		() =>
-			(recommendationSummary?.groups ?? [])
-				.slice()
-				.sort((left, right) => left.stageGroupOrder - right.stageGroupOrder)
-				.map((group) => ({
-					...group,
-					stageGroupLabel: normalizePolishLabel(group.stageGroupLabel),
-					stageGroupShortLabel: normalizePolishLabel(group.stageGroupShortLabel),
-				}))
-				.filter(
-					(group) =>
-						!shouldHideRecommendationStatus(group.stageGroupLabel) &&
-						!shouldHideRecommendationStatus(group.stageGroupShortLabel),
-				),
-		[recommendationSummary],
-	);
-
-	useEffect(() => {
-		if (orderedRecommendationGroups.length === 0) {
-			if (selectedRecommendationStatuses.length > 0) {
-				setSelectedRecommendationStatuses([]);
-			}
-			return;
-		}
-
-		const allowedCodes = new Set(
-			orderedRecommendationGroups.map((group) =>
-				group.stageGroupCode.trim().toLowerCase(),
-			),
-		);
-		const nextFilters = selectedRecommendationStatuses.filter((filter) =>
-			allowedCodes.has(filter.stageGroupCode.trim().toLowerCase()),
-		);
-
-		if (nextFilters.length !== selectedRecommendationStatuses.length) {
-			setSelectedRecommendationStatuses(nextFilters);
-		}
-	}, [orderedRecommendationGroups, selectedRecommendationStatuses]);
-
-	const recommendationOverviewData = useMemo<StageOverviewSlice[]>(
-		() =>
-			orderedRecommendationGroups.map((group) => ({
-				stageGroupCode: group.stageGroupCode,
-				stageGroupLabel: group.stageGroupShortLabel || group.stageGroupLabel,
-				count: group.count,
-			})),
-		[orderedRecommendationGroups],
-	);
-
-	const recommendationOverviewTotal = useMemo(
-		() => recommendationOverviewData.reduce((sum, slice) => sum + slice.count, 0),
-		[recommendationOverviewData],
-	);
-
-	useEffect(() => {
-		if (
-			hoveredRecommendationSliceIndex !== null &&
-			(hoveredRecommendationSliceIndex < 0 ||
-				hoveredRecommendationSliceIndex >= recommendationOverviewData.length)
-		) {
-			setHoveredRecommendationSliceIndex(null);
-		}
-	}, [hoveredRecommendationSliceIndex, recommendationOverviewData.length]);
-
-	const visibleRecommendationRows = useMemo(
-		() =>
-			recommendationRows.filter((row) => {
-				const status = String(row.status ?? "");
-				const statusShort = String(row.statusSkrot ?? "");
-				return (
-					!shouldHideRecommendationStatus(status) &&
-					!shouldHideRecommendationStatus(statusShort)
-				);
-			}),
-		[recommendationRows],
-	);
-
-	const filteredRecommendationRows = useMemo(() => {
-		if (selectedRecommendationStatuses.length === 0) {
-			return visibleRecommendationRows;
-		}
-
-		const selectedCodes = new Set(
-			selectedRecommendationStatuses.map((filter) => filter.stageGroupCode.trim().toLowerCase()),
-		);
-		const selectedLabels = new Set(
-			selectedRecommendationStatuses.map((filter) =>
-				filter.stageGroupLabel.trim().toLowerCase(),
-			),
-		);
-		const selectedShortLabels = new Set(
-			selectedRecommendationStatuses
-				.map((filter) => (filter.stageGroupShortLabel ?? "").trim().toLowerCase())
-				.filter(Boolean),
-		);
-
-		return visibleRecommendationRows.filter((row) => {
-			const normalizedStatus = row.status.trim().toLowerCase();
-			const normalizedStatusSkrot = row.statusSkrot.trim().toLowerCase();
-			return (
-				selectedCodes.has(normalizedStatus) ||
-				selectedLabels.has(normalizedStatus) ||
-				selectedShortLabels.has(normalizedStatusSkrot)
-			);
-		});
-	}, [selectedRecommendationStatuses, visibleRecommendationRows]);
-
-	const filteredRows = useMemo(() => {
-		const statusOrder = orderedStageStatuses.map((status) =>
-			normalizePolishLabel(status.stageLabel).trim().toLowerCase(),
-		);
-
-		const findStatusRank = (row: ReportInspectionDetailedRow) => {
-			const normalizedStageLabel = normalizePolishLabel(String(row.statusInspekcji ?? "-"))
-				.trim()
-				.toLowerCase();
-			const normalizedStageLabelShort = shortenDuplicatedStatusLabel(normalizedStageLabel)
-				.trim()
-				.toLowerCase();
-
-			const rank = statusOrder.findIndex((label) => {
-				const shortLabel = shortenDuplicatedStatusLabel(label).trim().toLowerCase();
-				return (
-					label === normalizedStageLabel ||
-					shortLabel === normalizedStageLabelShort ||
-					label.includes(normalizedStageLabelShort) ||
-					normalizedStageLabel.includes(label)
-				);
-			});
-
-			return rank >= 0 ? rank : Number.MAX_SAFE_INTEGER;
+		const storage =
+			tableViewStorageArea === "localStorage"
+				? window.localStorage
+				: window.sessionStorage;
+		const nextHiddenColumnsByView: HiddenColumnsByView = {
+			...hiddenColumnsByView,
+			[selectedInspectionView]: hiddenColumns,
 		};
 
-		const sortRowsByStatusOrder = (inputRows: ReportInspectionDetailedRow[]) =>
-			inputRows
-				.map((row, originalIndex) => ({ row, originalIndex }))
-				.sort((left, right) => {
-					const leftRank = findStatusRank(left.row);
-					const rightRank = findStatusRank(right.row);
-					if (leftRank !== rightRank) {
-						return leftRank - rightRank;
-					}
-					return left.originalIndex - right.originalIndex;
-				})
-				.map((entry) => entry.row);
-
-		if (selectedStageFilters.length === 0) {
-			return sortRowsByStatusOrder(rows);
-		}
-
-		const selectedCodes = new Set(
-			selectedStageFilters.map((filter) => filter.stageCode.trim().toLowerCase()),
+		storage.setItem(
+			tableViewStorageKey,
+			JSON.stringify({
+				selectedInspectionView,
+				hiddenColumnsByView: nextHiddenColumnsByView,
+			}),
 		);
-		const selectedLabelsRaw = selectedStageFilters
-			.map((filter) => normalizePolishLabel(filter.stageLabel).trim().toLowerCase())
-			.filter(Boolean);
-		const selectedLabels = new Set(selectedLabelsRaw);
-		const selectedShortLabels = new Set(
-			selectedLabelsRaw
-				.map((label) => shortenDuplicatedStatusLabel(label).trim().toLowerCase())
-				.filter(Boolean),
-		);
-
-		const filtered = rows.filter((row) => {
-			const normalizedGroupCode = row.stageGroupCode.trim().toLowerCase();
-			const normalizedSubgroupCode = row.stageSubgroupCode.trim().toLowerCase();
-			const normalizedStageLabel = normalizePolishLabel(String(row.statusInspekcji ?? "-"))
-				.trim()
-				.toLowerCase();
-			const normalizedStageLabelShort = shortenDuplicatedStatusLabel(normalizedStageLabel)
-				.trim()
-				.toLowerCase();
-
-			const matchesLabel =
-				selectedLabels.has(normalizedStageLabel) ||
-				selectedShortLabels.has(normalizedStageLabelShort) ||
-				selectedLabelsRaw.some(
-					(label) =>
-						label.includes(normalizedStageLabelShort) ||
-						normalizedStageLabel.includes(label),
-				);
-
-			return (
-				selectedCodes.has(normalizedGroupCode) ||
-				selectedCodes.has(normalizedSubgroupCode) ||
-				matchesLabel
-			);
-		});
-
-		return sortRowsByStatusOrder(filtered);
-	}, [orderedStageStatuses, rows, selectedStageFilters]);
+	}, [
+		areTableViewSettingsHydrated,
+		hiddenColumns,
+		hiddenColumnsByView,
+		selectedInspectionView,
+		tableViewStorageArea,
+		tableViewStorageKey,
+	]);
 
 	useEffect(() => {
-		if (activeTopSection !== "inspections") {
+		if (typeof window === "undefined") {
 			return;
 		}
 
-		const displayedStatusRows = filteredRows.map((row) => ({
-			kodInspekcji: row.kodInspekcji,
-			statusRaw: String(row.statusInspekcji ?? "-"),
-			statusDisplayed: resolveInspectionStatusLabel(row),
-		}));
+		const updatePageSize = () => {
+			setPageSize(getResponsiveInspectionsPageSize(window.innerHeight));
+		};
 
-		if (ENABLE_DASHBOARD_DEBUG_LOGS) {
-			console.groupCollapsed("[Dashboard][inspections-status-column] displayed values");
-			console.table(displayedStatusRows);
-			console.groupEnd();
+		updatePageSize();
+		window.addEventListener("resize", updatePageSize);
+
+		return () => {
+			window.removeEventListener("resize", updatePageSize);
+		};
+	}, []);
+
+	const visibleInspectionColumns = useMemo(
+		() =>
+			INSPECTION_COLUMNS.map((column) => column.key).filter(
+				(columnKey) => !hiddenColumns.includes(columnKey),
+			),
+		[hiddenColumns],
+	);
+
+	const visibleInspectionColumnDefinitions = useMemo(
+		() =>
+			INSPECTION_COLUMNS.filter((column) =>
+				visibleInspectionColumns.includes(column.key),
+			),
+		[visibleInspectionColumns],
+	);
+
+	const selectableColumnDefinitions = useMemo(
+		() => INSPECTION_COLUMNS,
+		[],
+	);
+
+	const draftVisibleInspectionColumns = useMemo(
+		() =>
+			INSPECTION_COLUMNS.map((column) => column.key).filter(
+				(columnKey) => !draftHiddenColumns.includes(columnKey),
+			),
+		[draftHiddenColumns],
+	);
+
+	const draftSelectableColumnDefinitions = useMemo(
+		() => INSPECTION_COLUMNS,
+		[],
+	);
+
+	const hasActiveFilters = useMemo(
+		() => hasActiveTableFilters(columnFilters, advancedFilters),
+		[advancedFilters, columnFilters],
+	);
+
+	const canClearFilters = hasActiveFilters;
+
+	const advancedFilterValuesByColumn = useMemo(() => {
+		const map: Partial<Record<InspectionColumnKey, string[]>> = {};
+
+		INSPECTION_COLUMNS.forEach((column) => {
+			const uniqueValues = Array.from(
+				new Set(
+					inspectionRows.flatMap((row) =>
+						splitInspectionAdvancedFilterCellValue(
+							column.key,
+							toSafeString(row[column.key]),
+						),
+					),
+				),
+			).sort((left, right) =>
+				left.localeCompare(right, "pl", { sensitivity: "base", numeric: true }),
+			);
+
+			map[column.key] = uniqueValues;
+		});
+
+		return map;
+	}, [inspectionRows]);
+
+	const selectedAdvancedFilterValues = useMemo(
+		() =>
+			(advancedFilters[advancedFilterColumnKey] ?? []).filter(
+				(value) => !isAdvancedDateRangeFilterToken(value),
+			),
+		[advancedFilterColumnKey, advancedFilters],
+	);
+
+	const selectedAdvancedFilterDateRange = useMemo(
+		() =>
+			getAdvancedDateRangeFromSelectedValues(
+				advancedFilters[advancedFilterColumnKey] ?? [],
+			),
+		[advancedFilterColumnKey, advancedFilters],
+	);
+
+	const visibleAdvancedFilterValues = useMemo(() => {
+		const sourceValues =
+			advancedFilterValuesByColumn[advancedFilterColumnKey] ?? [];
+		const normalizedSearch = advancedFilterSearch.trim().toLowerCase();
+
+		if (!normalizedSearch) {
+			return sourceValues;
 		}
-	}, [activeTopSection, filteredRows, resolveInspectionStatusLabel]);
 
-	const startColumnResize = useCallback(
-		(columnKey: keyof ReportInspectionDetailedRow, event: React.MouseEvent) => {
-			event.preventDefault();
-			event.stopPropagation();
+		return sourceValues.filter((value) =>
+			value.toLowerCase().includes(normalizedSearch),
+		);
+	}, [
+		advancedFilterColumnKey,
+		advancedFilterSearch,
+		advancedFilterValuesByColumn,
+	]);
 
-			const startX = event.clientX;
-			const startWidth = columnWidths[columnKey] ?? 180;
-			const minWidth = TABLE_COLUMNS.find((column) => column.key === columnKey)?.minWidth ?? 100;
+	const filteredAndSortedInspectionRows = useMemo(() => {
+		const filteredRows = inspectionRows.filter((row) => {
+			const advancedFiltersMatch = Object.entries(advancedFilters).every(
+				([rawColumnKey, selectedValues]) => {
+					const columnKey = rawColumnKey as InspectionColumnKey;
+					return matchesInspectionAdvancedFilterCellValue(
+						columnKey,
+						toSafeString(row[columnKey]),
+						Array.isArray(selectedValues) ? selectedValues : [],
+					);
+				},
+			);
 
-			const handleMouseMove = (mouseEvent: MouseEvent) => {
-				const deltaX = mouseEvent.clientX - startX;
-				setColumnWidths((current) => ({
-					...current,
-					[columnKey]: Math.max(minWidth, startWidth + deltaX),
-				}));
-			};
+			if (!advancedFiltersMatch) {
+				return false;
+			}
 
-			const handleMouseUp = () => {
-				window.removeEventListener("mousemove", handleMouseMove);
-				window.removeEventListener("mouseup", handleMouseUp);
-				document.body.style.cursor = "";
-				document.body.style.userSelect = "";
-			};
+			return Object.entries(columnFilters).every(
+				([rawColumnKey, rawFilterValue]) => {
+					const filterValue = rawFilterValue?.trim();
+					if (!filterValue) {
+						return true;
+					}
 
-			document.body.style.cursor = "col-resize";
-			document.body.style.userSelect = "none";
-			window.addEventListener("mousemove", handleMouseMove);
-			window.addEventListener("mouseup", handleMouseUp);
-		},
-		[columnWidths],
+					const columnKey = rawColumnKey as InspectionColumnKey;
+					const cellValue = toSafeString(row[columnKey]).toLowerCase();
+					return cellValue.includes(filterValue.toLowerCase());
+				},
+			);
+		});
+
+		if (!sortColumnKey || !sortDirection) {
+			return filteredRows;
+		}
+
+		const directionMultiplier = sortDirection === "asc" ? 1 : -1;
+		return [...filteredRows].sort((leftRow, rightRow) => {
+			if (sortColumnKey === "lp") {
+				return (leftRow.lp - rightRow.lp) * directionMultiplier;
+			}
+
+			const leftValue = toSafeString(leftRow[sortColumnKey]);
+			const rightValue = toSafeString(rightRow[sortColumnKey]);
+
+			return (
+				leftValue.localeCompare(rightValue, "pl", {
+					numeric: true,
+					sensitivity: "base",
+				}) * directionMultiplier
+			);
+		});
+	}, [
+		inspectionRows,
+		advancedFilters,
+		columnFilters,
+		sortColumnKey,
+		sortDirection,
+	]);
+
+	const totalPages = useMemo(
+		() =>
+			Math.max(
+				1,
+				Math.ceil(filteredAndSortedInspectionRows.length / pageSize),
+			),
+		[filteredAndSortedInspectionRows.length, pageSize],
 	);
 
-	const startRecommendationColumnResize = useCallback(
-		(columnKey: keyof ReportRecommendationDetailedRow, event: React.MouseEvent) => {
-			event.preventDefault();
-			event.stopPropagation();
+	useEffect(() => {
+		setCurrentPage(totalPages);
+	}, [
+		advancedFilters,
+		columnFilters,
+		hiddenColumns,
+		totalPages,
+		sortColumnKey,
+		sortDirection,
+		selectedInspectionView,
+	]);
 
-			const startX = event.clientX;
-			const startWidth = recommendationColumnWidths[columnKey] ?? 160;
-			const minWidth =
-				RECOMMENDATION_TABLE_COLUMNS.find((column) => column.key === columnKey)?.minWidth ?? 100;
+	useEffect(() => {
+		setCurrentPage((previous) => Math.min(Math.max(previous, 1), totalPages));
+	}, [totalPages]);
 
-			const handleMouseMove = (mouseEvent: MouseEvent) => {
-				const deltaX = mouseEvent.clientX - startX;
-				setRecommendationColumnWidths((current) => ({
-					...current,
-					[columnKey]: Math.max(minWidth, startWidth + deltaX),
-				}));
-			};
+	const paginatedInspectionRows = useMemo(() => {
+		const startIndex = (currentPage - 1) * pageSize;
+		const endIndex = startIndex + pageSize;
+		return filteredAndSortedInspectionRows.slice(startIndex, endIndex);
+	}, [currentPage, filteredAndSortedInspectionRows, pageSize]);
 
-			const handleMouseUp = () => {
-				window.removeEventListener("mousemove", handleMouseMove);
-				window.removeEventListener("mouseup", handleMouseUp);
-				document.body.style.cursor = "";
-				document.body.style.userSelect = "";
-			};
-
-			document.body.style.cursor = "col-resize";
-			document.body.style.userSelect = "none";
-			window.addEventListener("mousemove", handleMouseMove);
-			window.addEventListener("mouseup", handleMouseUp);
-		},
-		[recommendationColumnWidths],
+	const paginationItems = useMemo(
+		() => buildPaginationItems(currentPage, totalPages),
+		[currentPage, totalPages],
 	);
 
-	return (
-		<section className="flex h-full min-h-0 w-full flex-col py-2">
-			{error ? (
-				<p className="mb-3 rounded-lg border border-rose-300/50 bg-rose-950/30 px-3 py-2 text-rose-100 text-sm">
-					{error}
-				</p>
-			) : null}
+	const handlePageChange = (nextPage: number) => {
+		if (!Number.isFinite(nextPage)) {
+			return;
+		}
 
-			<div className="mb-3 flex flex-wrap items-end gap-2 border-[#2a4772] border-b">
-				<button
-					type="button"
-					onClick={() => setActiveTopSection("inspections")}
-					className={`-mb-px inline-flex h-9 items-center rounded-t-md border px-3.5 font-semibold text-sm transition-colors ${
-						activeTopSection === "inspections"
-							? "border-[#8fb6ee] border-b-[#101f39] bg-[#f8fbff] text-slate-900"
-							: "border-transparent bg-transparent text-white hover:bg-[#18365a]/35 hover:text-white"
-					}`}
-				>
-					Inspekcje
-				</button>
-				<button
-					type="button"
-					onClick={() => setActiveTopSection("recommendations")}
-					className={`-mb-px inline-flex h-9 items-center rounded-t-md border px-3.5 font-semibold text-sm transition-colors ${
-						activeTopSection === "recommendations"
-							? "border-[#8fb6ee] border-b-[#101f39] bg-[#f8fbff] text-slate-900"
-							: "border-transparent bg-transparent text-white hover:bg-[#18365a]/35 hover:text-white"
-					}`}
-				>
-					Zalecenia
-				</button>
-			</div>
+		const normalizedPage = Math.trunc(nextPage);
+		const boundedPage = Math.min(Math.max(normalizedPage, 1), totalPages);
+		setCurrentPage(boundedPage);
+	};
 
-			{activeTopSection === "inspections" ? (
-				<>
-			<div className="mb-2 shrink-0 rounded-2xl bg-white p-4 text-slate-900">
-				<div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-					<div>
-						<h3 className="font-semibold text-[16px] tracking-tight">Podsumowanie inspekcji</h3>
-					</div>
-					<button
-						type="button"
-						onClick={() => setSelectedStageFilters([])}
-						disabled={selectedStageFilters.length === 0}
-						className={`rounded-md px-2 py-1 text-xs transition-colors ${
-							selectedStageFilters.length === 0
-								? "cursor-not-allowed text-slate-400"
-								: "cursor-pointer font-semibold text-blue-600 hover:bg-blue-50 hover:text-blue-700"
-						}`}
-					>
-						Wyczyść filtry
-					</button>
-				</div>
+	const handlePageSizeChange = (nextPageSize: number) => {
+		if (!Number.isFinite(nextPageSize)) {
+			return;
+		}
 
-				{stageSummaryError ? (
-					<p className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900 text-xs">
-						{stageSummaryError}
-					</p>
-				) : null}
+		const normalizedPageSize = Math.max(1, Math.trunc(nextPageSize));
+		setPageSize(normalizedPageSize);
+	};
 
-				{isStageSummaryLoading ? (
-					<div className="flex h-[300px] items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-500 text-sm">
-						Ładowanie wykresu etapów...
-					</div>
-				) : visibleStageStatuses.length === 0 ? (
-					<div className="flex h-[300px] items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-500 text-sm">
-						Brak danych etapów do wykresu.
-					</div>
-				) : (
-					<div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(400px,480px)]">
-						<div className="rounded-xl border border-slate-300 bg-white p-2.5">
-							<div className="welcome-scroll-subtle max-h-[300px] overflow-y-auto pr-1">
-								{visibleStageStatuses.map((status, index) => {
-									const isSelected = selectedStageFilters.some(
-										(filter) => filter.stageCode === status.stageCode,
-									);
-									const statusColor = STAGE_OVERVIEW_COLORS[index % STAGE_OVERVIEW_COLORS.length];
-									const isZero = status.count === 0;
+	const handleSortByColumn = (columnKey: InspectionColumnKey) => {
+		if (sortColumnKey !== columnKey) {
+			setSortColumnKey(columnKey);
+			setSortDirection("asc");
+			return;
+		}
 
-									return (
-										<button
-											key={`${status.stageCode}-${status.stageLabel}`}
-											type="button"
-											onClick={() => {
-												setSelectedStageFilters((current) => {
-													const isAlreadySelected = current.some(
-														(filter) => filter.stageCode === status.stageCode,
-													);
+		if (sortDirection === "asc") {
+			setSortDirection("desc");
+			return;
+		}
 
-													if (isAlreadySelected) {
-														return current.filter(
-															(filter) => filter.stageCode !== status.stageCode,
-														);
-													}
+		if (sortDirection === "desc") {
+			setSortColumnKey(null);
+			setSortDirection(null);
+			return;
+		}
 
-													return [
-														...current,
-														{
-															stageCode: status.stageCode,
-															stageLabel: status.stageLabel,
-														},
-													];
-												});
-											}}
-											className={`grid w-full grid-cols-[auto_minmax(0,1fr)] items-center border-slate-200 border-b px-2.5 py-1.5 text-left text-sm transition-colors last:border-b-0 ${
-												isSelected
-													? "cursor-pointer bg-slate-100"
-													: "cursor-pointer hover:bg-slate-50"
-											}`}
-										>
-												<span className="mr-3 flex items-center justify-start pr-2">
-													<span
-														className={`inline-flex min-w-9 items-center justify-center rounded-full px-2.5 py-0.5 font-semibold text-[11px] tabular-nums ${
-															isZero
-																? "bg-slate-200 text-slate-700"
-																: "text-white shadow-[inset_0_-1px_0_rgba(255,255,255,0.2)]"
-														}`}
-														style={isZero ? undefined : { backgroundColor: statusColor }}
-													>
-													{status.count}
-												</span>
-											</span>
-												<span className="min-w-0 whitespace-normal break-words text-slate-700 text-sm leading-snug">
-													{status.stageLabel}
-												</span>
-										</button>
-									);
-								})}
-							</div>
-						</div>
+		setSortDirection("asc");
+	};
 
-						{stageOverviewData.length > 0 ? (
-							<div className="flex min-h-[340px] rounded-xl border border-slate-300 bg-white p-2.5">
-								<div className="grid h-full w-full grid-cols-1 items-center">
-									<div className="relative mx-auto h-[240px] w-full max-w-[460px] sm:h-[280px] lg:h-full lg:min-h-[280px]">
-										<ResponsiveContainer width="100%" height="100%">
-											<PieChart margin={{ top: 16, right: 16, bottom: 16, left: 16 }}>
-												<Pie
-													data={stageOverviewData}
-													dataKey="count"
-													nameKey="stageGroupLabel"
-													cx="50%"
-													cy="50%"
-													innerRadius="58%"
-													outerRadius="92%"
-													paddingAngle={2}
-													isAnimationActive={false}
-													activeIndex={hoveredStageSliceIndex ?? undefined}
-													onMouseEnter={(_entry, index) => setHoveredStageSliceIndex(index)}
-													onMouseLeave={() => setHoveredStageSliceIndex(null)}
-													labelLine={false}
-													label={({
-														cx,
-														cy,
-														midAngle,
-														innerRadius,
-														outerRadius,
-														value,
-													}) => {
-														if (
-															typeof value !== "number" ||
-															value <= 0 ||
-															typeof cx !== "number" ||
-															typeof cy !== "number" ||
-															typeof midAngle !== "number" ||
-															typeof innerRadius !== "number" ||
-															typeof outerRadius !== "number"
-														) {
-															return null;
-														}
+	const handleFilterChange = (
+		columnKey: InspectionColumnKey,
+		value: string,
+	) => {
+		setColumnFilters((prev) => ({ ...prev, [columnKey]: value }));
+	};
 
-														const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
-														const angle = (-midAngle * Math.PI) / 180;
-														const x = cx + radius * Math.cos(angle);
-														const y = cy + radius * Math.sin(angle);
+	const clearFilters = () => {
+		setColumnFilters({});
+		setAdvancedFilters({});
+	};
 
-														return (
-															<text
-																x={x}
-																y={y}
-																fill="#ffffff"
-																fontSize={16}
-																fontWeight={700}
-																textAnchor="middle"
-																dominantBaseline="central"
-															>
-																{value}
-															</text>
-														);
-													}}
-												>
-													{stageOverviewData.map((entry, index) => (
-														<Cell
-															key={entry.stageGroupCode}
-															opacity={
-																hoveredStageSliceIndex === null || hoveredStageSliceIndex === index
-																	? 1
-																	: 0.45
-															}
-															stroke={
-																hoveredStageSliceIndex === index ? "rgba(15,23,42,0.2)" : "transparent"
-															}
-															strokeWidth={hoveredStageSliceIndex === index ? 3 : 0}
-															fill={
-																STAGE_OVERVIEW_COLORS[index % STAGE_OVERVIEW_COLORS.length]
-															}
-														/>
-													))}
-												</Pie>
-												<Tooltip
-													formatter={(value, _name, item) => {
-														const label = String(item?.payload?.stageGroupLabel ?? "Status");
-														return [`${value}`, label];
-													}}
-													position={{ x: 22, y: 12 }}
-													allowEscapeViewBox={{ x: true, y: true }}
-													contentStyle={{
-														borderRadius: 10,
-														borderColor: "#cbd5e1",
-														boxShadow: "0 8px 20px rgba(2,8,23,0.08)",
-														maxWidth: 220,
-														whiteSpace: "normal",
-														wordBreak: "break-word",
-													}}
-													itemStyle={{ whiteSpace: "normal", wordBreak: "break-word" }}
-													labelStyle={{ whiteSpace: "normal", wordBreak: "break-word" }}
-												/>
-											</PieChart>
-										</ResponsiveContainer>
-										<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-											<div className="rounded-full border border-slate-200 bg-white/90 px-3 py-2 text-center shadow-sm backdrop-blur-[1px]">
-												<div className="font-semibold text-slate-900 text-sm leading-none">{stageOverviewTotal}</div>
-												<div className="mt-0.5 text-[10px] text-slate-500 uppercase tracking-wide">Inspekcje</div>
-											</div>
-										</div>
-									</div>
-								</div>
-							</div>
-						) : (
-							<div className="flex min-h-[300px] items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-500 text-sm">
-								Brak danych etapów do wykresu.
-							</div>
-						)}
-					</div>
-				)}
-			</div>
+	const toggleAdvancedFilterValue = (value: string) => {
+		setAdvancedFilters((prev) => {
+			const currentValues = (prev[advancedFilterColumnKey] ?? []).filter(
+				(item) => !isAdvancedDateRangeFilterToken(item),
+			);
+			const nextValues = currentValues.includes(value)
+				? currentValues.filter((item) => item !== value)
+				: [...currentValues, value];
 
-			<div className="min-h-0 flex-1">
-			<TableSurface
-				isLoading={isLoading}
-				errorMessage={error}
-				containerClassName="h-full"
-				scrollAreaClassName="welcome-scroll-subtle h-full min-h-0 [scrollbar-gutter:stable]"
-			>
-				<table className="w-full min-w-max border-collapse font-sans text-slate-900 text-sm">
-					<thead>
-						<tr className="bg-slate-100 text-slate-800">
-							{TABLE_COLUMNS.map((column) => (
-								<th
-									key={String(column.key)}
-									className="sticky top-0 z-10 border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold"
-									style={{ width: columnWidths[column.key], minWidth: column.minWidth }}
-								>
-									<span className="block truncate pr-3">{column.label}</span>
-									<button
-										type="button"
-										onMouseDown={(event) => startColumnResize(column.key, event)}
-										className="absolute top-0 right-0 h-full w-2 cursor-col-resize border-l border-slate-300/80 bg-transparent hover:bg-slate-300/40"
-										aria-label={`Zmień szerokość kolumny ${column.label}`}
-										title="Przeciągnij, aby zmienić szerokość kolumny"
-									/>
-								</th>
-							))}
-						</tr>
-					</thead>
-					<tbody>
-						{filteredRows.length === 0 ? (
-							<tr>
-								<td colSpan={TABLE_COLUMNS.length} className="px-3 py-8 text-center text-slate-500 text-sm">
-									{selectedStageFilters.length > 0
-										? "Brak danych dla wybranego segmentu wykresu."
-										: "Brak danych do wyświetlenia."}
-								</td>
-							</tr>
-						) : null}
+			return {
+				...prev,
+				[advancedFilterColumnKey]: nextValues,
+			};
+		});
+	};
 
-						{filteredRows.map((row, index) => (
-									(() => {
-										const shouldHighlightRow =
-											authRole === "inspector"
-												? row.isLeaderCurrentUser
-												: authRole === "team_lead"
-													? row.isLeaderInManagerTeam
-													: false;
+	const selectAllVisibleAdvancedFilterValues = () => {
+		setAdvancedFilters((prev) => {
+			const currentValues = new Set(
+				(prev[advancedFilterColumnKey] ?? []).filter(
+					(value) => !isAdvancedDateRangeFilterToken(value),
+				),
+			);
+			visibleAdvancedFilterValues.forEach((value) => currentValues.add(value));
 
-										return (
-									<tr
-										key={`${row.kodInspekcji}-${index}`}
-										className={`border-slate-200 border-b transition-colors last:border-b-0 ${
-											shouldHighlightRow
-												? "bg-[#eef5ff] hover:bg-[#e3efff]"
-												: "bg-white hover:bg-slate-50"
-										}`}
-									>
-										{TABLE_COLUMNS.map((column, columnIndex) => (
-											<td
-												key={`${row.kodInspekcji}-${index}-${String(column.key)}`}
-												className={`px-3 py-2.5 align-top ${
-													shouldHighlightRow
-														? columnIndex === 0
-															? "border-slate-200 border-y-2 border-l-4 bg-[#f7faff]"
-															: columnIndex === TABLE_COLUMNS.length - 1
-																? "border-slate-200 border-y-2 border-r-2 bg-[#f7faff]"
-																: "border-slate-200 border-y-2 bg-[#f7faff]"
-														: ""
-												}`}
-												style={{ width: columnWidths[column.key], minWidth: column.minWidth }}
-											>
-												{column.key === "zakresInspekcji" ? (
-													(() => {
-														const rawValue = String(row[column.key] ?? "");
-														const scopeItems = rawValue
-															.split(/\r?\n|;/)
-															.map((item) => item.trim())
-															.filter((item) => item && item !== "-");
+			return {
+				...prev,
+				[advancedFilterColumnKey]: Array.from(currentValues),
+			};
+		});
+	};
 
-														if (scopeItems.length === 0) {
-															return "-";
-														}
+	const clearAdvancedFilterForSelectedColumn = () => {
+		setAdvancedFilters((prev) => ({
+			...prev,
+			[advancedFilterColumnKey]: [],
+		}));
+	};
 
-														return (
-															<div className={scopeItems.length > 3 ? "subtle-vertical-scroll max-h-28 space-y-1 overflow-y-auto pr-1" : "space-y-1"}>
-																{scopeItems.map((item, itemIndex) => (
-																	<div key={`${row.kodInspekcji}-${index}-scope-${itemIndex}`} className="whitespace-normal break-words">
-																		<span className="mr-1 font-medium text-slate-600">{itemIndex + 1}.</span>
-																		{item}
-																	</div>
-																))}
-															</div>
-														);
-													})()
-												) : column.key === "statusInspekcji" ? (
-													(() => {
-														const isWnType = row.inspekcja === "W";
-														const level = isWnType
-															? row.wartoscLiczbowaPrzedzialuAlt
-															: row.wartoscLiczbowaPrzedzialu;
-														const daysSinceEnd = row.liczbaDniOdKoncaInspekcjiDoDzis;
-														const showIcon = level === 1 || level === 2 || level === 3;
-														const documentLabel = isWnType ? "sprawozdania" : "protokołu";
-														const iconClassName =
-															level === 1
-																? "text-yellow-500"
-																: level === 2
-																	? "text-orange-500"
-																	: "text-red-600";
-														const tooltipText =
-															level === 1 || level === 2
-																? typeof daysSinceEnd === "number"
-																	? `Pozostało ${daysSinceEnd} dni na napisanie ${documentLabel}.`
-																	: `Pozostało - dni na napisanie ${documentLabel}.`
-																: typeof daysSinceEnd === "number"
-																	? daysSinceEnd === 30
-																		? `Dziś mija termin oddania ${documentLabel}`
-																		: daysSinceEnd > 30
-																			? `Jest ${daysSinceEnd - 30} dni po terminie oddania ${documentLabel}`
-																			: `Pozostało ${daysSinceEnd} dni na napisanie ${documentLabel}.`
-																	: `Brak danych o terminie oddania ${documentLabel}.`;
-															const displayedStatus = formatDatesInDisplayText(
-																String(row[column.key] ?? "-"),
-															);
+	const setAdvancedFilterDateRange = (range: { from: string; to: string }) => {
+		setAdvancedFilters((prev) => {
+			const token = createAdvancedDateRangeFilterToken(range);
 
-														return (
-															<div className="flex items-start justify-between gap-2">
-																<span className="whitespace-normal break-words">
-																	{displayedStatus}
-																</span>
-																{showIcon ? (
-																	<span title={tooltipText} aria-label={tooltipText}>
-																		<AlertTriangle className={`mt-0.5 h-4 w-4 shrink-0 ${iconClassName}`} />
-																	</span>
-																) : null}
-															</div>
-														);
-													})()
-												) : column.key === "inspekcja" ? (
-													row.inspekcja === "W" ? "WN" : row.inspekcja
-												) : column.key === "kodInspekcji" ? (
-													<button
-														type="button"
-														onClick={() => {
-															const inspectionCode = String(row.kodInspekcji ?? "").trim();
-															if (!inspectionCode || typeof window === "undefined") {
-																return;
-															}
+			return {
+				...prev,
+				[advancedFilterColumnKey]: token ? [token] : [],
+			};
+		});
+	};
 
-															window.sessionStorage.setItem(
-																DASHBOARD_OPEN_INSPECTION_CODE_KEY,
-																inspectionCode,
-															);
-															window.dispatchEvent(
-																new CustomEvent(DASHBOARD_OPEN_INSPECTION_EVENT, {
-																	detail: { inspectionCode },
-																}),
-															);
-														}}
-														className="cursor-pointer rounded px-1 text-left text-[#1f4f8f] underline decoration-[#9bb8de] underline-offset-2 transition-colors hover:text-[#163a68]"
-														title="Przejdź do rejestru Inspekcje i zaznacz ten rekord"
-													>
-														{String(row.kodInspekcji ?? "-")}
-													</button>
-												) : (
-																	formatDatesInDisplayText(String(row[column.key] ?? "-"))
-												)}
-											</td>
-										))}
-									</tr>
-										);
-									})()
-							  ))}
-					</tbody>
-				</table>
-			</TableSurface>
-			</div>
-				</>
-			) : (
-				<>
-					<div className="mb-2 shrink-0 rounded-2xl bg-white p-4 text-slate-900">
-						<div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-							<div>
-								<h3 className="font-semibold text-[16px] tracking-tight">Podsumowanie zaleceń</h3>
-							</div>
-							<button
-								type="button"
-								onClick={() => setSelectedRecommendationStatuses([])}
-								disabled={selectedRecommendationStatuses.length === 0}
-								className={`rounded-md px-2 py-1 text-xs transition-colors ${
-									selectedRecommendationStatuses.length === 0
-										? "cursor-not-allowed text-slate-400"
-										: "cursor-pointer font-semibold text-blue-600 hover:bg-blue-50 hover:text-blue-700"
-								}`}
-							>
-								Wyczyść filtry
-							</button>
-						</div>
+	const openAdvancedFilterForColumn = (
+		columnKey: InspectionColumnKey,
+		triggerElement: HTMLElement,
+	) => {
+		setAdvancedFilterAnchor(getFloatingPanelAnchor(triggerElement));
+		setAdvancedFilterColumnKey(columnKey);
+		setAdvancedFilterSearch("");
+		setIsAdvancedFilterModalOpen(true);
+	};
 
-						{recommendationSummaryError ? (
-							<p className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900 text-xs">
-								{recommendationSummaryError}
-							</p>
-						) : null}
+	const hideColumnInDraft = (columnKey: InspectionColumnKey) => {
+		if (draftHiddenColumns.includes(columnKey)) {
+			return;
+		}
 
-						{isRecommendationSummaryLoading ? (
-							<div className="flex h-[300px] items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-500 text-sm">
-								Ładowanie wykresu statusów...
-							</div>
-						) : orderedRecommendationGroups.length === 0 ? (
-							<div className="flex h-[300px] items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-500 text-sm">
-								Brak statusów zaleceń.
-							</div>
-						) : (
-							<div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(400px,480px)]">
-								<div className="rounded-xl border border-slate-300 bg-white p-2.5">
-									<div className="welcome-scroll-subtle max-h-[300px] overflow-y-auto pr-1">
-										{orderedRecommendationGroups.map((group, index) => {
-											const isSelected = selectedRecommendationStatuses.some(
-												(filter) => filter.stageGroupCode === group.stageGroupCode,
-											);
-											const statusColor = STAGE_OVERVIEW_COLORS[index % STAGE_OVERVIEW_COLORS.length];
-											const isZero = group.count === 0;
-											const statusLabel = group.stageGroupShortLabel || group.stageGroupLabel;
+		const nextHiddenColumns = [...draftHiddenColumns, columnKey];
+		setDraftHiddenColumns(nextHiddenColumns);
+		setDraftHiddenColumnsByView((prev) => ({
+			...prev,
+			[draftSelectedInspectionView]: nextHiddenColumns,
+		}));
+	};
 
-											return (
-												<button
-													key={group.stageGroupCode}
-													type="button"
-													onClick={() => {
-														setSelectedRecommendationStatuses((current) => {
-															const alreadySelected = current.some(
-																(item) => item.stageGroupCode === group.stageGroupCode,
-															);
-															if (alreadySelected) {
-																return current.filter(
-																	(item) => item.stageGroupCode !== group.stageGroupCode,
-																);
-															}
+	const handleDraftColumnVisibilityChange = (
+		columnKey: InspectionColumnKey,
+		isVisible: boolean,
+	) => {
+		if (!isVisible && draftVisibleInspectionColumns.length <= 1) {
+			return;
+		}
 
-															return [
-																...current,
-																{
-																	stageGroupCode: group.stageGroupCode,
-																	stageGroupLabel: group.stageGroupLabel,
-																	stageGroupShortLabel: group.stageGroupShortLabel,
-																},
-															];
-														});
-													}}
-													className={`grid w-full grid-cols-[auto_minmax(0,1fr)] items-center border-slate-200 border-b px-2.5 py-1.5 text-left text-sm transition-colors last:border-b-0 ${
-														isSelected
-															? "cursor-pointer bg-slate-100"
-															: "cursor-pointer hover:bg-slate-50"
-													}`}
-												>
-															<span className="mr-3 flex items-center justify-start pr-2">
-														<span
-															className={`inline-flex min-w-9 items-center justify-center rounded-full px-2.5 py-0.5 font-semibold text-[11px] tabular-nums ${
-																isZero
-																	? "bg-slate-200 text-slate-700"
-																	: "text-white shadow-[inset_0_-1px_0_rgba(255,255,255,0.2)]"
-															}`}
-															style={isZero ? undefined : { backgroundColor: statusColor }}
-														>
-															{group.count}
-														</span>
-													</span>
-															<span className="min-w-0 whitespace-normal break-words text-slate-700 text-sm leading-snug">
-																{statusLabel}
-															</span>
-												</button>
-											);
-										})}
-									</div>
-								</div>
+		if (isVisible) {
+			const nextHiddenColumns = draftHiddenColumns.filter(
+				(key) => key !== columnKey,
+			);
+			setDraftHiddenColumns(nextHiddenColumns);
+			setDraftHiddenColumnsByView((prev) => ({
+				...prev,
+				[draftSelectedInspectionView]: nextHiddenColumns,
+			}));
+			return;
+		}
 
-								{recommendationOverviewData.length > 0 ? (
-									<div className="flex min-h-[340px] rounded-xl border border-slate-300 bg-white p-2.5">
-										<div className="grid h-full w-full grid-cols-1 items-center">
-											<div className="relative mx-auto h-[240px] w-full max-w-[460px] sm:h-[280px] lg:h-full lg:min-h-[280px]">
-												<ResponsiveContainer width="100%" height="100%">
-													<PieChart margin={{ top: 16, right: 16, bottom: 16, left: 16 }}>
-														<Pie
-															data={recommendationOverviewData}
-															dataKey="count"
-															nameKey="stageGroupLabel"
-															cx="50%"
-															cy="50%"
-															innerRadius="58%"
-															outerRadius="92%"
-															paddingAngle={2}
-															isAnimationActive={false}
-															activeIndex={hoveredRecommendationSliceIndex ?? undefined}
-															onMouseEnter={(_entry, index) => setHoveredRecommendationSliceIndex(index)}
-															onMouseLeave={() => setHoveredRecommendationSliceIndex(null)}
-															labelLine={false}
-															label={({
-																cx,
-																cy,
-																midAngle,
-																innerRadius,
-																outerRadius,
-																value,
-															}) => {
-																if (
-																	typeof value !== "number" ||
-																	value <= 0 ||
-																	typeof cx !== "number" ||
-																	typeof cy !== "number" ||
-																	typeof midAngle !== "number" ||
-																	typeof innerRadius !== "number" ||
-																	typeof outerRadius !== "number"
-																) {
-																	return null;
-																}
+		hideColumnInDraft(columnKey);
+	};
 
-																const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
-																const angle = (-midAngle * Math.PI) / 180;
-																const x = cx + radius * Math.cos(angle);
-																const y = cy + radius * Math.sin(angle);
+	const handleOpenViewModal = () => {
+		const nextDraftHiddenByView = {
+			...hiddenColumnsByView,
+			[selectedInspectionView]: hiddenColumns,
+		};
 
-																return (
-																	<text
-																		x={x}
-																		y={y}
-																		fill="#ffffff"
-																		fontSize={16}
-																		fontWeight={700}
-																		textAnchor="middle"
-																		dominantBaseline="central"
-																	>
-																		{value}
-																	</text>
-																);
-															}}
-														>
-															{recommendationOverviewData.map((entry, index) => (
-																<Cell
-																	key={entry.stageGroupCode}
-																	opacity={
-																		hoveredRecommendationSliceIndex === null ||
-																		hoveredRecommendationSliceIndex === index
-																			? 1
-																			: 0.45
-																	}
-																	stroke={
-																		hoveredRecommendationSliceIndex === index
-																			? "rgba(15,23,42,0.2)"
-																			: "transparent"
-																	}
-																	strokeWidth={hoveredRecommendationSliceIndex === index ? 3 : 0}
-																	fill={STAGE_OVERVIEW_COLORS[index % STAGE_OVERVIEW_COLORS.length]}
-																/>
-															))}
-														</Pie>
-														<Tooltip
-															formatter={(value, _name, item) => {
-																const label = String(item?.payload?.stageGroupLabel ?? "Status");
-																return [`${value}`, label];
-															}}
-															position={{ x: 22, y: 12 }}
-															allowEscapeViewBox={{ x: true, y: true }}
-															contentStyle={{
-																borderRadius: 10,
-																borderColor: "#cbd5e1",
-																boxShadow: "0 8px 20px rgba(2,8,23,0.08)",
-																maxWidth: 220,
-																whiteSpace: "normal",
-																wordBreak: "break-word",
-															}}
-															itemStyle={{ whiteSpace: "normal", wordBreak: "break-word" }}
-															labelStyle={{ whiteSpace: "normal", wordBreak: "break-word" }}
-														/>
-													</PieChart>
-												</ResponsiveContainer>
-												<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-													<div className="rounded-full border border-slate-200 bg-white/90 px-3 py-2 text-center shadow-sm backdrop-blur-[1px]">
-														<div className="font-semibold text-slate-900 text-sm leading-none">
-															{recommendationOverviewTotal}
-														</div>
-														<div className="mt-0.5 text-[10px] text-slate-500 uppercase tracking-wide">Zalecenia</div>
-													</div>
-												</div>
-											</div>
-										</div>
-									</div>
-								) : (
-									<div className="flex min-h-[300px] items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-500 text-sm">
-										Brak danych statusów do wykresu.
-									</div>
-								)}
-							</div>
-						)}
-					</div>
+		setDraftSelectedInspectionView(selectedInspectionView);
+		setDraftHiddenColumns(hiddenColumns);
+		setDraftHiddenColumnsByView(nextDraftHiddenByView);
+		setIsColumnPickerOpen(true);
+	};
 
-					<div className="min-h-0 flex-1">
-						<TableSurface
-							isLoading={isRecommendationsLoading}
-							errorMessage={recommendationsError}
-							containerClassName="h-full"
-							scrollAreaClassName="welcome-scroll-subtle h-full min-h-0 [scrollbar-gutter:stable]"
-						>
-							<table className="w-full min-w-max border-collapse font-sans text-slate-900 text-sm">
-								<thead>
-									<tr className="bg-slate-100 text-slate-800">
-										{RECOMMENDATION_TABLE_COLUMNS.map((column) => (
-											<th
-												key={String(column.key)}
-												className="sticky top-0 z-10 border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold"
-												style={{
-													width: recommendationColumnWidths[column.key],
-													minWidth: column.minWidth,
-												}}
-											>
-												<span className="block truncate pr-3">{column.label}</span>
-												<button
-													type="button"
-													onMouseDown={(event) =>
-														startRecommendationColumnResize(column.key, event)
-													}
-													className="absolute top-0 right-0 h-full w-2 cursor-col-resize border-l border-slate-300/80 bg-transparent hover:bg-slate-300/40"
-													aria-label={`Zmień szerokość kolumny ${column.label}`}
-													title="Przeciągnij, aby zmienić szerokość kolumny"
-												/>
-											</th>
-										))}
-									</tr>
-								</thead>
-								<tbody>
-									{filteredRecommendationRows.length === 0 ? (
-										<tr>
-											<td
-												colSpan={RECOMMENDATION_TABLE_COLUMNS.length}
-												className="px-3 py-8 text-center text-slate-500 text-sm"
-											>
-												{selectedRecommendationStatuses.length > 0
-													? "Brak danych dla wybranego statusu zaleceń."
-													: "Brak danych do wyświetlenia."}
-											</td>
-										</tr>
-									) : null}
+	const handleDraftViewSelect = (viewId: InspectionViewId) => {
+		const nextDraftHiddenByView = {
+			...draftHiddenColumnsByView,
+			[draftSelectedInspectionView]: draftHiddenColumns,
+		};
+		const nextHiddenColumns =
+			nextDraftHiddenByView[viewId] ?? getDefaultHiddenColumnsForView(viewId);
 
-									{filteredRecommendationRows.map((row, index) => (
-										<tr
-											key={`${row.recommendationId}-${row.inspectionId}-${index}`}
-											className="border-slate-200 border-b bg-white transition-colors last:border-b-0 hover:bg-slate-50"
-										>
-											{RECOMMENDATION_TABLE_COLUMNS.map((column) => (
-												<td
-													key={`${row.recommendationId}-${row.inspectionId}-${index}-${String(column.key)}`}
-													className="px-3 py-2.5 align-top"
-													style={{
-														width: recommendationColumnWidths[column.key],
-														minWidth: column.minWidth,
-													}}
-												>
-													{column.key === "terminWykonaniaZalecen" ? (
-														(() => {
-															const value = formatDatesInDisplayText(
-																String(row[column.key] ?? "-"),
-															);
-															const terms = value
-																.split(",")
-																.map((item) => item.trim())
-																.filter(Boolean);
+		setDraftHiddenColumnsByView(nextDraftHiddenByView);
+		setDraftSelectedInspectionView(viewId);
+		setDraftHiddenColumns(nextHiddenColumns);
+	};
 
-															if (terms.length <= 1) {
-																return value;
-															}
+	const handleDraftSelectAllColumns = () => {
+		setDraftHiddenColumns([]);
+		setDraftHiddenColumnsByView((prev) => ({
+			...prev,
+			[draftSelectedInspectionView]: [],
+		}));
+	};
 
-															return (
-																<div className="space-y-1">
-																	{terms.map((term, termIndex) => (
-																		<div key={`${row.recommendationId}-${termIndex}`}>{term}</div>
-																	))}
-																</div>
-															);
-														})()
-													) : column.key === "inspectionId" ? (
-														(() => {
-															const inspectionCode = String(row.inspectionId ?? "").trim();
-															if (!inspectionCode || inspectionCode === "-") {
-																return "-";
-															}
+	const handleDraftDeselectAllColumns = () => {
+		const nextHiddenColumns = getAllInspectionColumnKeys();
+		setDraftHiddenColumns(nextHiddenColumns);
+		setDraftHiddenColumnsByView((prev) => ({
+			...prev,
+			[draftSelectedInspectionView]: nextHiddenColumns,
+		}));
+	};
 
-															return (
-																<button
-																	type="button"
-																	onClick={() => {
-																		if (typeof window === "undefined") {
-																			return;
-																		}
+	const handleDraftResetSelection = () => {
+		const nextHiddenColumns = getDefaultHiddenColumnsForView(
+			draftSelectedInspectionView,
+		);
+		setDraftHiddenColumns(nextHiddenColumns);
+		setDraftHiddenColumnsByView((prev) => ({
+			...prev,
+			[draftSelectedInspectionView]: nextHiddenColumns,
+		}));
+	};
 
-																		window.sessionStorage.setItem(
-																			DASHBOARD_OPEN_INSPECTION_CODE_KEY,
-																			inspectionCode,
-																		);
-																		window.dispatchEvent(
-																			new CustomEvent(DASHBOARD_OPEN_INSPECTION_EVENT, {
-																				detail: { inspectionCode },
-																			}),
-																		);
-																	}}
-																	className="cursor-pointer rounded px-1 text-left text-[#1f4f8f] underline decoration-[#9bb8de] underline-offset-2 transition-colors hover:text-[#163a68]"
-																	title="Przejdź do rejestru Inspekcje i zaznacz ten rekord"
-																>
-																	{inspectionCode}
-																</button>
-															);
-														})()
-													) : column.key === "recommendationId" ? (
-														(() => {
-															const recommendationCode = String(row.recommendationId ?? "").trim();
-															if (!recommendationCode || recommendationCode === "-") {
-																return "-";
-															}
+	const handleApplyViewChanges = () => {
+		const nextHiddenByView = {
+			...draftHiddenColumnsByView,
+			[draftSelectedInspectionView]: draftHiddenColumns,
+		};
+		const nextHiddenColumns =
+			nextHiddenByView[draftSelectedInspectionView] ??
+			getDefaultHiddenColumnsForView(draftSelectedInspectionView);
 
-															return (
-																<button
-																	type="button"
-																	onClick={() => {
-																		if (typeof window === "undefined") {
-																			return;
-																		}
+		setHiddenColumnsByView(nextHiddenByView);
+		setSelectedInspectionView(draftSelectedInspectionView);
+		setHiddenColumns(nextHiddenColumns);
+		setIsColumnPickerOpen(false);
+	};
 
-																		window.sessionStorage.setItem(
-																			DASHBOARD_OPEN_RECOMMENDATION_CODE_KEY,
-																			recommendationCode,
-																		);
-																		window.dispatchEvent(
-																			new CustomEvent(DASHBOARD_OPEN_RECOMMENDATION_EVENT, {
-																				detail: { recommendationCode },
-																			}),
-																		);
-																	}}
-																	className="cursor-pointer rounded px-1 text-left text-[#1f4f8f] underline decoration-[#9bb8de] underline-offset-2 transition-colors hover:text-[#163a68]"
-																	title="Przejdź do rejestru Zalecenia i zaznacz ten rekord"
-																>
-																	{recommendationCode}
-																</button>
-															);
-														})()
-													) : (
-														column.key === "status"
-															? String(row.status ?? row.statusSkrot ?? "-")
-															: formatDatesInDisplayText(String(row[column.key] ?? "-"))
-													)}
-												</td>
-											))}
-										</tr>
-									))}
-								</tbody>
-							</table>
-						</TableSurface>
-					</div>
-				</>
-			)}
-		</section>
-	);
+	return {
+		advancedFilterAnchor,
+		advancedFilterColumnKey,
+		advancedFilterSearch,
+		advancedFilters,
+		clearAdvancedFilterForSelectedColumn,
+		clearFilters,
+		columnFilters,
+		draftHiddenColumns,
+		draftSelectableColumnDefinitions,
+		draftVisibleInspectionColumnsCount: draftVisibleInspectionColumns.length,
+		draftSelectedInspectionView,
+		filteredAndSortedInspectionRows,
+		paginatedInspectionRows,
+		currentPage,
+		totalPages,
+		paginationItems,
+		handlePageChange,
+		handlePageSizeChange,
+		pageSize,
+		handleApplyViewChanges,
+		handleDraftColumnVisibilityChange,
+		handleDraftDeselectAllColumns,
+		handleDraftResetSelection,
+		handleDraftSelectAllColumns,
+		handleDraftViewSelect,
+		handleFilterChange,
+		handleOpenViewModal,
+		handleSortByColumn,
+		hasActiveFilters,
+		canClearFilters,
+		isAdvancedFilterModalOpen,
+		isColumnPickerOpen,
+		selectedAdvancedFilterDateRange,
+		openAdvancedFilterForColumn,
+		selectableColumnDefinitions,
+		selectedAdvancedFilterValues,
+		selectedInspectionView,
+		selectAllVisibleAdvancedFilterValues,
+		setAdvancedFilterSearch,
+		setAdvancedFilterDateRange,
+		setDraftHiddenColumns,
+		setIsAdvancedFilterModalOpen,
+		setIsColumnPickerOpen,
+		sortColumnKey,
+		sortDirection,
+		toggleAdvancedFilterValue,
+		visibleAdvancedFilterValues,
+		visibleInspectionColumnDefinitions,
+	};
 }
