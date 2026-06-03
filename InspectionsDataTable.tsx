@@ -8,14 +8,17 @@ import type {
 	InspectionRow,
 } from "@/features/inspections/types";
 import { RegistryDataTable } from "@/shared/components/table/RegistryDataTable";
+import { formatDatesInDisplayText } from "@/shared/utils/date";
 
 type SortDirection = "asc" | "desc";
 
 type InspectionNoLetterFlags = {
 	brakDataDoreczeniaPisma: boolean;
 	brakDataPismaZastrzezenia: boolean;
+	brakDataWyslaniaPismaZZastrzezeniami: boolean;
 	brakDataWplywuPisma: boolean;
 	brakDataPismaZOdpowiedzia: boolean;
+	brakDataWyslaniaPismaZOdpowiedzia: boolean;
 };
 
 type InspectionNoAcceptanceDatesFlags = {
@@ -174,10 +177,14 @@ export function InspectionsDataTable({
 											rowFlags?.brakDataDoreczeniaPisma) ||
 										(column.key === "dataPismaZastrzezenia" &&
 											rowFlags?.brakDataPismaZastrzezenia) ||
+										(column.key === "dataWyslaniaPismaZZastrzezeniami" &&
+											rowFlags?.brakDataWyslaniaPismaZZastrzezeniami) ||
 										(column.key === "dataWplywuPisma" &&
 											rowFlags?.brakDataWplywuPisma) ||
 										(column.key === "dataPismaZOdpowiedzia" &&
-											rowFlags?.brakDataPismaZOdpowiedzia);
+											rowFlags?.brakDataPismaZOdpowiedzia) ||
+										(column.key === "dataWyslaniaPismaZOdpowiedzia" &&
+											rowFlags?.brakDataWyslaniaPismaZOdpowiedzia);
 									const shouldShowNoAcceptanceDates =
 										column.key === "dataAkceptacjiNoty" &&
 										acceptanceFlags?.brakDatAkceptacjiNoty;
@@ -191,10 +198,11 @@ export function InspectionsDataTable({
 											: shouldShowNoLetter
 											? "Brak pisma"
 											: shouldShowNoAcceptanceDates
-												? "-"
+												? "Brak pisma"
 												: normalizedValue === "" || normalizedValue === "brak"
 												? "-"
 												: rawValue;
+									const formattedDisplayValue = formatDatesInDisplayText(displayValue);
 									const isLongTextColumn =
 										column.key === "zakresInspekcji" ||
 										column.key === "skladZespolu" ||
@@ -214,17 +222,17 @@ export function InspectionsDataTable({
 									const isRecommendationDatesColumn =
 										column.key === "dataZalecen";
 									const verticalListItems = isTeamColumn
-										? displayValue
-											.split(/[;,]/)
+										? formattedDisplayValue
+											.split(";")
 											.map((item) => item.trim())
 											.filter(Boolean)
 										: isScopeColumn
-											? displayValue
-												.split(/[;,]/)
+											? formattedDisplayValue
+												.split(";")
 												.map((item) => item.trim())
 												.filter(Boolean)
 										: isAcceptanceDatesColumn || isRecommendationDatesColumn
-											? displayValue
+												? formattedDisplayValue
 												.split(",")
 												.map((item) => item.trim())
 												.filter(Boolean)
@@ -240,7 +248,7 @@ export function InspectionsDataTable({
 									const tooltipValue = isLongTextColumn
 										? (verticalListItems.length > 0
 											? tooltipListValue
-											: displayValue)
+											: formattedDisplayValue)
 										: undefined;
 
 									return (
@@ -258,10 +266,10 @@ export function InspectionsDataTable({
 													: undefined
 											}
 										>
-											{(isTeamColumn || isScopeColumn) && displayValue !== "-" ? (
+											{(isTeamColumn || isScopeColumn) && formattedDisplayValue !== "-" ? (
 												<div className="subtle-vertical-scroll max-h-28 w-full space-y-1 overflow-y-auto pr-1">
 													{shouldUseNumberedList ? (
-														<ol className="list-decimal space-y-1 pl-4">
+														<ol className="list-inside list-decimal space-y-1 pl-1">
 															{verticalListItems.map((item, index) => (
 																<li
 																	key={`${row.id}-${column.key}-${index}`}
@@ -282,7 +290,7 @@ export function InspectionsDataTable({
 														))
 													)}
 												</div>
-											) : (isAcceptanceDatesColumn || isRecommendationDatesColumn) && displayValue !== "-" ? (
+											) : (isAcceptanceDatesColumn || isRecommendationDatesColumn) && formattedDisplayValue !== "-" ? (
 												<div className="subtle-vertical-scroll max-h-28 w-full space-y-1 overflow-y-auto pr-1">
 													{verticalListItems.map((item, index) => (
 														<div key={`${row.id}-${column.key}-${index}`} className="whitespace-normal break-words">
@@ -293,25 +301,25 @@ export function InspectionsDataTable({
 											) : isEntityNameColumn || isScopeDetailsColumn || isStatusColumn || isCommentColumn ? (
 												<div className="w-full whitespace-normal break-words leading-5">
 													{shouldShowNotApplicable ? (
-														<span className="italic text-slate-400">{displayValue}</span>
+														<span className="italic text-slate-400">{formattedDisplayValue}</span>
 													) : (
-														displayValue
+														formattedDisplayValue
 													)}
 												</div>
 											) : isLongTextColumn ? (
 												<div className="w-full whitespace-normal break-words leading-5">
 													{shouldShowNotApplicable ? (
-														<span className="italic text-slate-400">{displayValue}</span>
+														<span className="italic text-slate-400">{formattedDisplayValue}</span>
 													) : (
-														displayValue
+														formattedDisplayValue
 													)}
 												</div>
 											) : (
 												<div className="w-full whitespace-normal break-words leading-5">
 													{shouldShowNotApplicable ? (
-														<span className="italic text-slate-400">{displayValue}</span>
+														<span className="italic text-slate-400">{formattedDisplayValue}</span>
 													) : (
-														displayValue
+														formattedDisplayValue
 													)}
 												</div>
 											)}

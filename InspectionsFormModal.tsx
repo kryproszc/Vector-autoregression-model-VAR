@@ -916,7 +916,9 @@ export function InspectionsFormModal({
 			isOpen={isOpen}
 			title={editingInspectionId ? "Edytuj inspekcję" : "Dodaj inspekcję"}
 			subtitle={
-				editingInspectionCode ? `Id inspekcji: ${editingInspectionCode}` : undefined
+				editingInspectionId && editingInspectionCode
+					? `Id inspekcji: ${editingInspectionCode}`
+					: undefined
 			}
 			onClose={onClose}
 			onSubmit={onSubmit}
@@ -1038,6 +1040,11 @@ export function InspectionsFormModal({
 												.includes("kontrol")
 												? prev.dataWyslaniaPismaZOdpowiedzia
 												: "",
+											brakDataWyslaniaPismaZOdpowiedzia: next
+												.toLowerCase()
+												.includes("kontrol")
+												? prev.brakDataWyslaniaPismaZOdpowiedzia
+												: false,
 											dataAkceptacjiSprawozdania: next
 												.toLowerCase()
 												.includes("wizyta")
@@ -1492,14 +1499,27 @@ export function InspectionsFormModal({
 									}
 								/>
 
-								<DateInputWithCalendar
+								<NoLetterDateField
 									label={objectionsLetterSentLabel}
 									labelClassName={stableFieldLabelClassName}
 									value={addInspectionForm.dataWyslaniaPismaZZastrzezeniami}
-									onChange={(next) =>
+									isNoLetter={addInspectionForm.brakDataWyslaniaPismaZZastrzezeniami}
+									onChangeValue={(nextValue) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
-											dataWyslaniaPismaZZastrzezeniami: next,
+											dataWyslaniaPismaZZastrzezeniami: nextValue,
+											brakDataWyslaniaPismaZZastrzezeniami: nextValue
+												? false
+												: prev.brakDataWyslaniaPismaZZastrzezeniami,
+										}))
+									}
+									onChangeNoLetter={(nextNoLetter) =>
+										setAddInspectionForm((prev) => ({
+											...prev,
+											brakDataWyslaniaPismaZZastrzezeniami: nextNoLetter,
+											dataWyslaniaPismaZZastrzezeniami: nextNoLetter
+												? ""
+												: prev.dataWyslaniaPismaZZastrzezeniami,
 										}))
 									}
 								/>
@@ -1525,15 +1545,28 @@ export function InspectionsFormModal({
 									}
 								/>
 
-								<DateInputWithCalendar
+								<NoLetterDateField
 									label={controlResponseLetterSentLabel}
 									labelClassName={stableFieldLabelClassName}
+									isNoLetter={addInspectionForm.brakDataWyslaniaPismaZOdpowiedzia}
 									disabled={isControlOnlyFieldDisabled}
 									value={addInspectionForm.dataWyslaniaPismaZOdpowiedzia}
-									onChange={(next) =>
+									onChangeValue={(nextValue) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
-											dataWyslaniaPismaZOdpowiedzia: next,
+											dataWyslaniaPismaZOdpowiedzia: nextValue,
+											brakDataWyslaniaPismaZOdpowiedzia: nextValue
+												? false
+												: prev.brakDataWyslaniaPismaZOdpowiedzia,
+										}))
+									}
+									onChangeNoLetter={(nextNoLetter) =>
+										setAddInspectionForm((prev) => ({
+											...prev,
+											brakDataWyslaniaPismaZOdpowiedzia: nextNoLetter,
+											dataWyslaniaPismaZOdpowiedzia: nextNoLetter
+												? ""
+												: prev.dataWyslaniaPismaZOdpowiedzia,
 										}))
 									}
 								/>
