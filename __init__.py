@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime
+import os
 import re
 from statistics import median
 from typing import Any
@@ -500,28 +501,8 @@ def _manager_scope_flags_for_inspection(conn: Any, inspection_id: int, manager: 
 	return in_team_scope, in_added_scope
 
 
-_HIDDEN_STATUS_KEYS = {
-	"zamkniete - wydano zalecenia",
-	"zamkniete - brak zalecen",
-}
-
-
-def _is_hidden_status(value: str | None) -> bool:
-	return _normalize_text_key(value) in _HIDDEN_STATUS_KEYS
-
-
-def _is_hidden_status_code(status_code: str | None) -> bool:
-	code = _normalize_code_key(status_code)
-	if "zamkn" not in code:
-		return False
-	return ("wydano_zalec" in code) or ("z_zalec" in code) or ("brak_zalec" in code) or ("bez_zalec" in code)
-
-
 def _public_status_label(value: str | None) -> str:
-	label = str(value or "-").strip() or "-"
-	if _is_hidden_status(label):
-		return "-"
-	return label
+	return str(value or "-").strip() or "-"
 
 
 def _should_compute_bucket_code(status_code: str | None) -> bool:
@@ -534,12 +515,49 @@ def _parse_csv_values(raw_value: str | list[str] | None) -> list[str]:
 	items = raw_value if isinstance(raw_value, list) else [raw_value]
 	parts: list[str] = []
 	for item in items:
-		for part in str(item).split(","):
+		for part in re.split(r"[,;\n]", str(item)):
 			cleaned = part.strip()
 			if cleaned:
 				parts.append(cleaned)
 	# Keep insertion order while removing duplicates.
 	return list(dict.fromkeys(parts))
+
+
+def _load_excluded_status_codes(env_key: str) -> set[str]:
+	raw_value = os.getenv(env_key)
+	if raw_value is None:
+		return set()
+	return {
+		normalized
+		for normalized in (_normalize_code_key(v) for v in _parse_csv_values(raw_value))
+		if normalized
+	}
+
+
+_DASHBOARD_EXCLUDED_INSPECTION_STATUS_CODES = _load_excluded_status_codes("DASHBOARD_EXCLUDED_INSPECTION_STATUS_CODES")
+_DASHBOARD_EXCLUDED_RECOMMENDATION_STATUS_CODES = _load_excluded_status_codes("DASHBOARD_EXCLUDED_RECOMMENDATION_STATUS_CODES")
+_REPORTS_EXCLUDED_INSPECTION_STATUS_CODES = _load_excluded_status_codes("REPORTS_EXCLUDED_INSPECTION_STATUS_CODES")
+_REPORTS_EXCLUDED_RECOMMENDATION_STATUS_CODES = _load_excluded_status_codes("REPORTS_EXCLUDED_RECOMMENDATION_STATUS_CODES")
+
+
+def _is_excluded_status_code(status_code: str | None, excluded_codes: set[str]) -> bool:
+	return _normalize_code_key(status_code) in excluded_codes
+
+
+def _is_dashboard_hidden_status_code(status_code: str | None) -> bool:
+	return _is_excluded_status_code(status_code, _DASHBOARD_EXCLUDED_INSPECTION_STATUS_CODES)
+
+
+def _is_dashboard_hidden_recommendation_status_code(status_code: str | None) -> bool:
+	return _is_excluded_status_code(status_code, _DASHBOARD_EXCLUDED_RECOMMENDATION_STATUS_CODES)
+
+
+def _is_reports_hidden_status_code(status_code: str | None) -> bool:
+	return _is_excluded_status_code(status_code, _REPORTS_EXCLUDED_INSPECTION_STATUS_CODES)
+
+
+def _is_reports_hidden_recommendation_status_code(status_code: str | None) -> bool:
+	return _is_excluded_status_code(status_code, _REPORTS_EXCLUDED_RECOMMENDATION_STATUS_CODES)
 
 
 def _can_access_inspection_for_reports(conn: Any, inspection_row: dict[str, Any], operator: dict[str, Any]) -> bool:
@@ -812,6 +830,8 @@ def get_inspections_time_analytics(
 	base_rows: list[dict[str, Any]] = []
 	for raw_row in rows:
 		row = dict(raw_row)
+		if _is_reports_hidden_status_code(row.get("status_inspekcji_kod")):
+			continue
 		row_type = _inspekcja_code(row.get("typ_inspekcji"))
 		if row_type not in {"K", "W"}:
 			continue
@@ -1462,7 +1482,7 @@ def get_inspections_detailed(
 
 	result_rows: list[dict[str, Any]] = []
 	for row in rows:
-		if _is_hidden_status_code(row["status_inspekcji_kod"]):
+		if _is_dashboard_hidden_status_code(row["status_inspekcji_kod"]):
 			continue
 		if manager_context is not None:
 			in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, int(row["id"]), manager_context)
@@ -1633,7 +1653,7 @@ def get_inspections_stage_summary(
 			in_team_scope = False
 			in_added_scope = False
 
-			if _is_hidden_status_code(row_dict.get("status_inspekcji_kod")):
+			if _is_dashboard_hidden_status_code(row_dict.get("status_inspekcji_kod")):
 				continue
 
 			if manager_context is not None:
@@ -1742,6 +1762,7 @@ def get_recommendations_stage_summary(
 		).fetchall()
 
 		group_stats: dict[str, dict[str, Any]] = {}
+		status_id_to_code: dict[int, str] = {}
 		for status_row in status_rows:
 			status_id = int(status_row["id"])
 			status_code = str(status_row["kod_pozycji"] or "").strip() or f"status_{status_id}"
@@ -1756,6 +1777,7 @@ def get_recommendations_stage_summary(
 				"countManagerAdded": 0,
 				"countTeamAndManagerAdded": 0,
 			}
+			status_id_to_code[status_id] = status_code
 
 		unknown_code = "unknown_unmapped"
 		if unknown_code not in group_stats:
@@ -1794,6 +1816,12 @@ def get_recommendations_stage_summary(
 		for row in recommendation_rows:
 			row_dict = dict(row)
 
+			status_id = row_dict.get("status_zalecenia_id")
+			if status_id is not None:
+				status_code = status_id_to_code.get(int(status_id))
+				if _is_dashboard_hidden_recommendation_status_code(status_code):
+					continue
+
 			in_team_scope = False
 			in_added_scope = False
 			inspection_id_raw = row_dict.get("inspection_id")
@@ -1815,7 +1843,6 @@ def get_recommendations_stage_summary(
 				if not _can_access_recommendation_for_reports(conn, row_dict, operator):
 					continue
 
-			status_id = row_dict.get("status_zalecenia_id")
 			group_code = unknown_code
 			if status_id is not None:
 				for code, payload in group_stats.items():
@@ -1909,6 +1936,7 @@ def get_recommendations_detailed(
 				i.kod_inspekcji,
 				r.created_by_user_id AS recommendation_created_by_user_id,
 				r.status_zalecenia_id,
+				COALESCE(st.kod_pozycji, '') AS status_kod,
 				r.data_zalecen,
 				COALESCE(st.nazwa_pozycji, 'brak') AS status_nazwa,
 				COALESCE(NULLIF(trim(st.skrot_pozycji), ''), st.nazwa_pozycji, 'brak') AS status_skrot,
@@ -1954,6 +1982,8 @@ def get_recommendations_detailed(
 		payload_rows: list[dict[str, Any]] = []
 		for row in rows:
 			row_dict = dict(row)
+			if _is_dashboard_hidden_recommendation_status_code(row_dict.get("status_kod")):
+				continue
 
 			in_team_scope = False
 			in_added_scope = False
