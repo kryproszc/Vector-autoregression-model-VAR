@@ -1,4 +1,4 @@
-import { CalendarDays, Check, ChevronDown, ChevronsUpDown } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, ChevronsUpDown, Pencil } from "lucide-react";
 import { DateCalendar } from "@mui/x-date-pickers/DateCalendar";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { AdapterDateFns } from "@mui/x-date-pickers/AdapterDateFns";
@@ -25,6 +25,9 @@ import { SingleSelectPortalField } from "@/shared/components/forms/SingleSelectP
 
 type InspectionsFormModalProps = {
 	isOpen: boolean;
+	isPreviewMode?: boolean;
+	canStartEditFromPreview?: boolean;
+	onStartEditFromPreview?: () => void;
 	editingInspectionId: string | null;
 	editingInspectionCode?: string | null;
 	showRequiredFieldErrors?: boolean;
@@ -498,6 +501,12 @@ function MultiSelectPeoplePortalField({
 	} | null>(null);
 
 	const selectedCount = values.length;
+	const selectedSummaryItems = selectedSummary
+		? selectedSummary
+				.split(",")
+				.map((item) => item.trim())
+				.filter(Boolean)
+		: [];
 	const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 	const visibleOptions = normalizedSearchQuery
 		? options.filter((option) =>
@@ -679,9 +688,6 @@ function MultiSelectPeoplePortalField({
 					: null}
 			</div>
 
-			{selectedSummary ? (
-				<span className="mt-2 block text-slate-600 text-xs">Wybrano: {selectedSummary}</span>
-			) : null}
 			{errorMessage ? (
 				<span className="mt-1 block text-rose-700 text-xs">{errorMessage}</span>
 			) : null}
@@ -689,8 +695,170 @@ function MultiSelectPeoplePortalField({
 	);
 }
 
+function PreviewTeamMembersField({
+	label,
+	members,
+}: {
+	label: string;
+	members: string[];
+}) {
+	const [isExpanded, setIsExpanded] = useState(false);
+	const containerRef = useRef<HTMLDivElement | null>(null);
+
+	useEffect(() => {
+		if (!isExpanded) {
+			return;
+		}
+
+		const handlePointerDown = (event: MouseEvent) => {
+			const target = event.target as Node | null;
+			if (!target) {
+				return;
+			}
+
+			if (containerRef.current && !containerRef.current.contains(target)) {
+				setIsExpanded(false);
+			}
+		};
+
+		document.addEventListener("mousedown", handlePointerDown);
+		return () => {
+			document.removeEventListener("mousedown", handlePointerDown);
+		};
+	}, [isExpanded]);
+
+	return (
+		<div className="text-slate-700 text-sm">
+			<span className="mb-1 block">{label}</span>
+			<div ref={containerRef} className="relative">
+				<div
+					role="button"
+					tabIndex={0}
+					onClick={() => setIsExpanded((prev) => !prev)}
+					onKeyDown={(event) => {
+						if (event.key === "Enter" || event.key === " ") {
+							event.preventDefault();
+							setIsExpanded((prev) => !prev);
+						}
+					}}
+					className="flex w-full cursor-pointer items-center justify-between rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-slate-900 text-sm transition-colors hover:border-slate-400 hover:bg-slate-50"
+				>
+					<span>Wybrano osób: {members.length}</span>
+					<ChevronDown
+						size={14}
+						className={`text-slate-500 transition-transform ${
+							isExpanded ? "rotate-180" : ""
+						}`}
+					/>
+				</div>
+
+				{isExpanded ? (
+					<div className="absolute bottom-full left-0 z-50 mb-1 w-full rounded-lg border border-slate-300 bg-white p-2 shadow-lg">
+						{members.length > 0 ? (
+							<div className="subtle-vertical-scroll max-h-44 space-y-1 overflow-y-auto pr-1 text-[13px]">
+								{members.map((member, index) => (
+									<div key={`expanded-${member}-${index}`} className="rounded-md px-2 py-1.5 text-slate-900">
+										{index + 1}. {member}
+									</div>
+								))}
+							</div>
+						) : (
+							<p className="px-2 py-1.5 text-slate-500 text-sm">Brak osób w składzie.</p>
+						)}
+					</div>
+				) : null}
+			</div>
+		</div>
+	);
+}
+
+function PreviewInspectionScopesField({
+	label,
+	scopes,
+}: {
+	label: string;
+	scopes: string[];
+}) {
+	const [isExpanded, setIsExpanded] = useState(false);
+	const containerRef = useRef<HTMLDivElement | null>(null);
+
+	useEffect(() => {
+		if (!isExpanded) {
+			return;
+		}
+
+		const handlePointerDown = (event: MouseEvent) => {
+			const target = event.target as Node | null;
+			if (!target) {
+				return;
+			}
+
+			if (containerRef.current && !containerRef.current.contains(target)) {
+				setIsExpanded(false);
+			}
+		};
+
+		document.addEventListener("mousedown", handlePointerDown);
+		return () => {
+			document.removeEventListener("mousedown", handlePointerDown);
+		};
+	}, [isExpanded]);
+
+	return (
+		<div className="text-slate-700 text-sm">
+			<span className="mb-1 block">{label}</span>
+			<div ref={containerRef} className="relative">
+				<div
+					role="button"
+					tabIndex={0}
+					onClick={() => setIsExpanded((prev) => !prev)}
+					onKeyDown={(event) => {
+						if (event.key === "Enter" || event.key === " ") {
+							event.preventDefault();
+							setIsExpanded((prev) => !prev);
+						}
+					}}
+					className="flex w-full cursor-pointer items-center justify-between rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-slate-900 text-sm transition-colors hover:border-slate-400 hover:bg-slate-50"
+				>
+					<span>
+						{scopes.length
+							? `Wybrano pozycji: ${scopes.length}`
+							: "Wybierz zakresy inspekcji"}
+					</span>
+					<ChevronDown
+						size={14}
+						className={`text-slate-500 transition-transform ${
+							isExpanded ? "rotate-180" : ""
+						}`}
+					/>
+				</div>
+
+				{isExpanded ? (
+					<div className="absolute z-20 mt-2 w-full rounded-lg border border-slate-300 bg-white p-2 shadow-lg">
+						<div className="subtle-vertical-scroll max-h-44 space-y-1 overflow-y-auto pr-1 text-[13px]">
+							{scopes.length > 0 ? (
+								scopes.map((scope, index) => (
+									<div key={`preview-scope-${scope}-${index}`} className="rounded-md px-2 py-1.5 text-slate-900">
+										{index + 1}. {scope}
+									</div>
+								))
+							) : (
+								<p className="px-2 py-2 text-slate-500 text-sm">Brak wybranych pozycji.</p>
+							)}
+						</div>
+					</div>
+				) : null}
+			</div>
+			<span className="mt-1 block text-slate-500 text-xs">Możesz wybrać wiele pozycji.</span>
+		</div>
+	);
+}
+
 export function InspectionsFormModal({
 	isOpen,
+	isPreviewMode = false,
+	canStartEditFromPreview = false,
+	onStartEditFromPreview,
 	editingInspectionId,
 	editingInspectionCode,
 	showRequiredFieldErrors = false,
@@ -841,6 +1009,12 @@ export function InspectionsFormModal({
 					.includes(normalizedLeaderSearchQuery),
 			)
 		: availableLeaderUsers;
+	const selectedInspectionScopeLabels = selectedInspectionScopes.map((scopeValue) => {
+		const matchedOption = inspectionScopeOptions.find(
+			(option) => option.value === scopeValue,
+		);
+		return matchedOption?.label ?? scopeValue;
+	});
 	const normalizedInspectionType = addInspectionForm.typInspekcji
 		.trim()
 		.toLowerCase();
@@ -901,6 +1075,14 @@ export function InspectionsFormModal({
 	const isAspektKonsumenckiChecked =
 		addInspectionForm.aspektKonsumencki.trim().toUpperCase() === "TAK";
 	const stableFieldLabelClassName = "min-h-8 leading-5";
+	const parsedRecommendationDates = addInspectionForm.dataZalecen
+		.split(",")
+		.map((value) => value.trim())
+		.filter(Boolean)
+		.map((value) => formatDisplayDate(value) || value);
+	const parsedAcceptanceDates = dataAkceptacjiNotyList
+		.map((value) => formatDisplayDate(value) || value)
+		.filter(Boolean);
 	const isRequiredInspectionTypeMissing =
 		showRequiredFieldErrors && !addInspectionForm.typInspekcji.trim();
 	const isRequiredEntityNameMissing =
@@ -911,21 +1093,78 @@ export function InspectionsFormModal({
 		showRequiredFieldErrors && !addInspectionForm.koniecInspekcji;
 	const isRequiredStatusMissing = showRequiredFieldErrors && !addInspectionForm.status.trim();
 
+	const renderNoLetterField = ({
+		label,
+		value,
+		isNoLetter,
+		disabled = false,
+		onChangeValue,
+		onChangeNoLetter,
+	}: {
+		label: string;
+		value: string;
+		isNoLetter: boolean;
+		disabled?: boolean;
+		onChangeValue: (nextValue: string) => void;
+		onChangeNoLetter: (nextNoLetter: boolean) => void;
+	}) => {
+		if (isPreviewMode) {
+			return (
+				<div>
+					<label className={`mb-1 block text-slate-600 text-sm ${stableFieldLabelClassName}`}>
+						{label}
+					</label>
+					<div className="flex h-9 items-center rounded-lg border border-slate-200 bg-white px-3 text-slate-700 text-sm">
+						{isNoLetter ? "Brak pisma" : formatDisplayDate(value) || "-"}
+					</div>
+				</div>
+			);
+		}
+
+		return (
+			<NoLetterDateField
+				label={label}
+				labelClassName={stableFieldLabelClassName}
+				value={value}
+				isNoLetter={isNoLetter}
+				disabled={disabled}
+				onChangeValue={onChangeValue}
+				onChangeNoLetter={onChangeNoLetter}
+			/>
+		);
+	};
+
+	const handleFormSubmit = (event: FormEvent<HTMLFormElement>) => {
+		if (isPreviewMode) {
+			event.preventDefault();
+			onStartEditFromPreview?.();
+			return;
+		}
+
+		onSubmit(event);
+	};
+
 	return (
 		<RegistryFormScaffold
 			isOpen={isOpen}
-			title={editingInspectionId ? "Edytuj inspekcję" : "Dodaj inspekcję"}
+			title={
+				isPreviewMode
+					? "Podgląd inspekcji"
+					: editingInspectionId
+						? "Edytuj inspekcję"
+						: "Dodaj inspekcję"
+			}
 			subtitle={
 				editingInspectionId && editingInspectionCode
 					? `Id inspekcji: ${editingInspectionCode}`
 					: undefined
 			}
 			onClose={onClose}
-			onSubmit={onSubmit}
+			onSubmit={handleFormSubmit}
 			closeOnBackdropClick={false}
 			maxWidthClassName="max-w-[1900px]"
-			isContentReadOnly={isReadOnly}
-			cancelLabel={editingInspectionId ? "Anuluj" : undefined}
+			isContentReadOnly={isReadOnly && !isPreviewMode}
+			cancelLabel={isPreviewMode ? null : editingInspectionId ? "Anuluj" : undefined}
 			headerNotices={
 				<>
 					{inactivityIsWarning ? (
@@ -987,11 +1226,27 @@ export function InspectionsFormModal({
 					) : null}
 				</>
 			}
-			isSubmitDisabled={isSubmittingInspection || isReadOnly || isSaveDisabledDueToLock}
+			isSubmitDisabled={
+				isPreviewMode
+					? !canStartEditFromPreview
+					: isSubmittingInspection || isReadOnly || isSaveDisabledDueToLock
+			}
+			submitButtonClassName={
+				isPreviewMode
+					? "inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 font-semibold text-sm transition-colors enabled:border-[#93b9ee] enabled:bg-[#d9e9ff] enabled:text-[#21508f] enabled:hover:bg-[#c9e0ff] disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500"
+					: undefined
+			}
 			submitLabel={
 				isSubmittingInspection
 					? "Zapisywanie..."
-					: isReadOnly
+					: isPreviewMode
+						? (
+							<span className="inline-flex items-center gap-2">
+								<Pencil size={15} />
+								Edytuj
+							</span>
+						)
+						: isReadOnly
 						? "Tylko podgląd"
 						: editingInspectionId
 							? "Zapisz"
@@ -999,7 +1254,14 @@ export function InspectionsFormModal({
 			}
 		>
 			<div className="space-y-4">
-					<fieldset disabled={isReadOnly} className="border-0 p-0">
+					<fieldset
+						disabled={isReadOnly}
+						className={`border-0 p-0 ${
+							isPreviewMode
+								? "[&_input:disabled]:!bg-white [&_input:disabled]:!text-slate-700 [&_textarea:disabled]:!bg-white [&_textarea:disabled]:!text-slate-700 [&_button:disabled]:!bg-white [&_button:disabled]:!text-slate-700 [&_select:disabled]:!bg-white [&_select:disabled]:!text-slate-700"
+								: ""
+						}`}
+					>
 						<div className="grid gap-4 xl:grid-cols-12 xl:items-start">
 						<section className="rounded-xl border border-slate-200 p-3 xl:col-span-5">
 							<h4 className="mb-3 font-semibold text-slate-700 text-sm uppercase tracking-wide">
@@ -1085,6 +1347,12 @@ export function InspectionsFormModal({
 									disabled={isReadOnly}
 								/>
 
+								{isPreviewMode ? (
+									<PreviewInspectionScopesField
+										label="Zakres inspekcji według upoważnienia"
+										scopes={selectedInspectionScopeLabels}
+									/>
+								) : (
 								<label className="text-slate-700 text-sm">
 									<span className="mb-1 block">Zakres inspekcji według upoważnienia</span>
 									<div ref={scopePickerRef} className="relative">
@@ -1176,6 +1444,7 @@ export function InspectionsFormModal({
 										Możesz wybrać wiele pozycji.
 									</span>
 								</label>
+								)}
 
 								<label className="text-slate-700 text-sm">
 									<span className="mb-1 block">Czy dotyczy aspektu konsumenckiego?</span>
@@ -1379,19 +1648,26 @@ export function InspectionsFormModal({
 								/>
 
 								<div className="sm:col-span-2">
-									<MultiSelectPeoplePortalField
-										label="Skład zespołu"
-										placeholder="Wybierz członków zespołu"
-										options={activeUsers.map((user) => ({
-											id: user.id,
-											label: getUserDisplayName(user),
-										}))}
-										values={selectedTeamMemberIds}
-										onChange={setSelectedTeamMemberIds}
-										selectedSummary={selectedTeamMembers.join(", ")}
-										errorMessage={teamMemberScopeError}
-										highlightedUserId={outOfScopeTeamMemberUserId}
-									/>
+									{isPreviewMode ? (
+										<PreviewTeamMembersField
+											label="Skład zespołu"
+											members={selectedTeamMembers}
+										/>
+									) : (
+										<MultiSelectPeoplePortalField
+											label="Skład zespołu"
+											placeholder="Wybierz członków zespołu"
+											options={activeUsers.map((user) => ({
+												id: user.id,
+												label: getUserDisplayName(user),
+											}))}
+											values={selectedTeamMemberIds}
+											onChange={setSelectedTeamMemberIds}
+											selectedSummary={selectedTeamMembers.join(", ")}
+											errorMessage={teamMemberScopeError}
+											highlightedUserId={outOfScopeTeamMemberUserId}
+										/>
+									)}
 								</div>
 
 							<label className="text-slate-700 text-sm sm:col-span-2">
@@ -1456,156 +1732,178 @@ export function InspectionsFormModal({
 									}
 								/>
 
-								<NoLetterDateField
-									label={visitLetterDeliveryLabel}
-									labelClassName={stableFieldLabelClassName}
-									value={addInspectionForm.dataDoreczeniaPisma}
-									isNoLetter={addInspectionForm.brakDataDoreczeniaPisma}
-									disabled={isVisitOnlyFieldDisabled}
-									onChangeValue={(nextValue) =>
+								{renderNoLetterField({
+									label: visitLetterDeliveryLabel,
+									value: addInspectionForm.dataDoreczeniaPisma,
+									isNoLetter: addInspectionForm.brakDataDoreczeniaPisma,
+									disabled: isVisitOnlyFieldDisabled,
+									onChangeValue: (nextValue) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											dataDoreczeniaPisma: nextValue,
 											brakDataDoreczeniaPisma: nextValue ? false : prev.brakDataDoreczeniaPisma,
-										}))
-									}
-									onChangeNoLetter={(nextNoLetter) =>
+										})),
+									onChangeNoLetter: (nextNoLetter) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											brakDataDoreczeniaPisma: nextNoLetter,
 											dataDoreczeniaPisma: nextNoLetter ? "" : prev.dataDoreczeniaPisma,
-										}))
-									}
-								/>
+										})),
+								})}
 
-								<NoLetterDateField
-									label={objectionsLetterLabel}
-									labelClassName={stableFieldLabelClassName}
-									value={addInspectionForm.dataPismaZastrzezenia}
-									isNoLetter={addInspectionForm.brakDataPismaZastrzezenia}
-									onChangeValue={(nextValue) =>
+								{renderNoLetterField({
+									label: objectionsLetterLabel,
+									value: addInspectionForm.dataPismaZastrzezenia,
+									isNoLetter: addInspectionForm.brakDataPismaZastrzezenia,
+									onChangeValue: (nextValue) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											dataPismaZastrzezenia: nextValue,
 											brakDataPismaZastrzezenia: nextValue ? false : prev.brakDataPismaZastrzezenia,
-										}))
-									}
-									onChangeNoLetter={(nextNoLetter) =>
+										})),
+									onChangeNoLetter: (nextNoLetter) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											brakDataPismaZastrzezenia: nextNoLetter,
 											dataPismaZastrzezenia: nextNoLetter ? "" : prev.dataPismaZastrzezenia,
-										}))
-									}
-								/>
+										})),
+								})}
 
-								<NoLetterDateField
-									label={objectionsLetterSentLabel}
-									labelClassName={stableFieldLabelClassName}
-									value={addInspectionForm.dataWyslaniaPismaZZastrzezeniami}
-									isNoLetter={addInspectionForm.brakDataWyslaniaPismaZZastrzezeniami}
-									onChangeValue={(nextValue) =>
+								{renderNoLetterField({
+									label: objectionsLetterSentLabel,
+									value: addInspectionForm.dataWyslaniaPismaZZastrzezeniami,
+									isNoLetter: addInspectionForm.brakDataWyslaniaPismaZZastrzezeniami,
+									onChangeValue: (nextValue) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											dataWyslaniaPismaZZastrzezeniami: nextValue,
 											brakDataWyslaniaPismaZZastrzezeniami: nextValue
 												? false
 												: prev.brakDataWyslaniaPismaZZastrzezeniami,
-										}))
-									}
-									onChangeNoLetter={(nextNoLetter) =>
+										})),
+									onChangeNoLetter: (nextNoLetter) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											brakDataWyslaniaPismaZZastrzezeniami: nextNoLetter,
 											dataWyslaniaPismaZZastrzezeniami: nextNoLetter
 												? ""
 												: prev.dataWyslaniaPismaZZastrzezeniami,
-										}))
-									}
-								/>
+										})),
+								})}
 
-								<NoLetterDateField
-									label={objectionsReceivedLabel}
-									labelClassName={stableFieldLabelClassName}
-									value={addInspectionForm.dataWplywuPisma}
-									isNoLetter={addInspectionForm.brakDataWplywuPisma}
-									onChangeValue={(nextValue) =>
+								{renderNoLetterField({
+									label: objectionsReceivedLabel,
+									value: addInspectionForm.dataWplywuPisma,
+									isNoLetter: addInspectionForm.brakDataWplywuPisma,
+									onChangeValue: (nextValue) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											dataWplywuPisma: nextValue,
 											brakDataWplywuPisma: nextValue ? false : prev.brakDataWplywuPisma,
-										}))
-									}
-									onChangeNoLetter={(nextNoLetter) =>
+										})),
+									onChangeNoLetter: (nextNoLetter) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											brakDataWplywuPisma: nextNoLetter,
 											dataWplywuPisma: nextNoLetter ? "" : prev.dataWplywuPisma,
-										}))
-									}
-								/>
+										})),
+								})}
 
-								<NoLetterDateField
-									label={controlResponseLetterSentLabel}
-									labelClassName={stableFieldLabelClassName}
-									isNoLetter={addInspectionForm.brakDataWyslaniaPismaZOdpowiedzia}
-									disabled={isControlOnlyFieldDisabled}
-									value={addInspectionForm.dataWyslaniaPismaZOdpowiedzia}
-									onChangeValue={(nextValue) =>
+								{renderNoLetterField({
+									label: controlResponseLetterSentLabel,
+									value: addInspectionForm.dataWyslaniaPismaZOdpowiedzia,
+									isNoLetter: addInspectionForm.brakDataWyslaniaPismaZOdpowiedzia,
+									disabled: isControlOnlyFieldDisabled,
+									onChangeValue: (nextValue) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											dataWyslaniaPismaZOdpowiedzia: nextValue,
 											brakDataWyslaniaPismaZOdpowiedzia: nextValue
 												? false
 												: prev.brakDataWyslaniaPismaZOdpowiedzia,
-										}))
-									}
-									onChangeNoLetter={(nextNoLetter) =>
+										})),
+									onChangeNoLetter: (nextNoLetter) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											brakDataWyslaniaPismaZOdpowiedzia: nextNoLetter,
 											dataWyslaniaPismaZOdpowiedzia: nextNoLetter
 												? ""
 												: prev.dataWyslaniaPismaZOdpowiedzia,
-										}))
-									}
-								/>
+										})),
+								})}
 
-								<NoLetterDateField
-									label={controlResponseLetterLabel}
-									labelClassName={stableFieldLabelClassName}
-									value={addInspectionForm.dataPismaZOdpowiedzia}
-									isNoLetter={addInspectionForm.brakDataPismaZOdpowiedzia}
-									disabled={isControlOnlyFieldDisabled}
-									onChangeValue={(nextValue) =>
+								{renderNoLetterField({
+									label: controlResponseLetterLabel,
+									value: addInspectionForm.dataPismaZOdpowiedzia,
+									isNoLetter: addInspectionForm.brakDataPismaZOdpowiedzia,
+									disabled: isControlOnlyFieldDisabled,
+									onChangeValue: (nextValue) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											dataPismaZOdpowiedzia: nextValue,
 											brakDataPismaZOdpowiedzia: nextValue ? false : prev.brakDataPismaZOdpowiedzia,
-										}))
-									}
-									onChangeNoLetter={(nextNoLetter) =>
+										})),
+									onChangeNoLetter: (nextNoLetter) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
 											brakDataPismaZOdpowiedzia: nextNoLetter,
 											dataPismaZOdpowiedzia: nextNoLetter ? "" : prev.dataPismaZOdpowiedzia,
-										}))
-									}
-								/>
+										})),
+								})}
 
 								<div className="xl:col-start-2">
-									<DateListEditor
-										title="Data akceptacji noty (lista)"
-										addButtonLabel="Dodaj datę"
-										noDatesLabel="Brak dat akceptacji noty"
-										noDatesMessage="Oznaczono brak dat akceptacji noty."
-										values={dataAkceptacjiNotyList}
-										setValues={setDataAkceptacjiNotyList}
-										isNoDates={isDataAkceptacjiNotyBrak}
-										setIsNoDates={setIsDataAkceptacjiNotyBrak}
-										itemKeyPrefix="akceptacja-noty"
-									/>
+									{isPreviewMode ? (
+										<div>
+											<label className={`mb-1 block text-slate-600 text-sm ${stableFieldLabelClassName}`}>
+												Data akceptacji noty (lista)
+											</label>
+											<div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 text-sm">
+												{isDataAkceptacjiNotyBrak ? (
+													<span>Brak</span>
+												) : parsedAcceptanceDates.length > 0 ? (
+													<div className="space-y-1">
+														{parsedAcceptanceDates.map((value, index) => (
+															<div key={`acceptance-date-${value}-${index}`}>{value}</div>
+														))}
+													</div>
+												) : (
+													<span>-</span>
+												)}
+											</div>
+										</div>
+									) : (
+										<DateListEditor
+											title="Data akceptacji noty (lista)"
+											addButtonLabel="Dodaj datę"
+											noDatesLabel="Brak dat akceptacji noty"
+											noDatesMessage="Oznaczono brak dat akceptacji noty."
+											values={dataAkceptacjiNotyList}
+											setValues={setDataAkceptacjiNotyList}
+											isNoDates={isDataAkceptacjiNotyBrak}
+											setIsNoDates={setIsDataAkceptacjiNotyBrak}
+											itemKeyPrefix="akceptacja-noty"
+										/>
+									)}
 								</div>
+
+								{isPreviewMode ? (
+									<div className="xl:col-start-2">
+										<label className={`mb-1 block text-slate-600 text-sm ${stableFieldLabelClassName}`}>
+											Data zaleceń
+										</label>
+										<div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 text-sm">
+											{parsedRecommendationDates.length > 0 ? (
+												<div className="space-y-1">
+													{parsedRecommendationDates.map((value, index) => (
+														<div key={`recommendation-date-${value}-${index}`}>{value}</div>
+													))}
+												</div>
+											) : (
+												<span>-</span>
+											)}
+										</div>
+									</div>
+								) : null}
 
 							</div>
 						</section>

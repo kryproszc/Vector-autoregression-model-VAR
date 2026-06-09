@@ -344,8 +344,8 @@ type RecommendationExportColumnKey =
 	| "inspectionLp"
 	| "nazwaPodmiotu"
 	| "pozycja"
-	| "terminWykonaniaZalecen"
-	| "dataZalecenList"
+	| "dataZalecen"
+	| "terminyWykonaniaZalecenList"
 	| "dataAkceptacjiNotyWeryfikacjiList"
 	| "status"
 	| "komentarz";
@@ -397,8 +397,8 @@ const RECOMMENDATION_EXPORT_COLUMNS: ExportColumnDefinition<RecommendationExport
 		{ key: "inspectionLp", label: "Id inspekcji" },
 		{ key: "nazwaPodmiotu", label: "Nazwa podmiotu" },
 		{ key: "pozycja", label: "Liczba zaleceń" },
-		{ key: "terminWykonaniaZalecen", label: "Data zaleceń" },
-		{ key: "dataZalecenList", label: "Termin wykonania zaleceń" },
+		{ key: "dataZalecen", label: "Data zaleceń" },
+		{ key: "terminyWykonaniaZalecenList", label: "Termin wykonania zaleceń" },
 		{
 			key: "dataAkceptacjiNotyWeryfikacjiList",
 			label: "Data akceptacji noty z weryfikacji",
@@ -500,6 +500,7 @@ export function InspectionsPanel({
 	const [pendingDashboardInspectionCode, setPendingDashboardInspectionCode] =
 		useState<string | null>(null);
 	const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+	const [isPreviewMode, setIsPreviewMode] = useState(false);
 	const [isTeamPickerOpen, setIsTeamPickerOpen] = useState(false);
 	const [editingInspectionId, setEditingInspectionId] = useState<string | null>(
 		null,
@@ -652,6 +653,14 @@ export function InspectionsPanel({
 		[inspectionCanEditByRowId, selectedInspectionId],
 	);
 
+	const previewInspectionCanEdit = useMemo(
+		() =>
+			editingInspectionId
+				? (inspectionCanEditByRowId[editingInspectionId] ?? false)
+				: false,
+		[editingInspectionId, inspectionCanEditByRowId],
+	);
+
 	const currentEditingInspectionLeaderUserId = useMemo(
 		() =>
 			editingInspectionId
@@ -676,7 +685,7 @@ export function InspectionsPanel({
 		[editingInspectionLockRecordIds.join("|")],
 	);
 	const editInspectionLock = useRecordLock({
-		enabled: isAddModalOpen && isEditMode,
+		enabled: isAddModalOpen && isEditMode && !isPreviewMode,
 		module: "inspections",
 		recordId: primaryEditingInspectionLockRecordId,
 		alternateRecordIds: alternateEditingInspectionLockRecordIds,
@@ -749,10 +758,7 @@ export function InspectionsPanel({
 				for (const recommendation of recommendationsResult.data.items) {
 					const inspectionId = recommendation.inspectionId;
 					const recommendationDates = [
-						...toDateList(recommendation.dataZalecenList),
 						...toDateList(recommendation.dataZalecen),
-						...toDateList(recommendation.terminyWykonaniaZalecenList),
-						...toDateList(recommendation.terminWykonaniaZalecen),
 					];
 
 					if (
@@ -2372,10 +2378,10 @@ export function InspectionsPanel({
 							return item.nazwaPodmiotu;
 						case "pozycja":
 							return String(item.pozycja);
-						case "terminWykonaniaZalecen":
-							return item.terminWykonaniaZalecen ?? "";
-						case "dataZalecenList":
-							return item.dataZalecenList.join(", ");
+						case "dataZalecen":
+							return item.dataZalecen ?? "";
+						case "terminyWykonaniaZalecenList":
+							return item.terminyWykonaniaZalecenList.join(", ");
 						case "dataAkceptacjiNotyWeryfikacjiList":
 							return item.dataAkceptacjiNotyWeryfikacjiList.join(", ");
 						case "status":
@@ -2862,6 +2868,103 @@ export function InspectionsPanel({
 		setIsDeleteConfirmModalOpen(true);
 	};
 
+	const handleOpenPreviewModal = (inspectionId: string) => {
+		const rowToPreview = inspectionRows.find((row) => row.id === inspectionId);
+		if (!rowToPreview) {
+			return;
+		}
+
+		const nextForm = mapRowToAddForm(rowToPreview);
+		const noLetterFlags = inspectionNoLetterFlagsByRowId[rowToPreview.id] ?? {
+			brakDataDoreczeniaPisma: false,
+			brakDataPismaZastrzezenia: false,
+			brakDataWyslaniaPismaZZastrzezeniami: false,
+			brakDataWplywuPisma: false,
+			brakDataPismaZOdpowiedzia: false,
+			brakDataWyslaniaPismaZOdpowiedzia: false,
+		};
+		const existingLeaderUserId =
+			inspectionLeaderUserIdByRowId[rowToPreview.id] ?? null;
+
+		setAddInspectionForm({
+			...nextForm,
+			...noLetterFlags,
+			dataDoreczeniaPisma: noLetterFlags.brakDataDoreczeniaPisma
+				? ""
+				: nextForm.dataDoreczeniaPisma,
+			dataPismaZastrzezenia: noLetterFlags.brakDataPismaZastrzezenia
+				? ""
+				: nextForm.dataPismaZastrzezenia,
+			dataWyslaniaPismaZZastrzezeniami:
+				noLetterFlags.brakDataWyslaniaPismaZZastrzezeniami
+					? ""
+					: nextForm.dataWyslaniaPismaZZastrzezeniami,
+			dataWplywuPisma: noLetterFlags.brakDataWplywuPisma
+				? ""
+				: nextForm.dataWplywuPisma,
+			dataPismaZOdpowiedzia: noLetterFlags.brakDataPismaZOdpowiedzia
+				? ""
+				: nextForm.dataPismaZOdpowiedzia,
+			dataWyslaniaPismaZOdpowiedzia:
+				noLetterFlags.brakDataWyslaniaPismaZOdpowiedzia
+					? ""
+					: nextForm.dataWyslaniaPismaZOdpowiedzia,
+		});
+		setSelectedLeaderUserId(existingLeaderUserId);
+		setSelectedInspectionScopes(
+			normalizeInspectionScopeValues(
+				parseMultiValueField(nextForm.zakresInspekcji),
+			),
+		);
+		setSelectedTeamMemberIds(inspectionTeamMemberIdsByRowId[rowToPreview.id] ?? []);
+		const acceptanceDates = inspectionAcceptanceDatesByRowId[rowToPreview.id] ?? [];
+		const noAcceptanceDatesFlags =
+			inspectionNoAcceptanceDatesByRowId[rowToPreview.id] ?? {
+				brakDatAkceptacjiNoty: false,
+			};
+		setDataAkceptacjiNotyList(acceptanceDates);
+		setIsDataAkceptacjiNotyBrak(noAcceptanceDatesFlags.brakDatAkceptacjiNoty);
+		setDidToggleDataAkceptacjiNotyBrak(false);
+		setAddInspectionError(null);
+		setTeamMemberScopeError(null);
+		setOutOfScopeTeamMemberUserId(null);
+		setIsTeamPickerOpen(false);
+		setEditingInspectionId(rowToPreview.id);
+		setShowRequiredInspectionFieldErrors(false);
+		setVersionConflictUpdatedAt(null);
+		setSaveLockConflict(null);
+		setIsPreviewMode(true);
+		setIsAddModalOpen(true);
+	};
+
+	const handleStartEditFromPreview = useCallback(() => {
+		if (!editingInspectionId) {
+			return;
+		}
+
+		if (!canManageInspections) {
+			setAddInspectionError("Konto zewnętrzne ma dostęp tylko do odczytu.");
+			return;
+		}
+
+		if (!(inspectionCanEditByRowId[editingInspectionId] ?? false)) {
+			setAddInspectionError("Brak uprawnień do edycji tej inspekcji.");
+			return;
+		}
+
+		void loadInspectionPeopleOptionsForEdit(editingInspectionId);
+		setAddInspectionError(null);
+		setSaveLockConflict(null);
+		setVersionConflictUpdatedAt(null);
+		setShowRequiredInspectionFieldErrors(false);
+		setIsPreviewMode(false);
+	}, [
+		canManageInspections,
+		editingInspectionId,
+		inspectionCanEditByRowId,
+		loadInspectionPeopleOptionsForEdit,
+	]);
+
 	const getDeleteRelatedCount = (
 		payload: Record<string, unknown>,
 		keys: string[],
@@ -3067,6 +3170,7 @@ export function InspectionsPanel({
 		}
 
 		setIsAddModalOpen(false);
+		setIsPreviewMode(false);
 		setIsTeamPickerOpen(false);
 		setEditingInspectionId(null);
 		setSelectedInspectionScopes([]);
@@ -3541,6 +3645,7 @@ export function InspectionsPanel({
 
 			await loadInspections();
 			window.dispatchEvent(new CustomEvent(INSPECTIONS_CHANGED_EVENT));
+			handlePageChange(1);
 			if (createdRecordId) {
 				setSelectedInspectionId(createdRecordId);
 			}
@@ -3598,7 +3703,7 @@ export function InspectionsPanel({
 									onClick={() => {
 										void handleOpenEditModal();
 									}}
-									className="inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 font-semibold text-sm transition-colors enabled:border-[#7ea8e7] enabled:bg-[#c7dcff] enabled:text-[#1d4882] enabled:hover:bg-[#b7d3ff] disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#1a2946] disabled:text-slate-500"
+									className="inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 font-semibold text-sm transition-colors enabled:border-[#93b9ee] enabled:bg-[#d9e9ff] enabled:text-[#21508f] enabled:hover:bg-[#c9e0ff] disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#1a2946] disabled:text-slate-500"
 								>
 									<Pencil size={15} />
 									Edytuj
@@ -3611,7 +3716,7 @@ export function InspectionsPanel({
 								type="button"
 								disabled={!selectedInspectionId || isDeletingInspection}
 								onClick={handleOpenDeleteConfirmModal}
-								className="inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 font-semibold text-sm transition-colors enabled:border-[#f2a3a3] enabled:bg-[#6f2a36] enabled:text-[#ffe5e8] enabled:hover:bg-[#833242] disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#1a2946] disabled:text-slate-500"
+								className="inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 font-semibold text-sm transition-colors enabled:border-[#f2a3a3] enabled:bg-[#6f2a36] enabled:text-[#ffe5e8] enabled:hover:bg-[#833242] disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500"
 							>
 								<Trash2 size={15} />
 								{isDeletingInspection ? "Usuwanie..." : "Usuń"}
@@ -3637,6 +3742,7 @@ export function InspectionsPanel({
 				selectedInspectionId={selectedInspectionId}
 				flashInspectionId={flashInspectionId}
 				onSelectInspection={setSelectedInspectionId}
+				onOpenInspectionPreview={handleOpenPreviewModal}
 				onSortByColumn={handleSortByColumn}
 				onResizeColumn={handleResizeColumn}
 				onOpenAdvancedFilter={openAdvancedFilterForColumn}
@@ -3714,12 +3820,15 @@ export function InspectionsPanel({
 
 			<InspectionsFormModal
 				isOpen={isAddModalOpen}
+				isPreviewMode={isPreviewMode}
+				canStartEditFromPreview={canManageInspections && previewInspectionCanEdit}
+				onStartEditFromPreview={handleStartEditFromPreview}
 				editingInspectionId={editingInspectionId}
 				editingInspectionCode={
 					editingInspectionId ? (selectedInspectionRow?.kodInspekcji ?? null) : null
 				}
 				showRequiredFieldErrors={showRequiredInspectionFieldErrors}
-				isReadOnly={isReadOnlyDueToLock}
+				isReadOnly={isPreviewMode || isReadOnlyDueToLock}
 				isSaveDisabledDueToLock={
 					isEditMode &&
 					(editInspectionLock.isAcquireFailed ||

@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import type { ReactNode } from "react";
 
 import { INSPECTION_COLUMN_TOOLTIPS } from "@/features/inspections/data";
@@ -41,6 +40,7 @@ type InspectionsDataTableProps = {
 	selectedInspectionId: string | null;
 	flashInspectionId?: string | null;
 	onSelectInspection: (inspectionId: string) => void;
+	onOpenInspectionPreview?: (inspectionId: string) => void;
 	onSortByColumn: (columnKey: InspectionColumnKey) => void;
 	onResizeColumn?: (columnKey: InspectionColumnKey, width: number) => void;
 	onOpenAdvancedFilter: (
@@ -106,23 +106,13 @@ export function InspectionsDataTable({
 	selectedInspectionId,
 	flashInspectionId = null,
 	onSelectInspection,
+	onOpenInspectionPreview,
 	onSortByColumn,
 	onResizeColumn,
 	onOpenAdvancedFilter,
 	onFilterChange,
 	footer,
 }: InspectionsDataTableProps) {
-	useEffect(() => {
-		if (!selectedInspectionId || typeof document === "undefined") {
-			return;
-		}
-
-		const rowElement = document.querySelector(
-			`tr[data-inspection-id="${selectedInspectionId}"]`,
-		) as HTMLTableRowElement | null;
-		rowElement?.scrollIntoView({ block: "center", behavior: "smooth" });
-	}, [selectedInspectionId]);
-
 	return (
 		<RegistryDataTable
 			isLoading={isRowsLoading}
@@ -160,6 +150,7 @@ export function InspectionsDataTable({
 								key={row.id}
 								data-inspection-id={row.id}
 								onClick={() => onSelectInspection(row.id)}
+								onDoubleClick={() => onOpenInspectionPreview?.(row.id)}
 								className={`cursor-pointer border-slate-200 border-b transition-colors last:border-b-0 ${
 									isFlashing || isActive
 										? "bg-blue-100 text-slate-900 ring-1 ring-blue-300 ring-inset"

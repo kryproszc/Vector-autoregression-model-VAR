@@ -231,7 +231,7 @@ export function mapRowToAddForm(row: InspectionRow): AddInspectionForm {
 			row.dataWyslaniaPismaZOdpowiedzia,
 		),
 		dataAkceptacjiNoty: toDateOrSpecialValue(row.dataAkceptacjiNoty, "-"),
-		dataZalecen: toDateOrSpecialValue(row.dataZalecen, "-"),
+		dataZalecen: toSafeString(row.dataZalecen).trim(),
 		status: toSafeString(row.status),
 		komentarz: toSafeString(row.komentarz),
 		brakDataDoreczeniaPisma: false,
