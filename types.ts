@@ -49,6 +49,51 @@ def _parse_status_codes_env(name: str) -> set[str]:
     return values
 
 
+def _parse_status_relation_rules_env(name: str) -> dict[str, tuple[str, str]]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return {}
+
+    rules: dict[str, tuple[str, str]] = {}
+    for token in re.split(r"[;\n]", raw):
+        item = token.strip()
+        if not item:
+            continue
+
+        if ":" not in item:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Niepoprawny format {name}: '{item}'. Oczekiwano CODE:R+,S-",
+            )
+
+        code_raw, spec_raw = item.split(":", 1)
+        code = code_raw.strip().upper()
+        spec_parts = [p.strip().upper() for p in re.split(r"[,|]", spec_raw) if p.strip()]
+        if not code:
+            raise HTTPException(status_code=500, detail=f"Niepoprawny format {name}: pusty kod statusu")
+
+        rec_expectation = "any"
+        san_expectation = "any"
+        for part in spec_parts:
+            if part == "R+":
+                rec_expectation = "present"
+            elif part == "R-":
+                rec_expectation = "absent"
+            elif part == "S+":
+                san_expectation = "present"
+            elif part == "S-":
+                san_expectation = "absent"
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Niepoprawny format {name}: nieznany token '{part}' dla statusu {code}",
+                )
+
+        rules[code] = (rec_expectation, san_expectation)
+
+    return rules
+
+
 _INSPECTION_STATUS_REQUIRES_RECOMMENDATIONS_CODES = _parse_status_codes_env(
     "INSPECTIONS_STATUS_REQUIRES_RECOMMENDATIONS_CODES"
 )
@@ -60,6 +105,9 @@ _INSPECTION_STATUS_REQUIRES_SANCTIONS_CODES = _parse_status_codes_env(
 )
 _INSPECTION_STATUS_FORBIDS_SANCTIONS_CODES = _parse_status_codes_env(
     "INSPECTIONS_STATUS_FORBIDS_SANCTIONS_CODES"
+)
+_INSPECTION_STATUS_RELATION_RULES = _parse_status_relation_rules_env(
+    "INSPECTIONS_STATUS_RELATION_RULES"
 )
 
 
@@ -319,6 +367,9 @@ def _status_expectations_by_code(status_code: str | None) -> tuple[str, str]:
     code = str(status_code or "").strip().upper()
     if not code:
         return "any", "any"
+
+    if code in _INSPECTION_STATUS_RELATION_RULES:
+        return _INSPECTION_STATUS_RELATION_RULES[code]
 
     if (
         code in _INSPECTION_STATUS_REQUIRES_RECOMMENDATIONS_CODES
