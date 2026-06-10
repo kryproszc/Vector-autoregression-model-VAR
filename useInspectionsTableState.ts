@@ -346,13 +346,13 @@ async function readInspectionDomainError(
 function mapInspectionStatusViolationMessage(violationCodeId: number | null) {
 	switch (violationCodeId) {
 		case 1001:
-			return "Dla wybranego statusu wymagane jest co najmniej jedno zalecenie, ale nie znaleziono żadnego.";
+			return "Do tej kontroli nie dodano jeszcze zalecenia. Najpierw dodaj zalecenie, a potem ustaw ten status.";
 		case 1002:
-			return "Dla wybranego statusu nie mogą istnieć zalecenia, ale dla tej inspekcji znaleziono powiązane zalecenia.";
+			return "Do tej kontroli zostało już dodane zalecenie. Ten status można ustawić tylko wtedy, gdy kontrola nie ma żadnych zaleceń.";
 		case 1003:
-			return "Dla wybranego statusu wymagany jest co najmniej jeden wniosek sankcyjny, ale nie znaleziono żadnego.";
+			return "Do tej kontroli nie dodano jeszcze wniosku sankcyjnego. Najpierw dodaj wniosek sankcyjny, a potem ustaw ten status.";
 		case 1004:
-			return "Dla wybranego statusu nie mogą istnieć wnioski sankcyjne, ale dla tej inspekcji znaleziono powiązane wnioski.";
+			return "Do tej kontroli został już dodany wniosek sankcyjny. Ten status można ustawić tylko wtedy, gdy kontrola nie ma żadnych wniosków sankcyjnych.";
 		default:
 			return "Nie można zapisać rekordu z powodu niespełnionych relacji dla wybranego statusu.";
 	}
@@ -426,10 +426,18 @@ async function readInspectionStatusValidationViolations(
 						: typeof source.message === "string"
 							? source.message.trim()
 							: "";
+				const mappedMessage =
+					normalizedViolationCode === 1001 ||
+					normalizedViolationCode === 1002 ||
+					normalizedViolationCode === 1003 ||
+					normalizedViolationCode === 1004
+						? mapInspectionStatusViolationMessage(normalizedViolationCode)
+						: "";
 
 				return {
 					violationCodeId: normalizedViolationCode,
 					message:
+						mappedMessage ||
 						detailMessage ||
 						mapInspectionStatusViolationMessage(normalizedViolationCode),
 				};
