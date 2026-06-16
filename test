@@ -1,41 +1,109 @@
-Tłumaczenie metodologii badań (PL)
 
-4) Metodyka badań (podstawy metodologiczne, metody, techniki i narzędzia badawcze, metody analizy wyników, aparatura i urządzenia wykorzystywane w badaniach)
 
-Plan badań składa się z dwóch komplementarnych części: teoretycznej i empirycznej. Część teoretyczna służy realizacji celów C1, C2 oraz częściowo C4 i C6. Koncentruje się na opracowaniu podstaw metodologicznych modelowania struktur zależności w agregacji ryzyka ubezpieczeniowego, ocenie odporności efektu dywersyfikacji oraz analizie możliwości wykorzystania metod uczenia maszynowego w modelowaniu wypłacalności w ramach Solvency II. Szczególną uwagę poświęcono czynnikom ryzyka klimatycznego jako potencjalnym źródłom nieliniowych i ogonowych zależności między kategoriami ryzyka. Ryzyko klimatyczne traktowane jest jako czynnik wpływający na struktury zależności, a nie jako odrębna kategoria ryzyka.
+def _require_diu_department(conn: Any) -> tuple[str, str]:
+    configured_diu_code = (os.getenv("DIU_DEPARTMENT_CODE") or "DIU").strip()
+    if not configured_diu_code:
+        configured_diu_code = "DIU"
 
-W części empirycznej rozwijane będą nowe metody agregacji ryzyka umożliwiające dokładniejsze szacowanie efektu dywersyfikacji oraz wymogu kapitałowego SCR. Podstawowym narzędziem modelowania zależności pomiędzy zagregowanymi rodzajami ryzyka będą kopule, w tym kopule eliptyczne, archimedesowe, ekstremalne, nieparametryczne, HAC, C-vine, D-vine oraz Distorted Mix Method (DMM). Parametry kopul będą estymowane metodami FML, IFM oraz podejściami półparametrycznymi opartymi na kopulach empirycznych. Dobór modeli będzie realizowany z wykorzystaniem kryteriów AIC i BIC.
+    row = conn.execute(
+        """
+        SELECT kod_pozycji, nazwa_pozycji
+        FROM slownik_pozycje
+        WHERE lower(kod_typu) = 'department_ogolne'
+          AND lower(kod_pozycji) = lower(?)
+        LIMIT 1
+        """
+        ,
+        (configured_diu_code,),
+    ).fetchone()
+    if row is None:
+        # Backward-compatible fallback: infer DIU row by shortcut if explicit code is not configured/present.
+        row = conn.execute(
+            """
+            SELECT kod_pozycji, nazwa_pozycji
+            FROM slownik_pozycje
+            WHERE lower(kod_typu) = 'department_ogolne'
+              AND (
+                    upper(skrot_pozycji) = 'DIU'
+                    OR upper(kod_pozycji) = 'DIU'
+                  )
+            ORDER BY CASE WHEN upper(skrot_pozycji) = 'DIU' THEN 0 ELSE 1 END, id ASC
+            LIMIT 1
+            """
+        ).fetchone()
 
-Kopule są szczególnie użyteczne w modelowaniu ryzyka ubezpieczeniowego, ponieważ umożliwiają niezależne modelowanie rozkładów brzegowych i struktury zależności oraz pozwalają uchwycić zależności nieliniowe, asymetryczne i ogonowe. Ma to szczególne znaczenie przy analizie ryzyka klimatycznego, które może prowadzić do współwystępowania zdarzeń ekstremalnych.
+    if row is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Brak pozycji {configured_diu_code} w slowniku department_ogolne",
+        )
+    return str(row["kod_pozycji"]), str(row["nazwa_pozycji"])
 
-Istotnym elementem projektu będzie wykorzystanie metod uczenia maszynowego zarówno do estymacji rozkładów brzegowych, jak i modelowania zależności. W szczególności zastosowane zostaną sztuczne sieci neuronowe (ANN), których trening będzie oparty na minimalizacji funkcji ujemnej log-wiarygodności przy zachowaniu własności matematycznych rozkładów prawdopodobieństwa.
 
-Badane będą trzy główne podejścia:
-1. Aproksymacja generatorów kopul archimedesowych przy użyciu sieci neuronowych i konstrukcja HAC.
-2. Budowa struktur vine copula (C-vine i D-vine) z wykorzystaniem neuronowych modeli dwuwymiarowych.
-3. Rozszerzenie Distorted Mix Method poprzez zastosowanie funkcji zniekształceń aproksymowanych przez sieci neuronowe.
+def _validate_profile_state(
+    conn: Any,
+    *,
+    account_type: str,
+    department_code: str | None,
+    email: str | None,
+    list_visibility: str,
+    aktywny: int,
+    rola_id: int,
+    zespol_id: int | None,
+    previous_account_type: str,
+) -> tuple[str, str | None, str | None, str, int | None]:
+    normalized_account_type = str(account_type or "").strip().lower()
+    if normalized_account_type not in {ACCOUNT_TYPE_DIU, ACCOUNT_TYPE_OBSERVER, ACCOUNT_TYPE_TECHNICAL}:
+        raise HTTPException(status_code=400, detail="Niepoprawny accountType")
 
-Ocena jakości modeli będzie obejmowała analizę funkcji wiarygodności, walidację poza próbą, porównanie danych empirycznych z danymi generowanymi przez modele oraz wykorzystanie miary Energy Distance. Analiza odporności efektów dywersyfikacji zostanie przeprowadzona z wykorzystaniem metodologii Huber-Ronchetti oraz podejścia Embrechtsa, Wanga i Wanga. Zastosowane zostaną metryki Lévy’ego i Wassersteina. Uwzględnione zostaną również scenariusze stresowe związane z ryzykiem klimatycznym.
+    normalized_visibility = str(list_visibility or "").strip().lower()
+    if normalized_visibility not in {LIST_VISIBILITY_VISIBLE, LIST_VISIBILITY_HIDDEN}:
+        raise HTTPException(status_code=400, detail="Niepoprawny listVisibility")
 
-Druga część analiz empirycznych dotyczy ryzyka modelu wynikającego z modelowania zależności i agregacji ryzyka. Wykorzystany zostanie Rearrangement Algorithm (ARA) do wyznaczania dolnych i górnych ograniczeń efektów dywersyfikacji przy znanych rozkładach brzegowych i nieznanej strukturze zależności. Opracowane zostaną również dwa autorskie algorytmy:
-- wyznaczania parametrów kopul odpowiadających zadanemu poziomowi korelacji liniowej,
-- generowania alternatywnych struktur zależności przy zachowaniu zadanej macierzy korelacji z wykorzystaniem optymalizacji wielokryterialnej i dominacji Pareto.
+    normalized_department_code = str(department_code or "").strip() or None
+    normalized_email = str(email or "").strip() or None
+    normalized_team_id = zespol_id
 
-Porównania modeli parametrycznych, nieparametrycznych i opartych na uczeniu maszynowym będą prowadzone przy użyciu miar ryzyka modelu, takich jak CAM, CRM oraz MoRC.
+    if int(aktywny) != 1 and normalized_email is not None:
+        raise HTTPException(status_code=422, detail="Dla konta nieaktywnego email musi byc null")
 
-Podstawowym źródłem danych będzie baza Insurance Risk Data zawierająca informacje o europejskich zakładach ubezpieczeń działających w reżimie Solvency II od 2016 roku. Baza została przygotowana w ramach wcześniejszych projektów badawczych. Dane pochodzą z raportów QRT i SFCR publikowanych przez zakłady ubezpieczeń i grupy ubezpieczeniowe we wszystkich krajach UE.
+    if normalized_account_type == ACCOUNT_TYPE_DIU:
+        diu_code, diu_label = _require_diu_department(conn)
+        if normalized_department_code is None:
+            normalized_department_code = diu_code
+        normalized_input = str(normalized_department_code).strip().lower()
+        accepted_values = {str(diu_code).strip().lower(), "diu"}
+        if normalized_input not in accepted_values:
+            raise HTTPException(status_code=422, detail=f"Dla accountType=diu departmentCode musi byc {diu_code}")
+        normalized_department_code = diu_code
+        if rola_id == 3:
+            normalized_team_id = None
+        elif rola_id in (1, 2) and normalized_team_id is None:
+            raise HTTPException(status_code=422, detail="Dla tej roli zespolId jest wymagane")
+        return normalized_account_type, normalized_department_code, diu_label, normalized_visibility, normalized_team_id
 
-Projekt wykorzysta również dane z:
-- EIOPA,
-- Insurance Europe Database,
-- Sigma Explorer,
-- ND-GAIN Country Index,
-- EM-DAT International Disaster Database,
-- publicznie dostępnych baz danych dotyczących fizycznego i transformacyjnego ryzyka klimatycznego.
+    if normalized_account_type == ACCOUNT_TYPE_OBSERVER and int(aktywny) != 1:
+        raise HTTPException(status_code=422, detail="Observer nie moze byc nieaktywny")
 
-Zintegrowana baza danych umożliwi analizę struktur zależności, efektów dywersyfikacji oraz wpływu ryzyka klimatycznego na SCR. Uwzględnione zostaną wskaźniki dotyczące katastrof naturalnych, powodzi, susz, burz, fal upałów, pożarów, zmian regulacyjnych, polityki klimatycznej oraz transformacji energetycznej.
+    if normalized_account_type == ACCOUNT_TYPE_TECHNICAL:
+        if int(aktywny) != 0:
+            raise HTTPException(status_code=422, detail="Dla accountType=technical aktywny musi byc false")
+        if normalized_email is not None:
+            raise HTTPException(status_code=422, detail="Dla accountType=technical email musi byc null")
 
-Optymalizacja hiperparametrów będzie realizowana przy użyciu grid search, metod próbkowania oraz optymalizacji bayesowskiej (TPE). Jakość predykcji będzie oceniana z wykorzystaniem walidacji krzyżowej k-fold oraz miar RMSE, MAE, MPE i MAPE.
+    if int(aktywny) != 1 and previous_account_type == ACCOUNT_TYPE_OBSERVER and normalized_account_type == ACCOUNT_TYPE_OBSERVER:
+        raise HTTPException(
+            status_code=422,
+            detail="Nie mozna dezaktywowac observer bez jednoczesnej zmiany accountType na diu lub technical",
+        )
 
-Analizy obliczeniowe będą prowadzone głównie w języku Python z wykorzystaniem bibliotek NumPy, pandas, scikit-learn, TensorFlow i PyTorch. Najbardziej wymagające obliczeniowo elementy zostaną zaimplementowane w języku C++. W celu zwiększenia wydajności wykorzystane zostaną kompilacja JIT, obliczenia równoległe oraz wielowątkowość.
+    normalized_team_id = None
+    department_label = _resolve_department_label(conn, normalized_department_code)
+    if normalized_department_code is not None and department_label is None:
+        raise HTTPException(status_code=422, detail="Nie znaleziono departmentCode w slowniku department_ogolne")
+
+    return normalized_account_type, normalized_department_code, department_label, normalized_visibility, normalized_team_id
+
+
+
 
