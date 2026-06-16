@@ -23,6 +23,21 @@ import { NoLetterDateField } from "@/shared/components/forms/NoLetterDateField";
 import { RegistryFormScaffold } from "@/shared/components/forms/RegistryFormScaffold";
 import { SingleSelectPortalField } from "@/shared/components/forms/SingleSelectPortalField";
 
+type InspectionNameVariant = "full" | "short" | "user";
+type InspectionNameVariantColumnKey =
+	| "nazwaPodmiotu"
+	| "typInspekcji"
+	| "zakresInspekcji"
+	| "rynek"
+	| "rodzajPodmiotu"
+	| "status";
+type InspectionNameVariantByColumn = Partial<
+	Record<InspectionNameVariantColumnKey, InspectionNameVariant>
+>;
+type InspectionShortValuesByColumn = Partial<
+	Record<InspectionNameVariantColumnKey, string>
+>;
+
 type InspectionsFormModalProps = {
 	isOpen: boolean;
 	isPreviewMode?: boolean;
@@ -33,6 +48,9 @@ type InspectionsFormModalProps = {
 	showRequiredFieldErrors?: boolean;
 	addInspectionForm: AddInspectionForm;
 	setAddInspectionForm: Dispatch<SetStateAction<AddInspectionForm>>;
+	inspectionNameVariants?: InspectionNameVariantByColumn;
+	previewShortValuesByColumn?: InspectionShortValuesByColumn;
+	marketShortLabelByValue?: Record<string, string>;
 	entityNameOptions: Array<{ value: string; label: string }>;
 	inspectionTypeOptions: string[];
 	inspectionScopeOptions: Array<{ value: string; label: string }>;
@@ -119,6 +137,25 @@ function toIsoDateValue(date: Date) {
 const MIN_CALENDAR_DATE = new Date(2016, 0, 1);
 const MAX_CALENDAR_DATE = new Date(2030, 11, 31);
 
+const ENTITY_DISPLAY_SHORTCUTS: Array<[pattern: RegExp, shortLabel: string]> = [
+	[/^Vienna Life Towarzystwo Ubezpieczeń na Życie Spółka Akcyjna Vienna Insurance Group$/i, "Vienna Life TU na Życie S.A. (VIG)"],
+];
+
+function getShortEntityDisplayLabel(value: string) {
+	const normalized = value.trim();
+	if (!normalized) {
+		return "";
+	}
+
+	for (const [pattern, shortLabel] of ENTITY_DISPLAY_SHORTCUTS) {
+		if (pattern.test(normalized)) {
+			return shortLabel;
+		}
+	}
+
+	return normalized;
+}
+
 function clampDateToCalendarRange(date: Date) {
 	if (date < MIN_CALENDAR_DATE) {
 		return MIN_CALENDAR_DATE;
@@ -150,6 +187,9 @@ function DateInputWithCalendar({
 	disabled = false,
 	labelClassName,
 	invalid = false,
+	minSelectableDate,
+	maxSelectableDate,
+	previewTextOnly = false,
 	errorMessage = null,
 }: {
 	label: string;
@@ -158,6 +198,9 @@ function DateInputWithCalendar({
 	disabled?: boolean;
 	labelClassName?: string;
 	invalid?: boolean;
+	minSelectableDate?: Date;
+	maxSelectableDate?: Date;
+	previewTextOnly?: boolean;
 	errorMessage?: string | null;
 }) {
 	const [isCalendarOpen, setIsCalendarOpen] = useState(false);
@@ -170,11 +213,18 @@ function DateInputWithCalendar({
 		top: number;
 		left: number;
 	} | null>(null);
+	const effectiveMinDate = minSelectableDate
+		? clampDateToCalendarRange(minSelectableDate)
+		: MIN_CALENDAR_DATE;
+	const effectiveMaxDate = maxSelectableDate
+		? clampDateToCalendarRange(maxSelectableDate)
+		: MAX_CALENDAR_DATE;
 	const [tempDate, setTempDate] = useState<Date | null>(() =>
 		parseIsoDate(value) ?? null,
 	);
 	const popupWidth = calendarView === "day" ? 288 : 336;
 	const popupHeight = calendarView === "day" ? 420 : 372;
+	const displayValue = formatDisplayDate(value) || "-";
 
 	const updatePopupPosition = () => {
 		const anchor = containerRef.current;
@@ -281,11 +331,26 @@ function DateInputWithCalendar({
 
 	const handleToday = () => {
 		const today = clampDateToCalendarRange(new Date());
-		setTempDate(today);
-		onChange(toIsoDateValue(today));
+		const boundedToday =
+			today < effectiveMinDate
+				? effectiveMinDate
+				: today > effectiveMaxDate
+					? effectiveMaxDate
+					: today;
+		setTempDate(boundedToday);
+		onChange(toIsoDateValue(boundedToday));
 		setCalendarView("day");
 		setIsCalendarOpen(false);
 	};
+
+	if (previewTextOnly) {
+		return (
+			<div className="text-slate-700 text-sm">
+				<span className={`mb-1 block ${labelClassName ?? ""}`.trim()}>{label}</span>
+				<p className="text-slate-900 text-sm font-semibold">{displayValue}</p>
+			</div>
+		);
+	}
 
 	return (
 		<label className="text-slate-700 text-sm">
@@ -377,8 +442,8 @@ function DateInputWithCalendar({
 										onViewChange={(nextView) => setCalendarView(nextView)}
 										views={["year", "month", "day"]}
 										openTo="day"
-										minDate={MIN_CALENDAR_DATE}
-										maxDate={MAX_CALENDAR_DATE}
+										minDate={effectiveMinDate}
+										maxDate={effectiveMaxDate}
 										referenceDate={tempDate ?? new Date()}
 										sx={{
 											width: "100%",
@@ -482,7 +547,12 @@ function MultiSelectPeoplePortalField({
 }: {
 	label: string;
 	placeholder: string;
-	options: Array<{ id: number; label: string }>;
+	options: Array<{
+		id: number;
+		label: string;
+		teamId?: number | null;
+		teamName?: string | null;
+	}>;
 	values: number[];
 	onChange: (next: number[]) => void;
 	disabled?: boolean;
@@ -492,6 +562,7 @@ function MultiSelectPeoplePortalField({
 }) {
 	const [isOpen, setIsOpen] = useState(false);
 	const [searchQuery, setSearchQuery] = useState("");
+	const [selectedTeamIds, setSelectedTeamIds] = useState<number[]>([]);
 	const triggerRef = useRef<HTMLButtonElement | null>(null);
 	const popupRef = useRef<HTMLDivElement | null>(null);
 	const [popupPosition, setPopupPosition] = useState<{
@@ -507,12 +578,55 @@ function MultiSelectPeoplePortalField({
 				.map((item) => item.trim())
 				.filter(Boolean)
 		: [];
+	const teamOptions = Array.from(
+		options
+			.reduce(
+			(map, option) => {
+				if (typeof option.teamId !== "number" || option.teamId <= 0) {
+					return map;
+				}
+
+				const current = map.get(option.teamId);
+				if (!current) {
+					map.set(option.teamId, {
+						id: option.teamId,
+						label:
+							typeof option.teamName === "string" && option.teamName.trim()
+								? option.teamName.trim()
+								: `Zespół ${option.teamId}`,
+						memberCount: 1,
+					});
+					return map;
+				}
+
+				map.set(option.teamId, {
+					...current,
+					memberCount: current.memberCount + 1,
+				});
+				return map;
+			},
+			new Map<number, { id: number; label: string; memberCount: number }>(),
+		)
+			.values(),
+	).sort((left, right) =>
+		left.label.localeCompare(right.label, "pl", { sensitivity: "base" }),
+	);
+	const teamFilteredOptions =
+		selectedTeamIds.length > 0
+			? options.filter(
+					(option) =>
+						typeof option.teamId === "number" &&
+						selectedTeamIds.includes(option.teamId),
+				)
+			: options;
+	const canClearSelectedPeople = values.length > 0;
+	const canResetTeamFilter = selectedTeamIds.length > 0;
 	const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 	const visibleOptions = normalizedSearchQuery
-		? options.filter((option) =>
+		? teamFilteredOptions.filter((option) =>
 				option.label.toLowerCase().includes(normalizedSearchQuery),
 			)
-		: options;
+		: teamFilteredOptions;
 
 	const updatePopupPosition = () => {
 		const trigger = triggerRef.current;
@@ -529,9 +643,11 @@ function MultiSelectPeoplePortalField({
 			window.innerHeight,
 			dialogRect ? dialogRect.bottom - 8 : window.innerHeight,
 		);
+		const availableTop = Math.max(8, dialogRect ? dialogRect.top + 8 : 8);
 		const spaceBelow = availableBottom - rect.bottom;
+		const spaceAbove = rect.top - availableTop;
 		const shouldOpenUp =
-			spaceBelow < popupHeight + 8 && rect.top > popupHeight + 8;
+			spaceAbove >= popupHeight + 8 || spaceAbove > spaceBelow;
 
 		setPopupPosition({
 			top: shouldOpenUp ? rect.top - popupHeight - 8 : rect.bottom + 8,
@@ -547,6 +663,7 @@ function MultiSelectPeoplePortalField({
 		if (!isOpen) {
 			setPopupPosition(null);
 			setSearchQuery("");
+			setSelectedTeamIds([]);
 			return;
 		}
 
@@ -623,19 +740,75 @@ function MultiSelectPeoplePortalField({
 								<div className="mb-2 flex items-center justify-end gap-2 border-slate-200 border-b pb-2">
 									<button
 										type="button"
+										disabled={!canClearSelectedPeople}
 										onClick={() => onChange([])}
-										className="font-semibold text-slate-600 text-xs hover:text-slate-900"
+										className={`font-semibold text-xs transition-colors disabled:cursor-not-allowed ${
+											canClearSelectedPeople
+												? "text-blue-900 hover:text-blue-900"
+												: "text-slate-400"
+										}`}
 									>
 										Wyczyść
 									</button>
 									<button
 										type="button"
-										onClick={() => onChange(options.map((option) => option.id))}
+										onClick={() => onChange(visibleOptions.map((option) => option.id))}
 										className="font-semibold text-slate-600 text-xs hover:text-slate-900"
 									>
 										Zaznacz wszystkie
 									</button>
 								</div>
+
+								{teamOptions.length > 0 ? (
+									<div className="mb-2 rounded-md border border-slate-200 bg-slate-50/60 p-2">
+										<div className="mb-1.5 flex items-center justify-between gap-2">
+											<span className="font-medium text-[11px] text-slate-600 uppercase tracking-wide">
+												Filtr zespołu
+											</span>
+											<button
+												type="button"
+												disabled={!canResetTeamFilter}
+												onClick={() => setSelectedTeamIds([])}
+												className={`font-semibold text-[11px] transition-colors disabled:cursor-not-allowed ${
+													canResetTeamFilter
+														? "text-blue-900 hover:text-blue-900"
+														: "text-slate-400"
+												}`}
+											>
+												Wszystkie zespoły
+											</button>
+										</div>
+										<div className="flex flex-wrap gap-2">
+											{teamOptions.map((teamOption) => {
+												const isChecked = selectedTeamIds.includes(teamOption.id);
+
+												return (
+													<label
+														key={`team-filter-${teamOption.id}`}
+														className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-slate-900 text-xs hover:bg-slate-100"
+													>
+														<input
+															type="checkbox"
+															checked={isChecked}
+															className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-1 focus:ring-blue-300"
+															onChange={(event) => {
+																if (event.target.checked) {
+																	setSelectedTeamIds((prev) => [...prev, teamOption.id]);
+																	return;
+																}
+
+																setSelectedTeamIds((prev) =>
+																	prev.filter((teamId) => teamId !== teamOption.id),
+																);
+															}}
+														/>
+														<span>{`${teamOption.label} (${teamOption.memberCount})`}</span>
+													</label>
+												);
+											})}
+										</div>
+									</div>
+								) : null}
 
 								<div className="mb-2">
 									<input
@@ -702,72 +875,20 @@ function PreviewTeamMembersField({
 	label: string;
 	members: string[];
 }) {
-	const [isExpanded, setIsExpanded] = useState(false);
-	const containerRef = useRef<HTMLDivElement | null>(null);
-
-	useEffect(() => {
-		if (!isExpanded) {
-			return;
-		}
-
-		const handlePointerDown = (event: MouseEvent) => {
-			const target = event.target as Node | null;
-			if (!target) {
-				return;
-			}
-
-			if (containerRef.current && !containerRef.current.contains(target)) {
-				setIsExpanded(false);
-			}
-		};
-
-		document.addEventListener("mousedown", handlePointerDown);
-		return () => {
-			document.removeEventListener("mousedown", handlePointerDown);
-		};
-	}, [isExpanded]);
-
 	return (
-		<div className="text-slate-700 text-sm">
+		<div className="max-w-[32rem] text-slate-700 text-sm">
 			<span className="mb-1 block">{label}</span>
-			<div ref={containerRef} className="relative">
-				<div
-					role="button"
-					tabIndex={0}
-					onClick={() => setIsExpanded((prev) => !prev)}
-					onKeyDown={(event) => {
-						if (event.key === "Enter" || event.key === " ") {
-							event.preventDefault();
-							setIsExpanded((prev) => !prev);
-						}
-					}}
-					className="flex w-full cursor-pointer items-center justify-between rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-slate-900 text-sm transition-colors hover:border-slate-400 hover:bg-slate-50"
-				>
-					<span>Wybrano osób: {members.length}</span>
-					<ChevronDown
-						size={14}
-						className={`text-slate-500 transition-transform ${
-							isExpanded ? "rotate-180" : ""
-						}`}
-					/>
+			{members.length > 0 ? (
+				<div className="subtle-vertical-scroll mt-1 max-h-[6.5rem] space-y-0.5 overflow-y-auto pr-1 text-slate-900 text-sm font-semibold">
+					{members.map((member, index) => (
+						<div key={`preview-team-member-${member}-${index}`}>
+							{index + 1}. {member}
+						</div>
+					))}
 				</div>
-
-				{isExpanded ? (
-					<div className="absolute bottom-full left-0 z-50 mb-1 w-full rounded-lg border border-slate-300 bg-white p-2 shadow-lg">
-						{members.length > 0 ? (
-							<div className="subtle-vertical-scroll max-h-44 space-y-1 overflow-y-auto pr-1 text-[13px]">
-								{members.map((member, index) => (
-									<div key={`expanded-${member}-${index}`} className="rounded-md px-2 py-1.5 text-slate-900">
-										{index + 1}. {member}
-									</div>
-								))}
-							</div>
-						) : (
-							<p className="px-2 py-1.5 text-slate-500 text-sm">Brak osób w składzie.</p>
-						)}
-					</div>
-				) : null}
-			</div>
+			) : (
+				<p className="mt-1 text-slate-500 text-sm font-semibold">Brak osób w składzie.</p>
+			)}
 		</div>
 	);
 }
@@ -779,77 +900,18 @@ function PreviewInspectionScopesField({
 	label: string;
 	scopes: string[];
 }) {
-	const [isExpanded, setIsExpanded] = useState(false);
-	const containerRef = useRef<HTMLDivElement | null>(null);
-
-	useEffect(() => {
-		if (!isExpanded) {
-			return;
-		}
-
-		const handlePointerDown = (event: MouseEvent) => {
-			const target = event.target as Node | null;
-			if (!target) {
-				return;
-			}
-
-			if (containerRef.current && !containerRef.current.contains(target)) {
-				setIsExpanded(false);
-			}
-		};
-
-		document.addEventListener("mousedown", handlePointerDown);
-		return () => {
-			document.removeEventListener("mousedown", handlePointerDown);
-		};
-	}, [isExpanded]);
-
 	return (
-		<div className="text-slate-700 text-sm">
+		<div className="max-w-[32rem] text-slate-700 text-sm">
 			<span className="mb-1 block">{label}</span>
-			<div ref={containerRef} className="relative">
-				<div
-					role="button"
-					tabIndex={0}
-					onClick={() => setIsExpanded((prev) => !prev)}
-					onKeyDown={(event) => {
-						if (event.key === "Enter" || event.key === " ") {
-							event.preventDefault();
-							setIsExpanded((prev) => !prev);
-						}
-					}}
-					className="flex w-full cursor-pointer items-center justify-between rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-slate-900 text-sm transition-colors hover:border-slate-400 hover:bg-slate-50"
-				>
-					<span>
-						{scopes.length
-							? `Wybrano pozycji: ${scopes.length}`
-							: "Wybierz zakresy inspekcji"}
-					</span>
-					<ChevronDown
-						size={14}
-						className={`text-slate-500 transition-transform ${
-							isExpanded ? "rotate-180" : ""
-						}`}
-					/>
-				</div>
-
-				{isExpanded ? (
-					<div className="absolute z-20 mt-2 w-full rounded-lg border border-slate-300 bg-white p-2 shadow-lg">
-						<div className="subtle-vertical-scroll max-h-44 space-y-1 overflow-y-auto pr-1 text-[13px]">
-							{scopes.length > 0 ? (
-								scopes.map((scope, index) => (
-									<div key={`preview-scope-${scope}-${index}`} className="rounded-md px-2 py-1.5 text-slate-900">
-										{index + 1}. {scope}
-									</div>
-								))
-							) : (
-								<p className="px-2 py-2 text-slate-500 text-sm">Brak wybranych pozycji.</p>
-							)}
+			{scopes.length > 0 ? (
+				<div className="subtle-vertical-scroll mt-1 max-h-[6.5rem] space-y-0.5 overflow-y-auto break-words pr-1 text-slate-900 text-sm font-semibold">
+					{scopes.map((scope, index) => (
+						<div key={`preview-scope-${scope}-${index}`}>
+							{index + 1}. {scope}
 						</div>
-					</div>
-				) : null}
-			</div>
-			<span className="mt-1 block text-slate-500 text-xs">Możesz wybrać wiele pozycji.</span>
+					))}
+				</div>
+			) : null}
 		</div>
 	);
 }
@@ -1001,6 +1063,10 @@ export function InspectionsFormModal({
 				option.label.toLowerCase().includes(normalizedScopeSearchQuery),
 			)
 		: inspectionScopeOptions;
+	const entityNameDisplayOptions = entityNameOptions.map((option) => ({
+		...option,
+		label: getShortEntityDisplayLabel(option.label),
+	}));
 	const normalizedLeaderSearchQuery = leaderSearchQuery.trim().toLowerCase();
 	const filteredLeaderUsers = normalizedLeaderSearchQuery
 		? availableLeaderUsers.filter((user) =>
@@ -1018,10 +1084,9 @@ export function InspectionsFormModal({
 	const normalizedInspectionType = addInspectionForm.typInspekcji
 		.trim()
 		.toLowerCase();
+	const hasInspectionTypeSelected = Boolean(normalizedInspectionType);
 	const isControlType = normalizedInspectionType.includes("kontrol");
 	const isSupervisoryVisitType = normalizedInspectionType.includes("wizyta");
-	const isControlOnlyFieldDisabled = !isControlType;
-	const isVisitOnlyFieldDisabled = !isSupervisoryVisitType;
 	const leaderFieldLabel =
 		isControlType && !isSupervisoryVisitType
 			? "Osoba kierująca kontrolą *"
@@ -1092,6 +1157,24 @@ export function InspectionsFormModal({
 	const isRequiredEndDateMissing =
 		showRequiredFieldErrors && !addInspectionForm.koniecInspekcji;
 	const isRequiredStatusMissing = showRequiredFieldErrors && !addInspectionForm.status.trim();
+	const inspectionStartDate = parseIsoDate(addInspectionForm.poczatekInspekcji);
+	const inspectionEndDate = parseIsoDate(addInspectionForm.koniecInspekcji);
+
+	const renderPreviewTextField = (label: string, value: string, emptyLabel = "-") => {
+		if (!isPreviewMode) {
+			return null;
+		}
+
+		const normalizedValue = value.trim();
+		return (
+			<div className="text-slate-700 text-sm">
+				<span className="mb-1 block">{label}</span>
+				<p className="text-slate-900 text-sm font-semibold">
+					{normalizedValue || emptyLabel}
+				</p>
+			</div>
+		);
+	};
 
 	const renderNoLetterField = ({
 		label,
@@ -1110,13 +1193,13 @@ export function InspectionsFormModal({
 	}) => {
 		if (isPreviewMode) {
 			return (
-				<div>
+				<div className="text-slate-700 text-sm">
 					<label className={`mb-1 block text-slate-600 text-sm ${stableFieldLabelClassName}`}>
 						{label}
 					</label>
-					<div className="flex h-9 items-center rounded-lg border border-slate-200 bg-white px-3 text-slate-700 text-sm">
+					<p className="text-slate-900 text-sm font-semibold">
 						{isNoLetter ? "Brak pisma" : formatDisplayDate(value) || "-"}
-					</div>
+					</p>
 				</div>
 			);
 		}
@@ -1269,83 +1352,94 @@ export function InspectionsFormModal({
 							</h4>
 
 							<div className="grid gap-3 xl:grid-cols-2">
-								<SingleSelectPortalField
-									label="Typ inspekcji *"
-									value={addInspectionForm.typInspekcji}
-									options={inspectionTypeOptions}
-									placeholder="• Wybierz typ inspekcji"
-									invalid={isRequiredInspectionTypeMissing}
-									errorMessage={
-										isRequiredInspectionTypeMissing ? "Pole wymagane." : null
-									}
-									onChange={(next) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											typInspekcji: next,
-											dataDoreczeniaProtokolu: next
-												.toLowerCase()
-												.includes("kontrol")
-												? prev.dataDoreczeniaProtokolu
-												: "",
-											dataPismaZOdpowiedzia: next
-												.toLowerCase()
-												.includes("kontrol")
-												? prev.dataPismaZOdpowiedzia
-												: "",
-											brakDataPismaZOdpowiedzia: next
-												.toLowerCase()
-												.includes("kontrol")
-												? prev.brakDataPismaZOdpowiedzia
-												: false,
-											dataWyslaniaPismaZOdpowiedzia: next
-												.toLowerCase()
-												.includes("kontrol")
-												? prev.dataWyslaniaPismaZOdpowiedzia
-												: "",
-											brakDataWyslaniaPismaZOdpowiedzia: next
-												.toLowerCase()
-												.includes("kontrol")
-												? prev.brakDataWyslaniaPismaZOdpowiedzia
-												: false,
-											dataAkceptacjiSprawozdania: next
-												.toLowerCase()
-												.includes("wizyta")
-												? prev.dataAkceptacjiSprawozdania
-												: "",
-											dataDoreczeniaPisma: next
-												.toLowerCase()
-												.includes("wizyta")
-												? prev.dataDoreczeniaPisma
-												: "",
-											brakDataDoreczeniaPisma: next
-												.toLowerCase()
-												.includes("wizyta")
-												? prev.brakDataDoreczeniaPisma
-												: false,
-										}))
-									}
-									disabled={isReadOnly || Boolean(editingInspectionId)}
-								/>
+								{isPreviewMode ? (
+									renderPreviewTextField("Typ inspekcji *", addInspectionForm.typInspekcji)
+								) : (
+									<SingleSelectPortalField
+										label="Typ inspekcji *"
+										value={addInspectionForm.typInspekcji}
+										options={inspectionTypeOptions}
+										placeholder="• Wybierz typ inspekcji"
+										invalid={isRequiredInspectionTypeMissing}
+										errorMessage={
+											isRequiredInspectionTypeMissing ? "Pole wymagane." : null
+										}
+										onChange={(next) =>
+											setAddInspectionForm((prev) => ({
+												...prev,
+												typInspekcji: next,
+												dataDoreczeniaProtokolu: next
+													.toLowerCase()
+													.includes("kontrol")
+													? prev.dataDoreczeniaProtokolu
+													: "",
+												dataPismaZOdpowiedzia: next
+													.toLowerCase()
+													.includes("kontrol")
+													? prev.dataPismaZOdpowiedzia
+													: "",
+												brakDataPismaZOdpowiedzia: next
+													.toLowerCase()
+													.includes("kontrol")
+													? prev.brakDataPismaZOdpowiedzia
+													: false,
+												dataWyslaniaPismaZOdpowiedzia: next
+													.toLowerCase()
+													.includes("kontrol")
+													? prev.dataWyslaniaPismaZOdpowiedzia
+													: "",
+												brakDataWyslaniaPismaZOdpowiedzia: next
+													.toLowerCase()
+													.includes("kontrol")
+													? prev.brakDataWyslaniaPismaZOdpowiedzia
+													: false,
+												dataAkceptacjiSprawozdania: next
+													.toLowerCase()
+													.includes("wizyta")
+													? prev.dataAkceptacjiSprawozdania
+													: "",
+												dataDoreczeniaPisma: next
+													.toLowerCase()
+													.includes("wizyta")
+													? prev.dataDoreczeniaPisma
+													: "",
+												brakDataDoreczeniaPisma: next
+													.toLowerCase()
+													.includes("wizyta")
+													? prev.brakDataDoreczeniaPisma
+													: false,
+											}))
+										}
+										disabled={isReadOnly || Boolean(editingInspectionId)}
+									/>
+								)}
 
-								<SingleSelectPortalField
-									label="Nazwa podmiotu *"
-									value={addInspectionForm.nazwaPodmiotu}
-									options={entityNameOptions}
-									placeholder="• Wybierz podmiot"
-									enableSearch
-									searchPlaceholder="Wyszukaj podmiot..."
-									invalid={isRequiredEntityNameMissing}
-									errorMessage={
-										isRequiredEntityNameMissing ? "Pole wymagane." : null
-									}
-									onChange={(next) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											nazwaPodmiotu: next,
-										}))
-									}
-									disabled={isReadOnly}
-								/>
+								{isPreviewMode ? (
+									renderPreviewTextField(
+										"Nazwa podmiotu *",
+										getShortEntityDisplayLabel(addInspectionForm.nazwaPodmiotu),
+									)
+								) : (
+									<SingleSelectPortalField
+										label="Nazwa podmiotu *"
+										value={addInspectionForm.nazwaPodmiotu}
+										options={entityNameDisplayOptions}
+										placeholder="• Wybierz podmiot"
+										enableSearch
+										searchPlaceholder="Wyszukaj podmiot..."
+										invalid={isRequiredEntityNameMissing}
+										errorMessage={
+											isRequiredEntityNameMissing ? "Pole wymagane." : null
+										}
+										onChange={(next) =>
+											setAddInspectionForm((prev) => ({
+												...prev,
+												nazwaPodmiotu: next,
+											}))
+										}
+										disabled={isReadOnly}
+									/>
+								)}
 
 								{isPreviewMode ? (
 									<PreviewInspectionScopesField
@@ -1353,7 +1447,7 @@ export function InspectionsFormModal({
 										scopes={selectedInspectionScopeLabels}
 									/>
 								) : (
-								<label className="text-slate-700 text-sm">
+									<label className="text-slate-700 text-sm">
 									<span className="mb-1 block">Zakres inspekcji według upoważnienia</span>
 									<div ref={scopePickerRef} className="relative">
 										<button
@@ -1440,50 +1534,63 @@ export function InspectionsFormModal({
 											</div>
 										) : null}
 									</div>
-									<span className="mt-1 block text-slate-500 text-xs">
-										Możesz wybrać wiele pozycji.
-									</span>
-								</label>
+									</label>
+									)}
+
+								{isPreviewMode ? (
+									renderPreviewTextField(
+										"Czy dotyczy aspektu konsumenckiego?",
+										isAspektKonsumenckiChecked ? "Tak" : "Nie",
+									)
+								) : (
+									<label className="text-slate-700 text-sm">
+										<span className="mb-1 block">Czy dotyczy aspektu konsumenckiego?</span>
+										<div className="flex min-h-10 items-center rounded-lg border border-slate-300 bg-white px-3 py-2">
+											<label className="inline-flex cursor-pointer items-center gap-2 text-slate-900 text-sm">
+												<input
+													type="checkbox"
+													checked={isAspektKonsumenckiChecked}
+													onChange={(event) =>
+														setAddInspectionForm((prev) => ({
+															...prev,
+															aspektKonsumencki: event.target.checked ? "TAK" : "NIE",
+														}))
+													}
+													className="h-4 w-4"
+												/>
+												<span>Tak</span>
+											</label>
+										</div>
+									</label>
 								)}
 
-								<label className="text-slate-700 text-sm">
-									<span className="mb-1 block">Czy dotyczy aspektu konsumenckiego?</span>
-									<div className="flex min-h-10 items-center rounded-lg border border-slate-300 bg-white px-3 py-2">
-										<label className="inline-flex cursor-pointer items-center gap-2 text-slate-900 text-sm">
-											<input
-												type="checkbox"
-												checked={isAspektKonsumenckiChecked}
-												onChange={(event) =>
-													setAddInspectionForm((prev) => ({
-														...prev,
-														aspektKonsumencki: event.target.checked ? "TAK" : "NIE",
-													}))
-												}
-												className="h-4 w-4"
-											/>
-											<span>Tak</span>
-										</label>
-									</div>
-								</label>
-
-										<label className="text-slate-700 text-sm sm:col-span-2">
-											<span className="mb-1 block">Szczegóły dotyczące zakresu</span>
-											<textarea
-												rows={2}
-												value={addInspectionForm.szczegolyDotyczaceZakresu}
-												onChange={(event) =>
-													setAddInspectionForm((prev) => ({
-														...prev,
-														szczegolyDotyczaceZakresu: event.target.value,
-													}))
-												}
-												className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 text-sm outline-none transition-colors focus:border-blue-400"
-											/>
-										</label>
+										{isPreviewMode ? (
+											renderPreviewTextField(
+												"Szczegóły dotyczące zakresu",
+												addInspectionForm.szczegolyDotyczaceZakresu,
+											)
+										) : (
+											<label className="text-slate-700 text-sm sm:col-span-2">
+												<span className="mb-1 block">Szczegóły dotyczące zakresu</span>
+												<textarea
+													rows={2}
+													value={addInspectionForm.szczegolyDotyczaceZakresu}
+													onChange={(event) =>
+														setAddInspectionForm((prev) => ({
+															...prev,
+															szczegolyDotyczaceZakresu: event.target.value,
+														}))
+													}
+													className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 text-sm outline-none transition-colors focus:border-blue-400"
+												/>
+											</label>
+										)}
 
 								<DateInputWithCalendar
 									label="Początek inspekcji *"
 									value={addInspectionForm.poczatekInspekcji}
+									previewTextOnly={isPreviewMode}
+									maxSelectableDate={inspectionEndDate}
 									invalid={isRequiredStartDateMissing}
 									errorMessage={
 										isRequiredStartDateMissing ? "Pole wymagane." : null
@@ -1509,6 +1616,8 @@ export function InspectionsFormModal({
 								<DateInputWithCalendar
 									label="Koniec inspekcji *"
 									value={addInspectionForm.koniecInspekcji}
+									previewTextOnly={isPreviewMode}
+									minSelectableDate={inspectionStartDate}
 									invalid={isRequiredEndDateMissing}
 									errorMessage={
 										isRequiredEndDateMissing ? "Pole wymagane." : null
@@ -1525,7 +1634,11 @@ export function InspectionsFormModal({
 									<span className="mb-1 block">
 										{leaderFieldLabel}
 									</span>
-									{isLeaderSelectionLocked ? (
+									{isPreviewMode ? (
+										<p className="text-slate-900 text-sm font-semibold">
+											{selectedLeaderLabel}
+										</p>
+									) : isLeaderSelectionLocked ? (
 										<div className="flex w-full items-center rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-slate-600 text-sm">
 											{selectedLeaderLabel}
 										</div>
@@ -1601,51 +1714,23 @@ export function InspectionsFormModal({
 									</div>
 								) : null}
 
-								<SingleSelectPortalField
-									label="Rynek"
-									value={addInspectionForm.rynek}
-									options={marketOptions}
-									placeholder="Wybierz rynek"
-									onChange={(next) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											rynek: next,
-										}))
-									}
-									disabled={isReadOnly}
-								/>
-
-								<SingleSelectPortalField
-									label="Rodzaj podmiotu"
-									value={addInspectionForm.rodzajPodmiotu}
-									options={entityTypeOptions}
-									placeholder="Wybierz rodzaj podmiotu"
-									onChange={(next) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											rodzajPodmiotu: next,
-										}))
-									}
-									disabled={isReadOnly}
-								/>
-
-								<SingleSelectPortalField
-									label="Status *"
-									value={addInspectionForm.status}
-									options={inspectionStatusOptions}
-									placeholder="Wybierz status"
-									invalid={isRequiredStatusMissing}
-									errorMessage={
-										isRequiredStatusMissing ? "Pole wymagane." : null
-									}
-									onChange={(next) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											status: next,
-										}))
-									}
-									disabled={isReadOnly}
-								/>
+								{isPreviewMode ? (
+									renderPreviewTextField("Rynek", addInspectionForm.rynek)
+								) : (
+									<SingleSelectPortalField
+										label="Rynek"
+										value={addInspectionForm.rynek}
+										options={marketOptions}
+										placeholder="Wybierz rynek"
+										onChange={(next) =>
+											setAddInspectionForm((prev) => ({
+												...prev,
+												rynek: next,
+											}))
+										}
+										disabled={isReadOnly}
+									/>
+								)}
 
 								<div className="sm:col-span-2">
 									{isPreviewMode ? (
@@ -1660,6 +1745,8 @@ export function InspectionsFormModal({
 											options={activeUsers.map((user) => ({
 												id: user.id,
 												label: getUserDisplayName(user),
+												teamId: user.teamId,
+												teamName: user.teamName,
 											}))}
 											values={selectedTeamMemberIds}
 											onChange={setSelectedTeamMemberIds}
@@ -1670,20 +1757,70 @@ export function InspectionsFormModal({
 									)}
 								</div>
 
-							<label className="text-slate-700 text-sm sm:col-span-2">
-								<span className="mb-1 block">Komentarz</span>
-								<textarea
-									rows={2}
-									value={addInspectionForm.komentarz}
-									onChange={(event) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											komentarz: event.target.value,
-										}))
-									}
-									className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 text-sm outline-none transition-colors focus:border-blue-400"
-								/>
-							</label>
+								{isPreviewMode ? (
+									renderPreviewTextField("Rodzaj podmiotu", addInspectionForm.rodzajPodmiotu)
+								) : (
+									<SingleSelectPortalField
+										label="Rodzaj podmiotu"
+										value={addInspectionForm.rodzajPodmiotu}
+										options={entityTypeOptions}
+										placeholder="Wybierz rodzaj podmiotu"
+										onChange={(next) =>
+											setAddInspectionForm((prev) => ({
+												...prev,
+												rodzajPodmiotu: next,
+											}))
+										}
+										disabled={isReadOnly}
+									/>
+								)}
+
+								<div>
+									{isPreviewMode ? (
+										renderPreviewTextField("Status *", addInspectionForm.status)
+									) : (
+										<SingleSelectPortalField
+											label="Status *"
+											value={addInspectionForm.status}
+											options={inspectionStatusOptions}
+											placeholder="Wybierz status"
+											invalid={isRequiredStatusMissing}
+											errorMessage={
+												isRequiredStatusMissing ? "Pole wymagane." : null
+											}
+											onChange={(next) =>
+												setAddInspectionForm((prev) => ({
+													...prev,
+													status: next,
+												}))
+											}
+											disabled={isReadOnly}
+										/>
+									)}
+								</div>
+
+								<div className="sm:col-span-2">
+									{isPreviewMode ? (
+										renderPreviewTextField("Komentarz", addInspectionForm.komentarz)
+									) : (
+										<label className="text-slate-700 text-sm">
+											<span className="mb-1 block">Komentarz</span>
+											<textarea
+												rows={2}
+												value={addInspectionForm.komentarz}
+												onChange={(event) =>
+													setAddInspectionForm((prev) => ({
+														...prev,
+														komentarz: event.target.value,
+													}))
+												}
+												className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 text-sm outline-none transition-colors focus:border-blue-400"
+											/>
+										</label>
+									)}
+								</div>
+
+
 							</div>
 
 						</section>
@@ -1693,11 +1830,19 @@ export function InspectionsFormModal({
 								Terminy
 							</h4>
 
+							{!hasInspectionTypeSelected ? (
+								<div className="flex min-h-[480px] items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50/60 px-6 text-center">
+									<p className="font-medium text-slate-600 text-sm">
+										Wybierz Typ inspekcji
+									</p>
+								</div>
+							) : (
 							<div className="grid gap-3 xl:grid-cols-2">
 								<DateInputWithCalendar
 									label={protocolOrReportLabel}
 									labelClassName={stableFieldLabelClassName}
 									value={addInspectionForm.dataProtokolu}
+									previewTextOnly={isPreviewMode}
 									onChange={(next) =>
 										setAddInspectionForm((prev) => ({
 											...prev,
@@ -1706,50 +1851,59 @@ export function InspectionsFormModal({
 									}
 								/>
 
-								<DateInputWithCalendar
-									label={protocolDeliveryLabel}
-									labelClassName={stableFieldLabelClassName}
-									disabled={isControlOnlyFieldDisabled}
-									value={addInspectionForm.dataDoreczeniaProtokolu}
-									onChange={(next) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											dataDoreczeniaProtokolu: next,
-										}))
-									}
-								/>
+								{isControlType ? (
+									<DateInputWithCalendar
+										label={protocolDeliveryLabel}
+										labelClassName={stableFieldLabelClassName}
+										value={addInspectionForm.dataDoreczeniaProtokolu}
+										previewTextOnly={isPreviewMode}
+										onChange={(next) =>
+											setAddInspectionForm((prev) => ({
+												...prev,
+												dataDoreczeniaProtokolu: next,
+											}))
+										}
+									/>
+								) : null}
 
-								<DateInputWithCalendar
-									label={reportAcceptanceLabel}
-									labelClassName={stableFieldLabelClassName}
-									disabled={isVisitOnlyFieldDisabled}
-									value={addInspectionForm.dataAkceptacjiSprawozdania}
-									onChange={(next) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											dataAkceptacjiSprawozdania: next,
-										}))
-									}
-								/>
+								{isSupervisoryVisitType ? (
+									<DateInputWithCalendar
+										label={reportAcceptanceLabel}
+										labelClassName={stableFieldLabelClassName}
+										value={addInspectionForm.dataAkceptacjiSprawozdania}
+										previewTextOnly={isPreviewMode}
+										onChange={(next) =>
+											setAddInspectionForm((prev) => ({
+												...prev,
+												dataAkceptacjiSprawozdania: next,
+											}))
+										}
+									/>
+								) : null}
 
-								{renderNoLetterField({
-									label: visitLetterDeliveryLabel,
-									value: addInspectionForm.dataDoreczeniaPisma,
-									isNoLetter: addInspectionForm.brakDataDoreczeniaPisma,
-									disabled: isVisitOnlyFieldDisabled,
-									onChangeValue: (nextValue) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											dataDoreczeniaPisma: nextValue,
-											brakDataDoreczeniaPisma: nextValue ? false : prev.brakDataDoreczeniaPisma,
-										})),
-									onChangeNoLetter: (nextNoLetter) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											brakDataDoreczeniaPisma: nextNoLetter,
-											dataDoreczeniaPisma: nextNoLetter ? "" : prev.dataDoreczeniaPisma,
-										})),
-								})}
+								{isSupervisoryVisitType
+									? renderNoLetterField({
+											label: visitLetterDeliveryLabel,
+											value: addInspectionForm.dataDoreczeniaPisma,
+											isNoLetter: addInspectionForm.brakDataDoreczeniaPisma,
+											onChangeValue: (nextValue) =>
+												setAddInspectionForm((prev) => ({
+													...prev,
+													dataDoreczeniaPisma: nextValue,
+													brakDataDoreczeniaPisma: nextValue
+														? false
+														: prev.brakDataDoreczeniaPisma,
+												})),
+											onChangeNoLetter: (nextNoLetter) =>
+												setAddInspectionForm((prev) => ({
+													...prev,
+													brakDataDoreczeniaPisma: nextNoLetter,
+													dataDoreczeniaPisma: nextNoLetter
+														? ""
+														: prev.dataDoreczeniaPisma,
+												})),
+									  })
+									: null}
 
 								{renderNoLetterField({
 									label: objectionsLetterLabel,
@@ -1809,65 +1963,71 @@ export function InspectionsFormModal({
 										})),
 								})}
 
-								{renderNoLetterField({
-									label: controlResponseLetterSentLabel,
-									value: addInspectionForm.dataWyslaniaPismaZOdpowiedzia,
-									isNoLetter: addInspectionForm.brakDataWyslaniaPismaZOdpowiedzia,
-									disabled: isControlOnlyFieldDisabled,
-									onChangeValue: (nextValue) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											dataWyslaniaPismaZOdpowiedzia: nextValue,
-											brakDataWyslaniaPismaZOdpowiedzia: nextValue
-												? false
-												: prev.brakDataWyslaniaPismaZOdpowiedzia,
-										})),
-									onChangeNoLetter: (nextNoLetter) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											brakDataWyslaniaPismaZOdpowiedzia: nextNoLetter,
-											dataWyslaniaPismaZOdpowiedzia: nextNoLetter
-												? ""
-												: prev.dataWyslaniaPismaZOdpowiedzia,
-										})),
-								})}
+								{isControlType
+									? renderNoLetterField({
+											label: controlResponseLetterSentLabel,
+											value: addInspectionForm.dataWyslaniaPismaZOdpowiedzia,
+											isNoLetter: addInspectionForm.brakDataWyslaniaPismaZOdpowiedzia,
+											onChangeValue: (nextValue) =>
+												setAddInspectionForm((prev) => ({
+													...prev,
+													dataWyslaniaPismaZOdpowiedzia: nextValue,
+													brakDataWyslaniaPismaZOdpowiedzia: nextValue
+														? false
+														: prev.brakDataWyslaniaPismaZOdpowiedzia,
+												})),
+											onChangeNoLetter: (nextNoLetter) =>
+												setAddInspectionForm((prev) => ({
+													...prev,
+													brakDataWyslaniaPismaZOdpowiedzia: nextNoLetter,
+													dataWyslaniaPismaZOdpowiedzia: nextNoLetter
+														? ""
+														: prev.dataWyslaniaPismaZOdpowiedzia,
+												})),
+									  })
+									: null}
 
-								{renderNoLetterField({
-									label: controlResponseLetterLabel,
-									value: addInspectionForm.dataPismaZOdpowiedzia,
-									isNoLetter: addInspectionForm.brakDataPismaZOdpowiedzia,
-									disabled: isControlOnlyFieldDisabled,
-									onChangeValue: (nextValue) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											dataPismaZOdpowiedzia: nextValue,
-											brakDataPismaZOdpowiedzia: nextValue ? false : prev.brakDataPismaZOdpowiedzia,
-										})),
-									onChangeNoLetter: (nextNoLetter) =>
-										setAddInspectionForm((prev) => ({
-											...prev,
-											brakDataPismaZOdpowiedzia: nextNoLetter,
-											dataPismaZOdpowiedzia: nextNoLetter ? "" : prev.dataPismaZOdpowiedzia,
-										})),
-								})}
+								{isControlType
+									? renderNoLetterField({
+											label: controlResponseLetterLabel,
+											value: addInspectionForm.dataPismaZOdpowiedzia,
+											isNoLetter: addInspectionForm.brakDataPismaZOdpowiedzia,
+											onChangeValue: (nextValue) =>
+												setAddInspectionForm((prev) => ({
+													...prev,
+													dataPismaZOdpowiedzia: nextValue,
+													brakDataPismaZOdpowiedzia: nextValue
+														? false
+														: prev.brakDataPismaZOdpowiedzia,
+												})),
+											onChangeNoLetter: (nextNoLetter) =>
+												setAddInspectionForm((prev) => ({
+													...prev,
+													brakDataPismaZOdpowiedzia: nextNoLetter,
+													dataPismaZOdpowiedzia: nextNoLetter
+														? ""
+														: prev.dataPismaZOdpowiedzia,
+												})),
+									  })
+									: null}
 
-								<div className="xl:col-start-2">
+								<div>
 									{isPreviewMode ? (
 										<div>
 											<label className={`mb-1 block text-slate-600 text-sm ${stableFieldLabelClassName}`}>
 												Data akceptacji noty (lista)
 											</label>
-											<div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 text-sm">
+											<div className="text-slate-700 text-sm">
 												{isDataAkceptacjiNotyBrak ? (
-													<span>Brak</span>
+													<span className="font-semibold text-slate-900">Brak</span>
 												) : parsedAcceptanceDates.length > 0 ? (
-													<div className="space-y-1">
+													<div className="space-y-0.5">
 														{parsedAcceptanceDates.map((value, index) => (
-															<div key={`acceptance-date-${value}-${index}`}>{value}</div>
+															<div key={`acceptance-date-${value}-${index}`} className="font-semibold text-slate-900">{value}</div>
 														))}
 													</div>
 												) : (
-													<span>-</span>
+													<span className="font-semibold text-slate-900">-</span>
 												)}
 											</div>
 										</div>
@@ -1887,25 +2047,26 @@ export function InspectionsFormModal({
 								</div>
 
 								{isPreviewMode ? (
-									<div className="xl:col-start-2">
+									<div>
 										<label className={`mb-1 block text-slate-600 text-sm ${stableFieldLabelClassName}`}>
 											Data zaleceń
 										</label>
-										<div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 text-sm">
+										<div className="text-slate-700 text-sm">
 											{parsedRecommendationDates.length > 0 ? (
-												<div className="space-y-1">
+												<div className="space-y-0.5">
 													{parsedRecommendationDates.map((value, index) => (
-														<div key={`recommendation-date-${value}-${index}`}>{value}</div>
+														<div key={`recommendation-date-${value}-${index}`} className="font-semibold text-slate-900">{value}</div>
 													))}
 												</div>
 											) : (
-												<span>-</span>
+												<span className="font-semibold text-slate-900">-</span>
 											)}
 										</div>
 									</div>
 								) : null}
 
 							</div>
+							)}
 						</section>
 						</div>
 
