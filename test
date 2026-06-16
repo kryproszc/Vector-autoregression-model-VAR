@@ -904,7 +904,12 @@ def get_inspections_time_analytics(
 
 	# Year-count section is intentionally based on all inspection types (K + W)
 	# and mirrors permission + team filtering used by this report.
-	rows_for_counts = list(all_type_base_rows)
+	# Keep it aligned with time-based sections: count only rows with computable time.
+	rows_for_counts = [
+		row
+		for row in all_type_base_rows
+		if row.get("rokPoczatku") is not None and isinstance(row.get("czas"), (int, float))
+	]
 	if year_filter:
 		rows_for_counts = [row for row in rows_for_counts if str(row.get("rokPoczatku") or "") in year_filter]
 	if team_filter:
