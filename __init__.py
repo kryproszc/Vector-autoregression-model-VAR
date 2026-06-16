@@ -82,6 +82,13 @@ class InspectionsTimeAnalyticsResponse(BaseModel):
 	selectedMetricLabel: str
 	baseCount: int
 	filteredCount: int
+	departmentMinTime: int | None = None
+	departmentMaxTime: int | None = None
+	myCountByYear: dict[str, int] = {}
+	myCountByYearBreakdown: dict[str, dict[str, int]] = {}
+	myMetricByYearBreakdown: dict[str, dict[str, float]] = {}
+	myCountAllYearsBreakdown: dict[str, int] = {}
+	myMetricAllYearsBreakdown: dict[str, float] = {}
 	teamOptions: list[str]
 	yearOptions: list[str]
 	detailRows: list[dict[str, Any]]
@@ -506,7 +513,7 @@ def _public_status_label(value: str | None) -> str:
 
 
 def _should_compute_bucket_code(status_code: str | None) -> bool:
-	return _normalize_code_key(status_code) == "zakonczona_piszemy"
+	return _is_excluded_status_code(status_code, _DASHBOARD_ALERT_INSPECTION_STATUS_CODES)
 
 
 def _parse_csv_values(raw_value: str | list[str] | None) -> list[str]:
@@ -536,6 +543,10 @@ def _load_excluded_status_codes(env_key: str) -> set[str]:
 
 _DASHBOARD_EXCLUDED_INSPECTION_STATUS_CODES = _load_excluded_status_codes("DASHBOARD_EXCLUDED_INSPECTION_STATUS_CODES")
 _DASHBOARD_EXCLUDED_RECOMMENDATION_STATUS_CODES = _load_excluded_status_codes("DASHBOARD_EXCLUDED_RECOMMENDATION_STATUS_CODES")
+_DASHBOARD_ALERT_INSPECTION_STATUS_CODES = (
+	_load_excluded_status_codes("DASHBOARD_ALERT_INSPECTION_STATUS_CODES")
+	or {_normalize_code_key("I_SI_4")}
+)
 _REPORTS_EXCLUDED_INSPECTION_STATUS_CODES = _load_excluded_status_codes("REPORTS_EXCLUDED_INSPECTION_STATUS_CODES")
 _REPORTS_EXCLUDED_RECOMMENDATION_STATUS_CODES = _load_excluded_status_codes("REPORTS_EXCLUDED_RECOMMENDATION_STATUS_CODES")
 
@@ -784,18 +795,16 @@ def get_inspections_time_analytics(
 			if team_row is not None:
 				operator_team_code = str(team_row["kod"] or "-").strip() or "-"
 
-		operator_team_member_inspections: set[int] = set()
-		if operator_team_id is not None:
-			team_member_rows = conn.execute(
-				"""
-				SELECT DISTINCT im.inspection_id
-				FROM inspection_members im
-				JOIN users u ON u.id = im.user_id
-				WHERE u.zespol_id = ?
-				""",
-				(operator_team_id,),
-			).fetchall()
-			operator_team_member_inspections = {int(item["inspection_id"]) for item in team_member_rows}
+		operator_member_inspections: set[int] = set()
+		operator_member_rows = conn.execute(
+			"""
+			SELECT DISTINCT inspection_id
+			FROM inspection_members
+			WHERE user_id = ?
+			""",
+			(int(operator["id"]),),
+		).fetchall()
+		operator_member_inspections = {int(item["inspection_id"]) for item in operator_member_rows}
 
 		rows = conn.execute(
 			"""
@@ -803,6 +812,7 @@ def get_inspections_time_analytics(
 				i.id,
 				i.kod_inspekcji,
 				i.created_by_user_id,
+				i.osoba_kierujaca_user_id,
 				i.poczatek_inspekcji,
 				i.koniec_inspekcji,
 				i.data_protokolu_sprawozdania,
@@ -841,8 +851,12 @@ def get_inspections_time_analytics(
 		team_code = str(row.get("zespol_osoby_kierujacej_kod") or "-").strip() or "-"
 		status_label = _public_status_label(row.get("status_inspekcji"))
 		stage_payload = _stage_payload_from_status_code(row.get("status_inspekcji_kod"))
+		inspection_id = int(row["id"])
+		leader_user_id = row.get("osoba_kierujaca_user_id")
+		is_leader_current_user = leader_user_id is not None and int(leader_user_id) == int(operator["id"])
+		is_member_current_user = inspection_id in operator_member_inspections
 		normalized_row = {
-			"inspectionId": int(row["id"]),
+			"inspectionId": inspection_id,
 			"kodInspekcji": str(row.get("kod_inspekcji") or "-").strip() or "-",
 			"inspekcja": row_type,
 			"statusInspekcjiId": int(row["status_inspekcji_id"]) if row.get("status_inspekcji_id") is not None else None,
@@ -856,6 +870,8 @@ def get_inspections_time_analytics(
 			"data": row.get("data_protokolu_sprawozdania"),
 			"zespol": team_code,
 			"czas": diff,
+			"isLeaderCurrentUser": is_leader_current_user,
+			"isMemberCurrentUser": is_member_current_user,
 			"leadTeamId": row.get("lead_team_id"),
 			"stageGroupCode": stage_payload["stage_group_code"],
 			"stageGroupLabel": stage_payload["stage_group_label"],
@@ -910,6 +926,22 @@ def get_inspections_time_analytics(
 		czas_value = row.get("czas")
 		return isinstance(czas_value, (int, float))
 
+	if int(operator["rola_id"]) == 1:
+		if year_filter:
+			department_min_max_source = [
+				row
+				for row in typed_rows
+				if str(row.get("rokPoczatku") or "") in year_filter and _is_valid_for_aggregations(row)
+			]
+		else:
+			department_min_max_source = [row for row in typed_rows if _is_valid_for_aggregations(row)]
+	else:
+		department_min_max_source = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
+
+	department_times_for_bounds = [int(row["czas"]) for row in department_min_max_source]
+	department_min_time = min(department_times_for_bounds) if department_times_for_bounds else None
+	department_max_time = max(department_times_for_bounds) if department_times_for_bounds else None
+
 	agg_filtered_rows = [row for row in filtered_rows if _is_valid_for_aggregations(row)]
 	department_scope_rows = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
 
@@ -937,8 +969,7 @@ def get_inspections_time_analytics(
 				if not _is_valid_for_aggregations(row):
 					continue
 				lead_team_id = row.get("leadTeamId")
-				inspection_id = int(row["inspectionId"])
-				is_team_row = (lead_team_id is not None and int(lead_team_id) == int(operator_team_id)) or (inspection_id in operator_team_member_inspections)
+				is_team_row = lead_team_id is not None and int(lead_team_id) == int(operator_team_id)
 				if is_team_row:
 					team_user_scope_all_year.append(row)
 
@@ -946,13 +977,20 @@ def get_inspections_time_analytics(
 				if not _is_valid_for_aggregations(row):
 					continue
 				lead_team_id = row.get("leadTeamId")
-				inspection_id = int(row["inspectionId"])
-				is_team_row = (lead_team_id is not None and int(lead_team_id) == int(operator_team_id)) or (inspection_id in operator_team_member_inspections)
+				is_team_row = lead_team_id is not None and int(lead_team_id) == int(operator_team_id)
 				if is_team_row:
 					team_user_scope.append(row)
 
-		my_user_scope_all_year = [row for row in base_rows if _is_valid_for_aggregations(row)]
-		my_user_scope = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
+		my_user_scope_all_year = [
+			row
+			for row in base_rows
+			if _is_valid_for_aggregations(row) and bool(row.get("isLeaderCurrentUser"))
+		]
+		my_user_scope = [
+			row
+			for row in rows_after_year
+			if _is_valid_for_aggregations(row) and bool(row.get("isLeaderCurrentUser"))
+		]
 
 		dept_groups: dict[str, list[int]] = defaultdict(list)
 		for row in department_user_scope:
@@ -1170,6 +1208,14 @@ def get_inspections_time_analytics(
 			}
 		)
 
+	detail_source_rows = list(agg_filtered_rows)
+	if int(operator["rola_id"]) == 1:
+		detail_source_rows = [
+			row
+			for row in detail_source_rows
+			if bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))
+		]
+
 	detail_rows = [
 		{
 			"inspectionId": row["inspectionId"],
@@ -1192,12 +1238,115 @@ def get_inspections_time_analytics(
 			"poczatekInspekcji": row.get("poczatekInspekcji") or "-",
 			"koniecInspekcji": row.get("koniecInspekcji") or "-",
 			"osobaKierujaca": row.get("osobaKierujaca", "-"),
+			"isLeaderCurrentUser": bool(row.get("isLeaderCurrentUser")),
+			"isMemberCurrentUser": bool(row.get("isMemberCurrentUser")),
 			"zespol": row["zespol"],
 			"data": row.get("data") or "-",
 			"czas": int(row["czas"]),
 		}
-		for row in agg_filtered_rows
+		for row in detail_source_rows
 	]
+
+	my_count_by_year_groups: dict[str, int] = defaultdict(int)
+	for row in rows_after_year:
+		if not (bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))):
+			continue
+		year_key = str(row.get("rokPoczatku") or "").strip()
+		if not year_key:
+			continue
+		my_count_by_year_groups[year_key] += 1
+	my_count_by_year = {
+		year: int(my_count_by_year_groups[year])
+		for year in sorted(my_count_by_year_groups.keys())
+	}
+
+	my_count_by_year_breakdown_groups: dict[str, dict[str, int]] = defaultdict(
+		lambda: {"leader": 0, "member": 0, "combined": 0}
+	)
+	for row in rows_after_year:
+		year_key = str(row.get("rokPoczatku") or "").strip()
+		if not year_key:
+			continue
+		is_leader = bool(row.get("isLeaderCurrentUser"))
+		is_member = bool(row.get("isMemberCurrentUser"))
+		if not (is_leader or is_member):
+			continue
+		if is_leader:
+			my_count_by_year_breakdown_groups[year_key]["leader"] += 1
+		if is_member:
+			my_count_by_year_breakdown_groups[year_key]["member"] += 1
+		my_count_by_year_breakdown_groups[year_key]["combined"] += 1
+
+	my_count_by_year_breakdown = {
+		year: {
+			"leader": int(values["leader"]),
+			"member": int(values["member"]),
+			"combined": int(values["combined"]),
+		}
+		for year, values in sorted(my_count_by_year_breakdown_groups.items(), key=lambda item: item[0])
+	}
+
+	my_metric_by_year_leader_groups: dict[str, list[int]] = defaultdict(list)
+	my_metric_by_year_member_groups: dict[str, list[int]] = defaultdict(list)
+	my_metric_by_year_combined_groups: dict[str, list[int]] = defaultdict(list)
+	for row in rows_after_year:
+		if not _is_valid_for_aggregations(row):
+			continue
+		year_key = str(row.get("rokPoczatku") or "").strip()
+		if not year_key:
+			continue
+		czas_value = int(row["czas"])
+		is_leader = bool(row.get("isLeaderCurrentUser"))
+		is_member = bool(row.get("isMemberCurrentUser"))
+		if not (is_leader or is_member):
+			continue
+		if is_leader:
+			my_metric_by_year_leader_groups[year_key].append(czas_value)
+		if is_member:
+			my_metric_by_year_member_groups[year_key].append(czas_value)
+		my_metric_by_year_combined_groups[year_key].append(czas_value)
+
+	all_metric_years = sorted(
+		set(my_metric_by_year_leader_groups.keys())
+		| set(my_metric_by_year_member_groups.keys())
+		| set(my_metric_by_year_combined_groups.keys())
+	)
+	my_metric_by_year_breakdown: dict[str, dict[str, float]] = {}
+	for year in all_metric_years:
+		leader_metric = _metric_from_values(my_metric_by_year_leader_groups.get(year, []), trend_mode)
+		member_metric = _metric_from_values(my_metric_by_year_member_groups.get(year, []), trend_mode)
+		combined_metric = _metric_from_values(my_metric_by_year_combined_groups.get(year, []), trend_mode)
+		my_metric_by_year_breakdown[year] = {
+			"leader": float(leader_metric or 0),
+			"member": float(member_metric or 0),
+			"combined": float(combined_metric or 0),
+		}
+
+	my_count_all_years_breakdown = {
+		"leader": int(sum(values["leader"] for values in my_count_by_year_breakdown.values())),
+		"member": int(sum(values["member"] for values in my_count_by_year_breakdown.values())),
+		"combined": int(sum(values["combined"] for values in my_count_by_year_breakdown.values())),
+	}
+
+	my_metric_all_years_breakdown = {
+		"leader": float(
+			_metric_from_values([v for values in my_metric_by_year_leader_groups.values() for v in values], trend_mode) or 0
+		),
+		"member": float(
+			_metric_from_values([v for values in my_metric_by_year_member_groups.values() for v in values], trend_mode) or 0
+		),
+		"combined": float(
+			_metric_from_values([v for values in my_metric_by_year_combined_groups.values() for v in values], trend_mode) or 0
+		),
+	}
+
+	scatter_source_rows = list(agg_filtered_rows)
+	if int(operator["rola_id"]) == 1:
+		scatter_source_rows = [
+			row
+			for row in scatter_source_rows
+			if bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))
+		]
 
 	scatter_rows = [
 		{
@@ -1209,7 +1358,7 @@ def get_inspections_time_analytics(
 			"osobaKierujaca": row.get("osobaKierujaca", "-"),
 			"zespol": row["zespol"],
 		}
-		for row in agg_filtered_rows
+		for row in scatter_source_rows
 	]
 
 	status_counter: dict[tuple[int | None, str], int] = defaultdict(int)
@@ -1242,6 +1391,13 @@ def get_inspections_time_analytics(
 		"selectedMetricLabel": metric_label,
 		"baseCount": len(base_rows),
 		"filteredCount": len(filtered_rows),
+		"departmentMinTime": department_min_time,
+		"departmentMaxTime": department_max_time,
+		"myCountByYear": my_count_by_year,
+		"myCountByYearBreakdown": my_count_by_year_breakdown,
+		"myMetricByYearBreakdown": my_metric_by_year_breakdown,
+		"myCountAllYearsBreakdown": my_count_all_years_breakdown,
+		"myMetricAllYearsBreakdown": my_metric_all_years_breakdown,
 		"teamOptions": team_options,
 		"yearOptions": year_options,
 		"detailRows": detail_rows,

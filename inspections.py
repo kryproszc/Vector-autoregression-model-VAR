@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import os
 import re
 import unicodedata
 from typing import Any
@@ -27,6 +28,87 @@ _ALLOWED_INSPECTION_TYPE_BY_NORMALIZED: dict[str, tuple[str, str, int]] = {
 }
 
 _SZCZEGOLY_DOTYCZACE_ZAKRESU_MAX_LEN = 2000
+_INSPECTION_STATUS_RELATIONS_ERROR_CODE = "INSPECTION_STATUS_RELATIONS_VALIDATION_FAILED"
+_INSPECTION_STATUS_RELATIONS_ERROR_CODE_ID = 1100
+_VIOLATION_RECOMMENDATIONS_REQUIRED_MISSING_ID = 1001
+_VIOLATION_RECOMMENDATIONS_FORBIDDEN_PRESENT_ID = 1002
+_VIOLATION_SANCTIONS_REQUIRED_MISSING_ID = 1003
+_VIOLATION_SANCTIONS_FORBIDDEN_PRESENT_ID = 1004
+
+
+def _parse_status_codes_env(name: str) -> set[str]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return set()
+
+    values: set[str] = set()
+    for token in re.split(r"[,;\n]", raw):
+        cleaned = token.strip().upper()
+        if cleaned:
+            values.add(cleaned)
+    return values
+
+
+def _parse_status_relation_rules_env(name: str) -> dict[str, tuple[str, str]]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return {}
+
+    rules: dict[str, tuple[str, str]] = {}
+    for token in re.split(r"[;\n]", raw):
+        item = token.strip()
+        if not item:
+            continue
+
+        if ":" not in item:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Niepoprawny format {name}: '{item}'. Oczekiwano CODE:R+,S-",
+            )
+
+        code_raw, spec_raw = item.split(":", 1)
+        code = code_raw.strip().upper()
+        spec_parts = [p.strip().upper() for p in re.split(r"[,|]", spec_raw) if p.strip()]
+        if not code:
+            raise HTTPException(status_code=500, detail=f"Niepoprawny format {name}: pusty kod statusu")
+
+        rec_expectation = "any"
+        san_expectation = "any"
+        for part in spec_parts:
+            if part == "R+":
+                rec_expectation = "present"
+            elif part == "R-":
+                rec_expectation = "absent"
+            elif part == "S+":
+                san_expectation = "present"
+            elif part == "S-":
+                san_expectation = "absent"
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Niepoprawny format {name}: nieznany token '{part}' dla statusu {code}",
+                )
+
+        rules[code] = (rec_expectation, san_expectation)
+
+    return rules
+
+
+_INSPECTION_STATUS_REQUIRES_RECOMMENDATIONS_CODES = _parse_status_codes_env(
+    "INSPECTIONS_STATUS_REQUIRES_RECOMMENDATIONS_CODES"
+)
+_INSPECTION_STATUS_FORBIDS_RECOMMENDATIONS_CODES = _parse_status_codes_env(
+    "INSPECTIONS_STATUS_FORBIDS_RECOMMENDATIONS_CODES"
+)
+_INSPECTION_STATUS_REQUIRES_SANCTIONS_CODES = _parse_status_codes_env(
+    "INSPECTIONS_STATUS_REQUIRES_SANCTIONS_CODES"
+)
+_INSPECTION_STATUS_FORBIDS_SANCTIONS_CODES = _parse_status_codes_env(
+    "INSPECTIONS_STATUS_FORBIDS_SANCTIONS_CODES"
+)
+_INSPECTION_STATUS_RELATION_RULES = _parse_status_relation_rules_env(
+    "INSPECTIONS_STATUS_RELATION_RULES"
+)
 
 
 class InspectionStructureCreate(BaseModel):
@@ -259,6 +341,162 @@ def _resolve_slownik_item_id(conn: Any, kod_typu: str, raw_value: str | None) ->
         (kod_typu, code, value, next_order),
     )
     return int(cursor.lastrowid)
+
+
+def _status_code_by_id(conn: Any, status_id: int | None) -> str | None:
+    if status_id is None:
+        return None
+    row = conn.execute(
+        "SELECT kod_pozycji FROM slownik_pozycje WHERE id = ? LIMIT 1",
+        (int(status_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["kod_pozycji"] or "").strip().upper() or None
+
+
+def _count_related_by_inspection(conn: Any, table_name: str, inspection_id: int) -> int:
+    row = conn.execute(
+        f"SELECT COUNT(*) AS total FROM {table_name} WHERE inspection_id = ?",
+        (int(inspection_id),),
+    ).fetchone()
+    return int(row["total"]) if row is not None else 0
+
+
+def _status_expectations_by_code(status_code: str | None) -> tuple[str, str]:
+    code = str(status_code or "").strip().upper()
+    if not code:
+        return "any", "any"
+
+    if code in _INSPECTION_STATUS_RELATION_RULES:
+        return _INSPECTION_STATUS_RELATION_RULES[code]
+
+    if (
+        code in _INSPECTION_STATUS_REQUIRES_RECOMMENDATIONS_CODES
+        and code in _INSPECTION_STATUS_FORBIDS_RECOMMENDATIONS_CODES
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Konflikt konfiguracji statusu inspekcji: "
+                f"{code} jednoczesnie wymaga i zabrania zalecen"
+            ),
+        )
+
+    if code in _INSPECTION_STATUS_REQUIRES_RECOMMENDATIONS_CODES:
+        recommendations_expectation = "present"
+    elif code in _INSPECTION_STATUS_FORBIDS_RECOMMENDATIONS_CODES:
+        recommendations_expectation = "absent"
+    else:
+        recommendations_expectation = "any"
+
+    if code in _INSPECTION_STATUS_REQUIRES_SANCTIONS_CODES and code in _INSPECTION_STATUS_FORBIDS_SANCTIONS_CODES:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Konflikt konfiguracji statusu inspekcji: "
+                f"{code} jednoczesnie wymaga i zabrania wnioskow sankcyjnych"
+            ),
+        )
+
+    if code in _INSPECTION_STATUS_REQUIRES_SANCTIONS_CODES:
+        sanctions_expectation = "present"
+    elif code in _INSPECTION_STATUS_FORBIDS_SANCTIONS_CODES:
+        sanctions_expectation = "absent"
+    else:
+        sanctions_expectation = "any"
+
+    return recommendations_expectation, sanctions_expectation
+
+
+def _validate_status_relations_for_save(
+    conn: Any,
+    *,
+    inspection_id: int | None,
+    status_id: int | None,
+) -> None:
+    status_code = _status_code_by_id(conn, status_id)
+    recommendations_expectation, sanctions_expectation = _status_expectations_by_code(status_code)
+
+    if recommendations_expectation == "any" and sanctions_expectation == "any":
+        return
+
+    recommendations_count = 0
+    sanctions_count = 0
+    if inspection_id is not None:
+        recommendations_count = _count_related_by_inspection(conn, "recommendations", int(inspection_id))
+        sanctions_count = _count_related_by_inspection(conn, "risk_exposure_requests", int(inspection_id))
+
+    violations: list[dict[str, Any]] = []
+    if recommendations_expectation == "present" and recommendations_count == 0:
+        violations.append(
+            {
+                "violationCode": "RECOMMENDATIONS_REQUIRED_MISSING",
+                "violationCodeId": _VIOLATION_RECOMMENDATIONS_REQUIRED_MISSING_ID,
+                "entity": "recommendations",
+                "expected": "present",
+                "actualCount": recommendations_count,
+                "message": "Status wymaga co najmniej jednego zalecenia, ale nie znaleziono powiazanych zaleceń.",
+            }
+        )
+    elif recommendations_expectation == "absent" and recommendations_count > 0:
+        violations.append(
+            {
+                "violationCode": "RECOMMENDATIONS_FORBIDDEN_PRESENT",
+                "violationCodeId": _VIOLATION_RECOMMENDATIONS_FORBIDDEN_PRESENT_ID,
+                "entity": "recommendations",
+                "expected": "absent",
+                "actualCount": recommendations_count,
+                "message": "Status wymaga braku zaleceń, ale dla tej inspekcji istnieja powiazane zalecenia.",
+            }
+        )
+
+    if sanctions_expectation == "present" and sanctions_count == 0:
+        violations.append(
+            {
+                "violationCode": "SANCTIONS_REQUIRED_MISSING",
+                "violationCodeId": _VIOLATION_SANCTIONS_REQUIRED_MISSING_ID,
+                "entity": "sanctionRequests",
+                "expected": "present",
+                "actualCount": sanctions_count,
+                "message": "Status wymaga co najmniej jednego wniosku sankcyjnego, ale nie znaleziono powiazanych wnioskow.",
+            }
+        )
+    elif sanctions_expectation == "absent" and sanctions_count > 0:
+        violations.append(
+            {
+                "violationCode": "SANCTIONS_FORBIDDEN_PRESENT",
+                "violationCodeId": _VIOLATION_SANCTIONS_FORBIDDEN_PRESENT_ID,
+                "entity": "sanctionRequests",
+                "expected": "absent",
+                "actualCount": sanctions_count,
+                "message": "Status wymaga braku wnioskow sankcyjnych, ale dla tej inspekcji istnieja powiazane wnioski.",
+            }
+        )
+
+    if not violations:
+        return
+
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": _INSPECTION_STATUS_RELATIONS_ERROR_CODE,
+            "codeId": _INSPECTION_STATUS_RELATIONS_ERROR_CODE_ID,
+            "message": "Wybrany status nie jest zgodny z powiazaniami inspekcji.",
+            "inspectionId": inspection_id,
+            "statusId": status_id,
+            "statusCode": status_code,
+            "expectations": {
+                "recommendations": recommendations_expectation,
+                "sanctionRequests": sanctions_expectation,
+            },
+            "counts": {
+                "recommendations": recommendations_count,
+                "sanctionRequests": sanctions_count,
+            },
+            "violations": violations,
+        },
+    )
 
 
 def _normalize_inspection_type_name(raw_value: str | None) -> str:
@@ -1248,21 +1486,36 @@ def list_structure_inspections(
     sortOrder: str = Query(default="asc"),
     x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
+    poczatek_inspekcji_sort_sql = """
+        CASE
+            WHEN i.poczatek_inspekcji LIKE '__.__.____'
+                THEN substr(i.poczatek_inspekcji, 7, 4) || '-' || substr(i.poczatek_inspekcji, 4, 2) || '-' || substr(i.poczatek_inspekcji, 1, 2)
+            ELSE i.poczatek_inspekcji
+        END
+    """.strip()
     allowed_sort_columns = {
         "lp": "i.lp",
         "kodInspekcji": "i.kod_inspekcji",
         "id": "i.id",
-        "poczatekInspekcji": "i.poczatek_inspekcji",
+        "poczatekInspekcji": poczatek_inspekcji_sort_sql,
         "koniecInspekcji": "i.koniec_inspekcji",
     }
-    if sortBy not in allowed_sort_columns:
+    sort_aliases = {
+        "kod_inspekcji": "kodInspekcji",
+        "poczatek_inspekcji": "poczatekInspekcji",
+        "koniec_inspekcji": "koniecInspekcji",
+        "startDate": "poczatekInspekcji",
+    }
+
+    normalized_sort_by = sort_aliases.get((sortBy or "").strip(), sortBy)
+    if normalized_sort_by not in allowed_sort_columns:
         raise HTTPException(status_code=400, detail="Niepoprawny sortBy")
 
     direction = sortOrder.lower()
     if direction not in ("asc", "desc"):
         raise HTTPException(status_code=400, detail="Niepoprawny sortOrder")
 
-    order_sql = f" ORDER BY {allowed_sort_columns[sortBy]} {direction.upper()}, i.id ASC"
+    order_sql = f" ORDER BY {allowed_sort_columns[normalized_sort_by]} {direction.upper()}, i.id ASC"
 
     with get_connection() as conn:
         operator = _resolve_operator(conn, x_operator_login)
@@ -1330,6 +1583,7 @@ def create_structure_inspection(
         rynek_id = _resolve_slownik_item_id(conn, "rynki", payload.rynek)
         rodzaj_podmiotu_id = _resolve_slownik_item_id(conn, "rodzaje_podmiotu", payload.rodzajPodmiotu)
         status_id = _resolve_slownik_item_id(conn, "statusy_inspekcji", payload.status)
+        _validate_status_relations_for_save(conn, inspection_id=None, status_id=status_id)
         szczegoly_dotyczace_zakresu = _normalize_optional_text_with_limit(
             payload.szczegolyDotyczaceZakresu,
             "szczegolyDotyczaceZakresu",
@@ -1758,6 +2012,8 @@ def update_structure_inspection(
         date_lists_updated = False
         data_akceptacji_noty_list: list[str] | None = None
         row_touched = False
+        current_status_id = int(current["status_inspekcji_id"]) if current.get("status_inspekcji_id") is not None else None
+        next_status_id = current_status_id
 
         if "nazwaPodmiotu" in fields:
             set_parts.append("nazwa_podmiotu_id = ?")
@@ -1794,8 +2050,11 @@ def update_structure_inspection(
             set_parts.append("aspekt_konsumencki = ?")
             values.append(fields["aspektKonsumencki"])
         if "status" in fields:
+            next_status_id = _resolve_slownik_item_id(conn, "statusy_inspekcji", fields["status"])
             set_parts.append("status_inspekcji_id = ?")
-            values.append(_resolve_slownik_item_id(conn, "statusy_inspekcji", fields["status"]))
+            values.append(next_status_id)
+            if next_status_id != current_status_id:
+                _validate_status_relations_for_save(conn, inspection_id=inspection_id, status_id=next_status_id)
         if "komentarz" in fields:
             set_parts.append("komentarz = ?")
             values.append(fields["komentarz"])

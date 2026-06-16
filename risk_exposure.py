@@ -27,12 +27,10 @@ router = APIRouter()
 
 ROZSTRZYGNIECIE_WNIOSKU_KOD_TYPU = "rozstrzygniecie_wniosku_sankcyjnego_I"
 FORBIDDEN_INSPECTION_STATUS_CODES = {
-    "CLOSED_WITH_RECOMMENDATIONS",
-    "CLOSED_WITHOUT_RECOMMENDATIONS",
+  
 }
 FORBIDDEN_INSPECTION_STATUS_LABEL_KEYS = {
-    "zamkniete - wydano zalecenia",
-    "zamkniete - brak zalecen",
+    
 }
 INSPECTION_STATUS_BLOCK_ERROR_CODE = "INSPECTION_STATUS_BLOCKS_OPERATION"
 
