@@ -651,7 +651,80 @@ export async function fetchInspectionsTimeAnalytics(
 			? value.map((item) => String(item ?? "").trim()).filter(Boolean)
 			: [];
 
+	const toBreakdownValue = (value: unknown) => {
+		if (!value || typeof value !== "object") {
+			return null;
+		}
+
+		const source = value as Record<string, unknown>;
+		return {
+			leader: toNumberOrNull(source.leader),
+			member: toNumberOrNull(source.member),
+			combined: toNumberOrNull(source.combined),
+		};
+	};
+
+	const toBreakdownByYear = (value: unknown) => {
+		if (!value || typeof value !== "object") {
+			return {} as Record<
+				string,
+				{ leader: number | null; member: number | null; combined: number | null }
+			>;
+		}
+
+		const source = value as Record<string, unknown>;
+		const result: Record<
+			string,
+			{ leader: number | null; member: number | null; combined: number | null }
+		> = {};
+
+		for (const [year, breakdown] of Object.entries(source)) {
+			const normalizedYear = String(year ?? "").trim();
+			if (!normalizedYear) {
+				continue;
+			}
+
+			result[normalizedYear] =
+				toBreakdownValue(breakdown) ?? {
+					leader: null,
+					member: null,
+					combined: null,
+				};
+		}
+
+		return result;
+	};
+
+	const toNullableNumberByYear = (value: unknown) => {
+		if (!value || typeof value !== "object") {
+			return {} as Record<string, number | null>;
+		}
+
+		const source = value as Record<string, unknown>;
+		const result: Record<string, number | null> = {};
+
+		for (const [year, rawValue] of Object.entries(source)) {
+			const normalizedYear = String(year ?? "").trim();
+			if (!normalizedYear) {
+				continue;
+			}
+
+			result[normalizedYear] = toNumberOrNull(rawValue);
+		}
+
+		return result;
+	};
+
 	const payload = (await response.json()) as Record<string, unknown>;
+	const departmentMinTime = toNumberOrNull(payload.departmentMinTime ?? payload.department_min_time);
+	const departmentMaxTime = toNumberOrNull(payload.departmentMaxTime ?? payload.department_max_time);
+	const departmentMinTimeByYear = toNullableNumberByYear(
+		payload.departmentMinTimeByYear ?? payload.department_min_time_by_year,
+	);
+	const departmentMaxTimeByYear = toNullableNumberByYear(
+		payload.departmentMaxTimeByYear ?? payload.department_max_time_by_year,
+	);
+	const myCountByYear = toNullableNumberByYear(payload.myCountByYear ?? payload.my_count_by_year);
 	const selectedMetricLabelFromBackend = String(
 		payload.selectedMetricLabel ?? "",
 	).trim();
@@ -686,6 +759,10 @@ export async function fetchInspectionsTimeAnalytics(
 		: [];
 
 	const summaryPivotYears = toStringArray(payload.summaryPivotYears);
+	const myMetricByYearBreakdown = toBreakdownByYear(payload.myMetricByYearBreakdown);
+	const myCountByYearBreakdown = toBreakdownByYear(payload.myCountByYearBreakdown);
+	const myMetricAllYearsBreakdown = toBreakdownValue(payload.myMetricAllYearsBreakdown);
+	const myCountAllYearsBreakdown = toBreakdownValue(payload.myCountAllYearsBreakdown);
 
 	const summaryPivotRows = Array.isArray(payload.summaryPivotRows)
 		? payload.summaryPivotRows
@@ -905,6 +982,12 @@ export async function fetchInspectionsTimeAnalytics(
 						median: toNumberOrNull(source.median),
 						min: toNumberOrNull(source.min),
 						max: toNumberOrNull(source.max),
+						departmentMinTime: toNumberOrNull(
+							source.departmentMinTime ?? source.department_min_time,
+						),
+						departmentMaxTime: toNumberOrNull(
+							source.departmentMaxTime ?? source.department_max_time,
+						),
 						count: toNumber(source.count, 0),
 					};
 				})
@@ -948,10 +1031,14 @@ export async function fetchInspectionsTimeAnalytics(
 					return {
 						kodInspekcji: String(source.kodInspekcji ?? "-"),
 						nazwaPodmiotu: String(source.nazwaPodmiotu ?? "-"),
+						rodzajPodmiotu: String(source.rodzajPodmiotu ?? "-"),
+						typInspekcji: String(source.typInspekcji ?? "-"),
 						inspekcja:
 							source.inspekcja === "K" || source.inspekcja === "W"
 								? source.inspekcja
 								: "-",
+						zakresInspekcji: String(source.zakresInspekcji ?? "-"),
+						inspektorKierujacy: String(source.inspektorKierujacy ?? source.osobaKierujaca ?? "-"),
 						kontrola: String(source.kontrola ?? "-"),
 						rokPoczatku: String(source.rokPoczatku ?? "-"),
 						poczatekInspekcji: String(source.poczatekInspekcji ?? "-"),
@@ -960,8 +1047,21 @@ export async function fetchInspectionsTimeAnalytics(
 						zespol: String(source.zespol ?? "-"),
 						data: String(source.data ?? "-"),
 						czas: String(source.czas ?? "-"),
+						liczbaDniOdKoncaInspekcjiDoDzis: toNullableNumber(
+							source.liczbaDniOdKoncaInspekcjiDoDzis,
+						),
+						wartoscLiczbowaPrzedzialu: toNullableNumber(source.wartoscLiczbowaPrzedzialu),
+						wartoscLiczbowaPrzedzialuAlt: toNullableNumber(
+							source.wartoscLiczbowaPrzedzialuAlt,
+						),
 						statusInspekcjiId: toNullableNumber(source.statusInspekcjiId),
 						statusInspekcji: String(source.statusInspekcji ?? "-").trim() || "-",
+						isLeaderCurrentUser: toBoolean(source.isLeaderCurrentUser),
+						isLeaderInManagerTeam: toBoolean(source.isLeaderInManagerTeam),
+						isMemberCurrentUser: toBoolean(source.isMemberCurrentUser),
+						isMemberInManagerTeam: toBoolean(source.isMemberInManagerTeam),
+						stageGroupCode: String(source.stageGroupCode ?? "").trim().toLowerCase(),
+						stageSubgroupCode: String(source.stageSubgroupCode ?? "").trim().toLowerCase(),
 					};
 				})
 				.filter(
@@ -981,6 +1081,11 @@ export async function fetchInspectionsTimeAnalytics(
 					: params.trendMode,
 			selectedMetric,
 			selectedMetricLabel,
+			departmentMinTime,
+			departmentMaxTime,
+			departmentMinTimeByYear,
+			departmentMaxTimeByYear,
+			myCountByYear,
 			baseCount: toNumber(payload.baseCount, 0),
 			filteredCount: toNumber(payload.filteredCount, 0),
 			alertStatusCounts,
@@ -998,6 +1103,10 @@ export async function fetchInspectionsTimeAnalytics(
 			yearCountByTeamRows,
 			overallColumns,
 			overallRows,
+			myMetricByYearBreakdown,
+			myCountByYearBreakdown,
+			myMetricAllYearsBreakdown,
+			myCountAllYearsBreakdown,
 		},
 	};
 }

@@ -18,6 +18,7 @@ import { normalizeAuthRole } from "@/features/auth/types";
 import { fetchInspectionsTimeAnalytics } from "@/features/reports/api";
 import type {
 	ReportInspectionDetailedRow,
+	TimeReportBreakdownValue,
 	TimeReportOverallColumn,
 	TimeReportOverallRow,
 	TimeReportScatterRow,
@@ -67,6 +68,13 @@ type ChartClickTooltipState =
 			year: number;
 			trend: number | null;
 	  }
+	| {
+			kind: "department";
+			x: number;
+			y: number;
+			year: number;
+			value: number | null;
+	  }
 	| null;
 
 const INSPECTIONS_CHANGED_EVENT = "inspections:changed";
@@ -114,6 +122,25 @@ export function TimeReportPanel({
 	const [yearCountByTeamRows, setYearCountByTeamRows] = useState<TimeReportYearCountByTeamRow[]>([]);
 	const [overallColumns, setOverallColumns] = useState<TimeReportOverallColumn[]>([]);
 	const [overallRows, setOverallRows] = useState<TimeReportOverallRow[]>([]);
+	const [departmentMinTime, setDepartmentMinTime] = useState<number | null>(null);
+	const [departmentMaxTime, setDepartmentMaxTime] = useState<number | null>(null);
+	const [departmentMinTimeByYear, setDepartmentMinTimeByYear] = useState<
+		Record<string, number | null>
+	>({});
+	const [departmentMaxTimeByYear, setDepartmentMaxTimeByYear] = useState<
+		Record<string, number | null>
+	>({});
+	const [myCountByYear, setMyCountByYear] = useState<Record<string, number | null>>({});
+	const [myMetricByYearBreakdown, setMyMetricByYearBreakdown] = useState<
+		Record<string, TimeReportBreakdownValue>
+	>({});
+	const [myCountByYearBreakdown, setMyCountByYearBreakdown] = useState<
+		Record<string, TimeReportBreakdownValue>
+	>({});
+	const [myMetricAllYearsBreakdown, setMyMetricAllYearsBreakdown] =
+		useState<TimeReportBreakdownValue | null>(null);
+	const [myCountAllYearsBreakdown, setMyCountAllYearsBreakdown] =
+		useState<TimeReportBreakdownValue | null>(null);
 	const [selectedMetricLabel, setSelectedMetricLabel] = useState("Średni czas");
 	const [trendRows, setTrendRows] = useState<TimeReportTrendRow[]>([]);
 	const [scatterRows, setScatterRows] = useState<TimeReportScatterRow[]>([]);
@@ -264,6 +291,15 @@ export function TimeReportPanel({
 			setYearCountByTeamRows([]);
 			setOverallColumns([]);
 			setOverallRows([]);
+			setDepartmentMinTime(null);
+			setDepartmentMaxTime(null);
+			setDepartmentMinTimeByYear({});
+			setDepartmentMaxTimeByYear({});
+			setMyCountByYear({});
+			setMyMetricByYearBreakdown({});
+			setMyCountByYearBreakdown({});
+			setMyMetricAllYearsBreakdown(null);
+			setMyCountAllYearsBreakdown(null);
 			setSelectedMetricLabel(trendMode === "average" ? "Średni czas" : "Mediana czasu");
 			setTrendRows([]);
 			setScatterRows([]);
@@ -283,6 +319,15 @@ export function TimeReportPanel({
 		setYearCountByTeamRows(result.data.yearCountByTeamRows);
 		setOverallColumns(result.data.overallColumns);
 		setOverallRows(result.data.overallRows);
+		setDepartmentMinTime(result.data.departmentMinTime);
+		setDepartmentMaxTime(result.data.departmentMaxTime);
+		setDepartmentMinTimeByYear(result.data.departmentMinTimeByYear);
+		setDepartmentMaxTimeByYear(result.data.departmentMaxTimeByYear);
+		setMyCountByYear(result.data.myCountByYear);
+		setMyMetricByYearBreakdown(result.data.myMetricByYearBreakdown);
+		setMyCountByYearBreakdown(result.data.myCountByYearBreakdown);
+		setMyMetricAllYearsBreakdown(result.data.myMetricAllYearsBreakdown);
+		setMyCountAllYearsBreakdown(result.data.myCountAllYearsBreakdown);
 		setSelectedMetricLabel(result.data.selectedMetricLabel);
 		setTrendRows(result.data.trendRows);
 		setScatterRows(result.data.scatterRows);
@@ -453,13 +498,44 @@ export function TimeReportPanel({
 		});
 	}, [scatterRowsWithDisplayNames, yearToIndex]);
 
+	const departmentTrendByYear = useMemo(() => {
+		const toNumeric = (value: string | number | null | undefined) => {
+			if (typeof value === "number" && Number.isFinite(value)) {
+				return value;
+			}
+
+			if (typeof value === "string") {
+				const parsed = Number(value.replace(",", ".").trim());
+				if (Number.isFinite(parsed)) {
+					return parsed;
+				}
+			}
+
+			return null;
+		};
+
+		const departmentRow = summaryPivotRows.find((row) =>
+			row.zespol.trim().toLowerCase().includes("departament"),
+		);
+		if (!departmentRow) {
+			return new Map<number, number | null>();
+		}
+
+		return new Map(
+			Object.entries(departmentRow.values)
+				.map(([year, value]) => [Number(year), toNumeric(value)] as const)
+				.filter(([year]) => Number.isFinite(year)),
+		);
+	}, [summaryPivotRows]);
+
 	const chartTrendData = useMemo(
 		() =>
 			trendRows.map((row) => ({
 				...row,
 				x: yearToIndex.get(row.year) ?? 0,
+				departmentTrend: departmentTrendByYear.get(row.year) ?? null,
 			})),
-		[trendRows, yearToIndex],
+		[departmentTrendByYear, trendRows, yearToIndex],
 	);
 
 	const handleChartBackgroundClick = useCallback(() => {
@@ -486,6 +562,19 @@ export function TimeReportPanel({
 				y,
 				year: point.year,
 				trend: point.trend,
+			});
+		},
+		[],
+	);
+
+	const openDepartmentTooltip = useCallback(
+		(point: { year: number; departmentTrend: number | null }, x: number, y: number) => {
+			setChartClickTooltip({
+				kind: "department",
+				x,
+				y,
+				year: point.year,
+				value: point.departmentTrend,
 			});
 		},
 		[],
@@ -552,11 +641,9 @@ export function TimeReportPanel({
 			}
 
 			return (
-				<circle
+				<path
 					key={trendKey}
-					cx={props.cx}
-					cy={props.cy}
-					r={4}
+					d={`M ${props.cx} ${props.cy - 5} L ${props.cx - 4.5} ${props.cy + 3.5} L ${props.cx + 4.5} ${props.cy + 3.5} Z`}
 					fill="#255087"
 					style={{ cursor: "pointer" }}
 					onClick={(event) => {
@@ -568,6 +655,53 @@ export function TimeReportPanel({
 		},
 		[openTrendTooltip],
 	);
+
+	const renderDepartmentTrendDot = useCallback((rawProps: unknown) => {
+		const props = rawProps as {
+			cx?: number;
+			cy?: number;
+			payload?: { year: number; departmentTrend?: number | null };
+			index?: number;
+		};
+		const key = `department-trend-${props.index ?? "unknown"}`;
+		if (
+			typeof props.cx !== "number" ||
+			typeof props.cy !== "number" ||
+			!props.payload ||
+			props.payload.departmentTrend === null ||
+			props.payload.departmentTrend === undefined
+		) {
+			return <g key={key} />;
+		}
+
+		return (
+			<rect
+				key={key}
+				x={props.cx - 4}
+				y={props.cy - 4}
+				width={8}
+				height={8}
+				fill="#3f6ea8"
+				rx={1}
+				style={{ cursor: "pointer" }}
+				onMouseEnter={() => {
+					openDepartmentTooltip(
+						{
+							year: props.payload?.year ?? 0,
+							departmentTrend: props.payload?.departmentTrend ?? null,
+						},
+						props.cx as number,
+						props.cy as number,
+					);
+				}}
+				onMouseLeave={() => {
+					setChartClickTooltip((previous) =>
+						previous?.kind === "department" ? null : previous,
+					);
+				}}
+			/>
+		);
+	}, [openDepartmentTooltip]);
 
 	const shouldEnableChartScroll = useMemo(
 		() => yearBuckets.length > CHART_SCROLL_THRESHOLD_YEARS,
@@ -592,11 +726,34 @@ export function TimeReportPanel({
 	}, [yearBuckets]);
 
 	const yAxisDomain = useMemo<[number, number]>(() => {
-		if (scatterRowsWithDisplayNames.length === 0) {
+		const scatterValues = scatterRowsWithDisplayNames.map((point) => point.time);
+		const departmentExtremes =
+			departmentMinTime !== null && departmentMaxTime !== null
+				? [departmentMinTime, departmentMaxTime]
+				: [];
+		const departmentYearExtremes = [
+			...Object.values(departmentMinTimeByYear),
+			...Object.values(departmentMaxTimeByYear),
+		].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+		const trendExtremes = chartTrendData.flatMap((point) => {
+			const minValue = point.departmentMinTime ?? point.min;
+			const maxValue = point.departmentMaxTime ?? point.max;
+			if (minValue === null || maxValue === null) {
+				return [] as number[];
+			}
+
+			return [minValue, maxValue];
+		});
+		const values = [
+			...scatterValues,
+			...departmentExtremes,
+			...departmentYearExtremes,
+			...trendExtremes,
+		];
+
+		if (values.length === 0) {
 			return [0, 10];
 		}
-
-		const values = scatterRowsWithDisplayNames.map((point) => point.time);
 		const minValue = Math.min(...values);
 		const maxValue = Math.max(...values);
 
@@ -607,16 +764,31 @@ export function TimeReportPanel({
 		const range = maxValue - minValue;
 		const padding = Math.max(6, Math.round(range * 0.12));
 		return [Math.max(0, minValue - padding), maxValue + padding];
-	}, [scatterRowsWithDisplayNames]);
+	}, [
+		chartTrendData,
+		departmentMaxTime,
+		departmentMaxTimeByYear,
+		departmentMinTime,
+		departmentMinTimeByYear,
+		scatterRowsWithDisplayNames,
+	]);
 
 	const yearRangeAreas = useMemo(() => {
 		return chartTrendData.flatMap((yearData) => {
-			if (yearData.min === null || yearData.max === null) {
+			const yearKey = String(yearData.year);
+			const minByYear = departmentMinTimeByYear[yearKey] ?? null;
+			const maxByYear = departmentMaxTimeByYear[yearKey] ?? null;
+			const minSource =
+				minByYear ?? departmentMinTime ?? yearData.departmentMinTime ?? yearData.min;
+			const maxSource =
+				maxByYear ?? departmentMaxTime ?? yearData.departmentMaxTime ?? yearData.max;
+
+			if (minSource === null || maxSource === null) {
 				return [];
 			}
 
-			const y1 = Math.min(yearData.min, yearData.max);
-			const y2 = Math.max(yearData.min, yearData.max);
+			const y1 = Math.min(minSource, maxSource);
+			const y2 = Math.max(minSource, maxSource);
 			const top = y1 === y2 ? y2 + 1 : y2;
 
 			return {
@@ -627,7 +799,13 @@ export function TimeReportPanel({
 				y2: top,
 			};
 		});
-	}, [chartTrendData]);
+	}, [
+		chartTrendData,
+		departmentMaxTime,
+		departmentMaxTimeByYear,
+		departmentMinTime,
+		departmentMinTimeByYear,
+	]);
 
 	const histogramAreas = useMemo(() => {
 		if (yearRangeAreas.length === 0 || scatterRowsWithDisplayNames.length === 0) {
@@ -734,10 +912,79 @@ export function TimeReportPanel({
 		[formatMetricValue],
 	);
 
+		const formatCountCellValue = useCallback((value: string | number | null) => {
+			if (value === null || value === undefined || value === "") {
+				return "-";
+			}
+
+			if (typeof value === "number") {
+				return Number.isInteger(value) ? String(value) : String(value);
+			}
+
+			const normalized = value.trim();
+			if (!normalized) {
+				return "-";
+			}
+
+			const parsed = Number(normalized.replace(",", "."));
+			if (Number.isFinite(parsed)) {
+				return Number.isInteger(parsed) ? String(parsed) : String(parsed);
+			}
+
+			return normalized;
+		}, []);
+
+		const formatMetricBreakdownPair = useCallback(
+			(breakdown?: TimeReportBreakdownValue | null) => {
+				const leader = breakdown?.leader ?? null;
+				const member = breakdown?.member ?? null;
+				const combined = breakdown?.combined ?? null;
+				const hasLeader = leader !== null;
+				const hasMember = member !== null;
+
+				if (hasLeader || hasMember) {
+					return `${hasLeader ? formatMetricValue(leader) : "-"} / ${
+						hasMember ? formatMetricValue(member) : "-"
+					}`;
+				}
+
+				if (combined !== null) {
+					return formatMetricValue(combined);
+				}
+
+				return "-";
+			},
+			[formatMetricValue],
+		);
+
+		const formatCountBreakdownPair = useCallback(
+			(breakdown?: TimeReportBreakdownValue | null) => {
+				const leader = breakdown?.leader ?? null;
+				const member = breakdown?.member ?? null;
+				const combined = breakdown?.combined ?? null;
+				const hasLeader = leader !== null;
+				const hasMember = member !== null;
+
+				if (hasLeader || hasMember) {
+					return `${hasLeader ? formatCountCellValue(leader) : "-"} / ${
+						hasMember ? formatCountCellValue(member) : "-"
+					}`;
+				}
+
+				if (combined !== null) {
+					return formatCountCellValue(combined);
+				}
+
+				return "-";
+			},
+			[formatCountCellValue],
+		);
+
 	const sortedDetailRows = useMemo(
 		() => detailRowsWithDisplayNames,
 		[detailRowsWithDisplayNames],
 	);
+	const metricLegendLabel = trendMode === "average" ? "średni czas" : "mediana czasu";
 	const shouldScrollSummaryTable = summaryPivotRows.length > 10;
 	const metricColumnKey = trendMode === "average" ? "average" : "median";
 	const metricColumnLabel = trendMode === "average" ? "Średnia" : "Mediana";
@@ -754,6 +1001,63 @@ export function TimeReportPanel({
 			label: key,
 		}));
 	}, [summaryPivotYears]);
+
+	const displaySummaryPivotRows = useMemo(() => {
+		if (isManagerView) {
+			return summaryPivotRows;
+		}
+
+		const hasMetricBreakdown = summaryPivotColumns.some((column) => {
+			const breakdown = myMetricByYearBreakdown[column.key];
+			return (
+				breakdown !== undefined &&
+				(breakdown.leader !== null ||
+					breakdown.member !== null ||
+					breakdown.combined !== null)
+			);
+		});
+
+		if (!hasMetricBreakdown) {
+			return summaryPivotRows;
+		}
+
+		const normalizeLabel = (value: string) => value.trim().toLowerCase();
+		const isDepartment = (value: string) => normalizeLabel(value).includes("departament");
+		const isMyTime = (value: string) => {
+			const normalized = normalizeLabel(value);
+			return normalized.includes("mój czas") || normalized.includes("moj czas");
+		};
+
+		const departmentRow = summaryPivotRows.find((row) => isDepartment(row.zespol)) ?? null;
+		const teamRow =
+			summaryPivotRows.find(
+				(row) => !isDepartment(row.zespol) && !isMyTime(row.zespol),
+			) ?? null;
+
+		const myTimeValues: Record<string, string | number | null> = {};
+		for (const column of summaryPivotColumns) {
+			const breakdown = myMetricByYearBreakdown[column.key];
+			myTimeValues[column.key] = formatMetricBreakdownPair(breakdown);
+		}
+
+		const rows: TimeReportSummaryPivotRow[] = [];
+		if (departmentRow) {
+			rows.push(departmentRow);
+		}
+		if (teamRow) {
+			rows.push(teamRow);
+		}
+
+		rows.push({ zespol: "Mój czas", values: myTimeValues });
+
+		return rows;
+	}, [
+		formatMetricBreakdownPair,
+		isManagerView,
+		myMetricByYearBreakdown,
+		summaryPivotColumns,
+		summaryPivotRows,
+	]);
 
 	const resolvedYearCountColumns = useMemo(() => {
 		if (yearCountByTeamColumns.length > 0) {
@@ -786,6 +1090,116 @@ export function TimeReportPanel({
 			values: row.values,
 		}));
 	}, [inspectionType, yearCountByTeamRows, yearCountRows]);
+
+	const orderedYearCountRows = useMemo(() => {
+		if (isManagerView) {
+			return resolvedYearCountRows;
+		}
+
+		const normalizeLabel = (value: string) => value.trim().toLowerCase();
+		const isDepartment = (value: string) => normalizeLabel(value).includes("departament");
+		const isMyCount = (value: string) => {
+			const normalized = normalizeLabel(value);
+			return (
+				normalized.includes("mój czas") ||
+				normalized.includes("moj czas") ||
+				normalized.includes("moja liczba")
+			);
+		};
+		const isTeamLike = (value: string) => !isDepartment(value) && !isMyCount(value);
+		const hasCountBreakdown = resolvedYearCountColumns.some((year) => {
+			const breakdown = myCountByYearBreakdown[year];
+			return (
+				breakdown !== undefined &&
+				(breakdown.leader !== null ||
+					breakdown.member !== null ||
+					breakdown.combined !== null)
+			);
+		});
+
+		const departmentRow =
+			resolvedYearCountRows.find((row) => isDepartment(row.label)) ?? null;
+		const myCountRowFromApi =
+			resolvedYearCountRows.find((row) => isMyCount(row.label)) ?? null;
+
+		const preferredTeamLabel =
+			summaryPivotRows.find((row) => isTeamLike(row.zespol))?.zespol ?? null;
+		const teamRow = preferredTeamLabel
+			? resolvedYearCountRows.find(
+					(row) => normalizeLabel(row.label) === normalizeLabel(preferredTeamLabel),
+				) ?? null
+			: resolvedYearCountRows.find((row) => isTeamLike(row.label)) ?? null;
+
+		const inferredMyCountValues: Record<string, string | number | null> = {};
+		for (const year of resolvedYearCountColumns) {
+			inferredMyCountValues[year] = 0;
+		}
+
+		for (const row of detailRows) {
+			const year = String(row.rokPoczatku ?? "").trim();
+			if (!year || !resolvedYearCountColumns.includes(year)) {
+				continue;
+			}
+
+			if (row.isMemberCurrentUser || row.isLeaderCurrentUser) {
+				const currentValue = inferredMyCountValues[year];
+				const numericCurrentValue = typeof currentValue === "number" ? currentValue : 0;
+				inferredMyCountValues[year] = numericCurrentValue + 1;
+			}
+		}
+
+		const myCountRow =
+			myCountRowFromApi ??
+			{
+				label: "Moja liczba",
+				values:
+					Object.keys(myCountByYear).length > 0
+						? resolvedYearCountColumns.reduce<Record<string, string | number | null>>(
+								(accumulator, year) => {
+									accumulator[year] = myCountByYear[year] ?? 0;
+									return accumulator;
+								},
+								{},
+							)
+						: inferredMyCountValues,
+			};
+
+		const prioritized: Array<(typeof resolvedYearCountRows)[number]> = [];
+		if (departmentRow) {
+			prioritized.push(departmentRow);
+		}
+		if (teamRow) {
+			prioritized.push(teamRow);
+		}
+
+		if (hasCountBreakdown) {
+			const myCountValues: Record<string, string | number | null> = {};
+			for (const year of resolvedYearCountColumns) {
+				myCountValues[year] = formatCountBreakdownPair(myCountByYearBreakdown[year]);
+			}
+
+			prioritized.push({
+				label: "Moja liczba",
+				values: myCountValues,
+			});
+			return prioritized;
+		}
+
+		if (myCountRow) {
+			prioritized.push(myCountRow);
+		}
+
+		return prioritized;
+	}, [
+		detailRows,
+		formatCountBreakdownPair,
+		isManagerView,
+		myCountByYear,
+		myCountByYearBreakdown,
+		resolvedYearCountColumns,
+		resolvedYearCountRows,
+		summaryPivotRows,
+	]);
 
 	const resolvedOverallColumns = useMemo(() => {
 		if (overallColumns.length > 0) {
@@ -846,8 +1260,95 @@ export function TimeReportPanel({
 		}));
 	}, [metricColumnKey, overallRows, summaryPivotRows]);
 
+	const displayOverallRows = useMemo(() => {
+		if (isManagerView) {
+			return resolvedOverallRows;
+		}
+
+		const hasAllYearsBreakdown =
+			myMetricAllYearsBreakdown !== null || myCountAllYearsBreakdown !== null;
+		if (!hasAllYearsBreakdown) {
+			return resolvedOverallRows;
+		}
+
+		const normalizeLabel = (value: string) => value.trim().toLowerCase();
+		const isDepartment = (value: string) => normalizeLabel(value).includes("departament");
+		const isMyRow = (value: string) => {
+			const normalized = normalizeLabel(value);
+			return (
+				normalized.includes("mój czas") ||
+				normalized.includes("moj czas") ||
+				normalized.includes("moja liczba")
+			);
+		};
+
+		const departmentRow =
+			resolvedOverallRows.find((row) => isDepartment(String(row.zespol ?? ""))) ?? null;
+		const teamRow =
+			resolvedOverallRows.find(
+				(row) =>
+					!isDepartment(String(row.zespol ?? "")) &&
+					!isMyRow(String(row.zespol ?? "")),
+			) ?? null;
+
+		const createSplitRow = (
+			label: string,
+			metricValue: string | number | null,
+			countValue: string | number | null,
+		) => {
+			const row: TimeReportOverallRow = {};
+			for (const column of resolvedOverallColumns) {
+				if (column.key === "zespol") {
+					row[column.key] = label;
+					continue;
+				}
+
+				if (column.key === "count") {
+					row[column.key] = countValue;
+					continue;
+				}
+
+				if (column.key === metricColumnKey || column.key === "metric") {
+					row[column.key] = metricValue;
+					continue;
+				}
+
+				row[column.key] = null;
+			}
+
+			return row;
+		};
+
+		const rows: TimeReportOverallRow[] = [];
+		if (departmentRow) {
+			rows.push(departmentRow);
+		}
+		if (teamRow) {
+			rows.push(teamRow);
+		}
+
+		rows.push(
+			createSplitRow(
+				"Mój czas",
+				formatMetricBreakdownPair(myMetricAllYearsBreakdown),
+				formatCountBreakdownPair(myCountAllYearsBreakdown),
+			),
+		);
+
+		return rows;
+	}, [
+		formatCountBreakdownPair,
+		formatMetricBreakdownPair,
+		isManagerView,
+		metricColumnKey,
+		myCountAllYearsBreakdown,
+		myMetricAllYearsBreakdown,
+		resolvedOverallColumns,
+		resolvedOverallRows,
+	]);
+
 	const hasYearCountData =
-		resolvedYearCountColumns.length > 0 && resolvedYearCountRows.length > 0;
+		resolvedYearCountColumns.length > 0 && orderedYearCountRows.length > 0;
 
 	return (
 		<section className="flex h-[calc(100vh-4.4rem)] min-h-0 flex-col space-y-4 overflow-hidden rounded-2xl border border-slate-700/70 bg-[#101f39] p-5 shadow-[0_18px_44px_rgba(2,8,23,0.34)]">
@@ -1035,6 +1536,17 @@ export function TimeReportPanel({
 					>
 						Zestawienie czasu
 					</button>
+					<button
+						type="button"
+						onClick={() => setActiveRibbonTab("visualization")}
+						className={`-mb-px inline-flex h-9 items-center rounded-t-md border px-3.5 font-semibold text-sm transition-colors ${
+							activeRibbonTab === "visualization"
+								? "border-[#8fb6ee] border-b-[#101f39] bg-[#f8fbff] text-slate-900"
+								: "border-transparent bg-transparent text-white hover:bg-[#18365a]/35 hover:text-white"
+						}`}
+					>
+						Wizualizacja czasów
+					</button>
 				</div>
 			)}
 
@@ -1099,9 +1611,6 @@ export function TimeReportPanel({
 					<h3 className="font-semibold text-[#dce9fa] text-sm">
 						{isManagerView ? yearlyTimeSectionTitle : "2. Zestawienie statystyczne czasu"}
 					</h3>
-					{!isManagerView ? (
-						<p className="text-[#a7c0df] text-xs">{yearlyTimeSectionTitle}</p>
-					) : null}
 				</div>
 				<div
 					className={`subtle-horizontal-scroll subtle-vertical-scroll table-scroll-gutter-right w-full max-w-full overflow-x-auto rounded-xl border border-slate-300 bg-white shadow-[0_10px_28px_rgba(2,8,23,0.18)] ${
@@ -1127,7 +1636,7 @@ export function TimeReportPanel({
 					</thead>
 
 					<tbody>
-						{summaryPivotRows.map((row, index) => (
+						{displaySummaryPivotRows.map((row, index) => (
 							<tr
 								key={`${row.zespol}-${index}`}
 								className={`border-slate-200 border-b last:border-b-0 ${
@@ -1146,7 +1655,7 @@ export function TimeReportPanel({
 							</tr>
 						))}
 
-						{!isLoading && (summaryPivotRows.length === 0 || summaryPivotColumns.length === 0) ? (
+						{!isLoading && (displaySummaryPivotRows.length === 0 || summaryPivotColumns.length === 0) ? (
 							<tr>
 								<td colSpan={Math.max(2, summaryPivotColumns.length + 1)} className="px-3 py-6 text-center text-slate-500 text-sm">
 									Brak danych do agregacji.
@@ -1165,165 +1674,6 @@ export function TimeReportPanel({
 				</table>
 				</div>
 			</div>
-
-			{!isManagerView ? (
-				<div className="space-y-2">
-					<div className="px-1">
-						<h3 className="font-semibold text-[#dce9fa] text-sm">Wykres</h3>
-					</div>
-
-					<div className="relative rounded-xl border border-[#becadd] bg-[#f8fbff] p-3 shadow-[0_10px_28px_rgba(2,8,23,0.18)]">
-						{isLoading ? <TableLoadingOverlay /> : null}
-						<div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-							<h3 className="font-semibold text-[#133259] text-sm">
-								{yearlyTimeSectionTitle}
-							</h3>
-							<div className="flex flex-wrap items-center gap-3 text-[#33577f] text-xs">
-								<label className="inline-flex cursor-pointer items-center gap-1.5">
-									<input
-										type="checkbox"
-										checked={showHistogram}
-										onChange={(event) => setShowHistogram(event.target.checked)}
-										className="h-3.5 w-3.5"
-									/>
-									<span>Dodaj histogram</span>
-								</label>
-								<label className="inline-flex cursor-pointer items-center gap-1.5">
-									<input
-										type="checkbox"
-										checked={showScatterPoints}
-										onChange={(event) => setShowScatterPoints(event.target.checked)}
-										className="h-3.5 w-3.5"
-									/>
-									<span>Dodaj punkty</span>
-								</label>
-							</div>
-						</div>
-
-						{scatterRowsWithDisplayNames.length > 0 ? (
-							<div
-								className={`h-[30rem] w-full ${
-									shouldEnableChartScroll
-										? "subtle-horizontal-scroll overflow-x-auto overflow-y-hidden"
-										: "overflow-hidden"
-								}`}
-							>
-								<div
-									className="relative h-full"
-									onClick={handleChartBackgroundClick}
-									style={
-										shouldEnableChartScroll
-											? { minWidth: `${chartScrollableWidthPx}px` }
-											: undefined
-									}
-								>
-								<ResponsiveContainer width="100%" height="100%">
-									<ComposedChart
-										data={chartTrendData}
-										margin={{ top: 8, right: 12, left: 8, bottom: 28 }}
-									>
-										<CartesianGrid stroke="#d5deea" strokeDasharray="3 3" />
-										{yearRangeAreas.map((area) => (
-											<ReferenceArea
-												key={`shell-summary-${area.year}`}
-												x1={area.x - YEAR_BOX_HALF_WIDTH}
-												x2={area.x + YEAR_BOX_HALF_WIDTH}
-												y1={area.y1}
-												y2={area.y2}
-												fill="#8dbaf5"
-												fillOpacity={0.24}
-												stroke="#3f6ea8"
-												strokeOpacity={0.75}
-											/>
-										))}
-										{showHistogram
-											? histogramAreas.map((area) => (
-												<ReferenceArea
-													key={area.key}
-													x1={area.x1}
-													x2={area.x2}
-													y1={area.y1}
-													y2={area.y2}
-													fill="#3f7cc5"
-													fillOpacity={area.opacity}
-													stroke="#2f5f95"
-													strokeOpacity={0.22}
-												/>
-											))
-											: null}
-										<XAxis
-											type="number"
-											dataKey="x"
-											allowDecimals={false}
-											tick={{ fill: "#27486d", fontSize: 12 }}
-											ticks={yearBuckets.map((_, index) => index)}
-											tickFormatter={(value) => String(yearBuckets[value] ?? "")}
-											domain={xAxisDomain}
-											label={{ value: "Rok", position: "bottom", offset: 8, fill: "#27486d" }}
-										/>
-										<YAxis
-											type="number"
-											allowDecimals={false}
-											tick={{ fill: "#27486d", fontSize: 12 }}
-											domain={yAxisDomain}
-											label={{ value: "Czas (dni)", angle: -90, position: "insideLeft", fill: "#27486d" }}
-										/>
-										<Line
-											type="monotone"
-											dataKey="trend"
-											stroke="#255087"
-											strokeWidth={3}
-											dot={renderTrendDot}
-											connectNulls={false}
-											isAnimationActive={false}
-										/>
-										{showScatterPoints ? (
-											<Scatter
-												data={chartPointsData}
-												dataKey="time"
-												fill="#5d8fc9"
-													shape={renderScatterPoint}
-											/>
-										) : null}
-									</ComposedChart>
-								</ResponsiveContainer>
-								{chartClickTooltip ? (
-									<div
-										className="pointer-events-none absolute z-20 max-w-72 rounded-md border border-[#b6c6dc] bg-white px-3 py-2 text-[#1a3559] text-xs shadow-[0_8px_18px_rgba(2,8,23,0.18)]"
-										style={{
-											left: `${chartClickTooltip.x + 10}px`,
-											top: `${Math.max(8, chartClickTooltip.y - 12)}px`,
-										}}
-									>
-										{chartClickTooltip.kind === "point" ? (
-											<>
-												<p><strong>Nazwa podmiotu:</strong> {chartClickTooltip.data.nazwaPodmiotu}</p>
-												<p><strong>Kontrola:</strong> {chartClickTooltip.data.kontrola}</p>
-												<p><strong>Osoba kierująca:</strong> {chartClickTooltip.data.osobaKierujaca}</p>
-												<p><strong>Zespół:</strong> {chartClickTooltip.data.zespol}</p>
-												<p><strong>Czas:</strong> {chartClickTooltip.data.time}</p>
-											</>
-										) : (
-											<>
-												<p><strong>Rok:</strong> {chartClickTooltip.year}</p>
-												<p>
-													<strong>{trendMode === "average" ? "Średnia" : "Mediana"}:</strong>{" "}
-													{chartClickTooltip.trend === null ? "-" : chartClickTooltip.trend.toFixed(1)}
-												</p>
-											</>
-										)}
-									</div>
-								) : null}
-								</div>
-							</div>
-						) : (
-							<p className="py-8 text-center text-[#4b6484] text-sm">
-								Brak danych liczbowych czasu do wyświetlenia wykresu.
-							</p>
-						)}
-					</div>
-				</div>
-			) : null}
 
 			<div className="space-y-2">
 				<div className="px-1">
@@ -1349,7 +1699,7 @@ export function TimeReportPanel({
 						</thead>
 
 						<tbody>
-							{resolvedYearCountRows.map((row, index) => (
+							{orderedYearCountRows.map((row, index) => (
 								<tr
 									key={`year-count-${row.label}-${index}`}
 									className="border-slate-200 border-b bg-white last:border-b-0"
@@ -1360,7 +1710,7 @@ export function TimeReportPanel({
 											key={`year-count-${row.label}-${year}`}
 											className="min-w-24 px-3 py-2.5 text-slate-900"
 										>
-											{formatSummaryCellValue(row.values[year] ?? 0)}
+											{formatCountCellValue(row.values[year] ?? null)}
 										</td>
 									))}
 								</tr>
@@ -1408,7 +1758,7 @@ export function TimeReportPanel({
 						</thead>
 
 						<tbody>
-							{resolvedOverallRows.map((row, index) => {
+							{displayOverallRows.map((row, index) => {
 								const teamValue = String(row.zespol ?? "");
 								const rowClassName =
 									teamValue === "Departament"
@@ -1419,14 +1769,16 @@ export function TimeReportPanel({
 									<tr key={`overall-${index}`} className={rowClassName}>
 										{resolvedOverallColumns.map((column) => (
 											<td key={`overall-${index}-${column.key}`} className="min-w-24 px-3 py-2.5 text-slate-900">
-												{formatSummaryCellValue(row[column.key] ?? null)}
+												{column.key === "count"
+													? formatCountCellValue(row[column.key] ?? null)
+													: formatSummaryCellValue(row[column.key] ?? null)}
 											</td>
 										))}
 									</tr>
 								);
 							})}
 
-							{!isLoading && (resolvedOverallRows.length === 0 || resolvedOverallColumns.length === 0) ? (
+							{!isLoading && (displayOverallRows.length === 0 || resolvedOverallColumns.length === 0) ? (
 								<tr>
 									<td colSpan={Math.max(1, resolvedOverallColumns.length)} className="px-3 py-6 text-center text-slate-500 text-sm">
 										Brak danych do zestawienia ogólnego.
@@ -1448,7 +1800,7 @@ export function TimeReportPanel({
 				</div>
 			) : null}
 
-			{isManagerView && activeRibbonTab === "visualization" ? (
+			{activeRibbonTab === "visualization" ? (
 				<div className="space-y-2">
 					<div className="px-1">
 						<h3 className="font-semibold text-[#dce9fa] text-sm">Wykres porównawczy</h3>
@@ -1461,6 +1813,22 @@ export function TimeReportPanel({
 							{yearlyTimeSectionTitle}
 						</h3>
 						<div className="flex flex-wrap items-center gap-3 text-[#33577f] text-xs">
+							<div className="mr-1 inline-flex items-center gap-3 rounded-md bg-[#eef4fc] px-2 py-1 text-[#294c76]">
+								{!isManagerView ? (
+									<span className="inline-flex items-center gap-1">
+										<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+											<path d="M5 1 L1.5 8 H8.5 Z" fill="#255087" />
+										</svg>
+										<span>Mój {metricLegendLabel}</span>
+									</span>
+								) : null}
+								<span className="inline-flex items-center gap-1">
+									<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+										<rect x="1.5" y="1.5" width="7" height="7" fill="#3f6ea8" />
+									</svg>
+									<span>{metricLegendLabel} departamentu</span>
+								</span>
+							</div>
 							<label className="inline-flex cursor-pointer items-center gap-1.5">
 								<input
 									type="checkbox"
@@ -1550,6 +1918,16 @@ export function TimeReportPanel({
 										domain={yAxisDomain}
 										label={{ value: "Czas (dni)", angle: -90, position: "insideLeft", fill: "#27486d" }}
 									/>
+										<Line
+											type="monotone"
+											dataKey="departmentTrend"
+											stroke="#3f6ea8"
+											strokeDasharray="5 5"
+											strokeWidth={2}
+											dot={renderDepartmentTrendDot}
+											connectNulls={false}
+											isAnimationActive={false}
+										/>
 									<Line
 										type="monotone"
 										dataKey="trend"
@@ -1585,12 +1963,20 @@ export function TimeReportPanel({
 											<p><strong>Zespół:</strong> {chartClickTooltip.data.zespol}</p>
 											<p><strong>Czas:</strong> {chartClickTooltip.data.time}</p>
 										</>
-									) : (
+									) : chartClickTooltip.kind === "trend" ? (
 										<>
 											<p><strong>Rok:</strong> {chartClickTooltip.year}</p>
 											<p>
 												<strong>{trendMode === "average" ? "Średnia" : "Mediana"}:</strong>{" "}
 												{chartClickTooltip.trend === null ? "-" : chartClickTooltip.trend.toFixed(1)}
+											</p>
+										</>
+									) : (
+										<>
+											<p><strong>Rok:</strong> {chartClickTooltip.year}</p>
+											<p>
+												<strong>{trendMode === "average" ? "Średnia departamentu" : "Mediana departamentu"}:</strong>{" "}
+												{chartClickTooltip.value === null ? "-" : chartClickTooltip.value.toFixed(1)}
 											</p>
 										</>
 									)}
