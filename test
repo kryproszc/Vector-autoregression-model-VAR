@@ -84,6 +84,8 @@ class InspectionsTimeAnalyticsResponse(BaseModel):
 	filteredCount: int
 	departmentMinTime: int | None = None
 	departmentMaxTime: int | None = None
+	departmentMinTimeByYear: dict[str, int] = {}
+	departmentMaxTimeByYear: dict[str, int] = {}
 	myCountByYear: dict[str, int] = {}
 	myCountByYearBreakdown: dict[str, dict[str, int]] = {}
 	myMetricByYearBreakdown: dict[str, dict[str, float]] = {}
@@ -947,6 +949,24 @@ def get_inspections_time_analytics(
 	department_min_time = min(department_times_for_bounds) if department_times_for_bounds else None
 	department_max_time = max(department_times_for_bounds) if department_times_for_bounds else None
 
+	department_time_by_year_groups: dict[str, list[int]] = defaultdict(list)
+	for row in department_min_max_source:
+		year_key = str(row.get("rokPoczatku") or "").strip()
+		if not year_key:
+			continue
+		department_time_by_year_groups[year_key].append(int(row["czas"]))
+
+	department_min_time_by_year = {
+		year: int(min(values))
+		for year, values in sorted(department_time_by_year_groups.items(), key=lambda item: item[0])
+		if values
+	}
+	department_max_time_by_year = {
+		year: int(max(values))
+		for year, values in sorted(department_time_by_year_groups.items(), key=lambda item: item[0])
+		if values
+	}
+
 	agg_filtered_rows = [row for row in filtered_rows if _is_valid_for_aggregations(row)]
 	department_scope_rows = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
 
@@ -1398,6 +1418,8 @@ def get_inspections_time_analytics(
 		"filteredCount": len(filtered_rows),
 		"departmentMinTime": department_min_time,
 		"departmentMaxTime": department_max_time,
+		"departmentMinTimeByYear": department_min_time_by_year,
+		"departmentMaxTimeByYear": department_max_time_by_year,
 		"myCountByYear": my_count_by_year,
 		"myCountByYearBreakdown": my_count_by_year_breakdown,
 		"myMetricByYearBreakdown": my_metric_by_year_breakdown,
