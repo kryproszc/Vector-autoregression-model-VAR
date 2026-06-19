@@ -1,6 +1,6 @@
 "use client";
 
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Eye, Pencil, Plus, Trash2 } from "lucide-react";
 import {
 	type SetStateAction,
 	useCallback,
@@ -31,6 +31,7 @@ import {
 } from "@/features/inspections/components/inspections-panel.utils";
 import { InspectionsDataTable } from "@/features/inspections/components/inspections-panel/InspectionsDataTable";
 import { InspectionsFormModal } from "@/features/inspections/components/inspections-panel/InspectionsFormModal";
+import { InspectionsPreviewModal } from "@/features/inspections/components/inspections-panel/InspectionsPreviewModal";
 import { useInspectionsTableState } from "@/features/inspections/hooks/useInspectionsTableState";
 import { fetchObligatingDecisions } from "@/features/obligating-decisions/api";
 import { fetchRecommendations } from "@/features/recommendations/api";
@@ -44,8 +45,8 @@ import { TablePanelToolbar } from "@/shared/components/table/TablePanelToolbar";
 import { useInactivityTimeout } from "@/shared/hooks/useInactivityTimeout";
 import { useRecordLock } from "@/shared/hooks/useRecordLock";
 
-const INACTIVITY_TIMEOUT_MS = 60_000; // 1 minuta (do testów)
-const INACTIVITY_WARNING_MS = 30_000; // 30 sekund ostrzeżenia
+const INACTIVITY_TIMEOUT_MS = 5 * 60_000; // 5 minut
+const INACTIVITY_WARNING_MS = 60_000; // 1 minuta ostrzeżenia
 const TABLE_PAGE_SIZE_OPTIONS = [20, 30, 50, 70, 100];
 const INSPECTIONS_COLUMN_WIDTHS_STORAGE_PREFIX =
 	"triangle.ui.inspections.column-widths";
@@ -101,6 +102,8 @@ import { toDateInputValue, toDateList } from "@/shared/utils/date";
 
 
 const INSPECTIONS_API_URL = "/api/structure/inspections";
+const INSPECTIONS_DEFAULT_SORT_BY = "poczatekInspekcji";
+const INSPECTIONS_DEFAULT_SORT_ORDER = "asc";
 const RECOMMENDATIONS_AVAILABLE_INSPECTIONS_API_URL =
 	"/api/recommendations/available-inspections";
 const SANCTIONS_AVAILABLE_INSPECTIONS_API_URL =
@@ -172,6 +175,11 @@ type InspectionDomainError = {
 	memberUserId: number | null;
 };
 
+type InspectionStatusValidationViolation = {
+	violationCodeId: number | null;
+	message: string;
+};
+
 type InspectionNoLetterFlags = {
 	brakDataDoreczeniaPisma: boolean;
 	brakDataPismaZastrzezenia: boolean;
@@ -191,6 +199,7 @@ type InspectionNameVariantColumnKey =
 	| "nazwaPodmiotu"
 	| "typInspekcji"
 	| "zakresInspekcji"
+	| "rynek"
 	| "rodzajPodmiotu"
 	| "status";
 
@@ -207,6 +216,7 @@ const INSPECTION_NAME_VARIANT_COLUMN_KEYS: InspectionNameVariantColumnKey[] = [
 	"nazwaPodmiotu",
 	"typInspekcji",
 	"zakresInspekcji",
+	"rynek",
 	"rodzajPodmiotu",
 	"status",
 ];
@@ -220,6 +230,7 @@ const DEFAULT_INSPECTION_NAME_VARIANTS: InspectionNameVariantByColumn = {
 	nazwaPodmiotu: "short",
 	typInspekcji: "full",
 	zakresInspekcji: "full",
+	rynek: "full",
 	rodzajPodmiotu: "full",
 	status: "full",
 };
@@ -333,6 +344,126 @@ async function readInspectionDomainError(
 			memberUserId:
 				Number.isFinite(memberNumeric) && memberNumeric > 0 ? memberNumeric : null,
 		};
+	} catch {
+		return null;
+	}
+}
+
+function mapInspectionStatusViolationMessage(violationCodeId: number | null) {
+	switch (violationCodeId) {
+		case 1001:
+			return "Brak wymaganego zalecenia.";
+		case 1002:
+			return "Są zalecenia, a powinno ich nie być.";
+		case 1003:
+			return "Brak wymaganego wniosku sankcyjnego.";
+		case 1004:
+			return "Jest wniosek sankcyjny, a powinno go nie być.";
+		default:
+			return "Nie można zapisać rekordu z powodu niespełnionych relacji dla wybranego statusu.";
+	}
+}
+
+async function readInspectionStatusValidationViolations(
+	response: Response,
+): Promise<InspectionStatusValidationViolation[] | null> {
+	const contentType = response.headers.get("content-type") ?? "";
+	if (!contentType.includes("application/json")) {
+		return null;
+	}
+
+	try {
+		const payload = (await response.clone().json()) as Record<string, unknown>;
+		const detailSource = payload.detail;
+		const detailObject =
+			detailSource &&
+			typeof detailSource === "object" &&
+			!Array.isArray(detailSource)
+				? (detailSource as Record<string, unknown>)
+				: payload;
+
+		const code =
+			typeof detailObject.code === "string"
+				? detailObject.code.trim().toUpperCase()
+				: typeof payload.code === "string"
+					? payload.code.trim().toUpperCase()
+					: "";
+		const codeIdCandidate = detailObject.codeId ?? payload.codeId;
+		const codeId =
+			typeof codeIdCandidate === "number"
+				? codeIdCandidate
+				: typeof codeIdCandidate === "string"
+					? Number(codeIdCandidate.trim())
+					: NaN;
+
+		const isStatusValidationError =
+			code === "INSPECTION_STATUS_RELATIONS_VALIDATION_FAILED" ||
+			(Number.isFinite(codeId) && codeId === 1100);
+		if (!isStatusValidationError) {
+			return null;
+		}
+
+		const violationsSource =
+			detailObject.violations ?? payload.violations ?? detailObject.items ?? payload.items;
+		const violationItems = Array.isArray(violationsSource) ? violationsSource : [];
+
+		const parsedViolations = violationItems
+			.map((item) => {
+				if (!item || typeof item !== "object") {
+					return null;
+				}
+
+				const source = item as Record<string, unknown>;
+				const violationCodeCandidate =
+					source.violationCodeId ?? source.codeId ?? source.code;
+				const numericViolationCode =
+					typeof violationCodeCandidate === "number"
+						? violationCodeCandidate
+						: typeof violationCodeCandidate === "string"
+							? Number(violationCodeCandidate.trim())
+							: NaN;
+				const normalizedViolationCode = Number.isFinite(numericViolationCode)
+					? numericViolationCode
+					: null;
+
+				const detailMessage =
+					typeof source.detail === "string"
+						? source.detail.trim()
+						: typeof source.message === "string"
+							? source.message.trim()
+							: "";
+				const mappedMessage =
+					normalizedViolationCode === 1001 ||
+					normalizedViolationCode === 1002 ||
+					normalizedViolationCode === 1003 ||
+					normalizedViolationCode === 1004
+						? mapInspectionStatusViolationMessage(normalizedViolationCode)
+						: "";
+
+				return {
+					violationCodeId: normalizedViolationCode,
+					message:
+						mappedMessage ||
+						detailMessage ||
+						mapInspectionStatusViolationMessage(normalizedViolationCode),
+				};
+			})
+			.filter(
+				(
+					violation,
+				): violation is InspectionStatusValidationViolation => violation !== null,
+			);
+
+		if (parsedViolations.length > 0) {
+			return parsedViolations;
+		}
+
+		return [
+			{
+				violationCodeId: null,
+				message: mapInspectionStatusViolationMessage(null),
+			},
+		];
 	} catch {
 		return null;
 	}
@@ -497,6 +628,9 @@ export function InspectionsPanel({
 		string | null
 	>(null);
 	const [flashInspectionId, setFlashInspectionId] = useState<string | null>(null);
+	const [centerInspectionId, setCenterInspectionId] = useState<string | null>(
+		null,
+	);
 	const [pendingDashboardInspectionCode, setPendingDashboardInspectionCode] =
 		useState<string | null>(null);
 	const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -558,6 +692,14 @@ export function InspectionsPanel({
 	>([]);
 	const [inspectionScopeMapByValue, setInspectionScopeMapByValue] =
 		useState<Record<string, string>>({});
+	const [marketShortLabelByValue, setMarketShortLabelByValue] =
+		useState<Record<string, string>>({});
+	const [teamShortLabelByTeamId, setTeamShortLabelByTeamId] = useState<
+		Record<number, string>
+	>({});
+	const [teamShortLabelByTeamName, setTeamShortLabelByTeamName] = useState<
+		Record<string, string>
+	>({});
 	const [marketOptions, setMarketOptions] = useState<string[]>([]);
 	const [entityTypeOptions, setEntityTypeOptions] = useState<string[]>([]);
 	const [inspectionStatusOptions, setInspectionStatusOptions] = useState<
@@ -597,6 +739,9 @@ export function InspectionsPanel({
 	const [inspectionCanEditByRowId, setInspectionCanEditByRowId] = useState<
 		Record<string, boolean>
 	>({});
+	const [inspectionStatusCodeByRowId, setInspectionStatusCodeByRowId] = useState<
+		Record<string, string>
+	>({});
 	const [inspectionLockRecordIdsByRowId, setInspectionLockRecordIdsByRowId] =
 		useState<Record<string, string[]>>({});
 	const [inspectionUpdatedAtByRowId, setInspectionUpdatedAtByRowId] = useState<
@@ -605,6 +750,11 @@ export function InspectionsPanel({
 	const [versionConflictUpdatedAt, setVersionConflictUpdatedAt] = useState<
 		string | null
 	>(null);
+	const [statusValidationViolations, setStatusValidationViolations] = useState<
+		InspectionStatusValidationViolation[]
+	>([]);
+	const [isStatusValidationModalOpen, setIsStatusValidationModalOpen] =
+		useState(false);
 	const [saveLockConflict, setSaveLockConflict] =
 		useState<InspectionLockConflict | null>(null);
 	const [operatorDisplayName, setOperatorDisplayName] = useState(
@@ -711,6 +861,7 @@ export function InspectionsPanel({
 		saveLockConflict?.acquiredAt ||
 		editInspectionLock.lockDetails?.acquiredAt ||
 		null;
+	const selectedStatusForValidation = addInspectionForm.status.trim();
 
 	const closeInspectionFormModalRef = useRef<() => void>(() => {});
 	const inactivityTimeout = useInactivityTimeout({
@@ -738,8 +889,15 @@ export function InspectionsPanel({
 		setIsRowsLoading(true);
 
 		try {
+			const inspectionsUrl = new URL(
+				INSPECTIONS_API_URL,
+				typeof window === "undefined" ? "http://localhost" : window.location.origin,
+			);
+			inspectionsUrl.searchParams.set("sortBy", INSPECTIONS_DEFAULT_SORT_BY);
+			inspectionsUrl.searchParams.set("sortOrder", INSPECTIONS_DEFAULT_SORT_ORDER);
+
 			const [response, recommendationsResult] = await Promise.all([
-				fetch(INSPECTIONS_API_URL, {
+				fetch(inspectionsUrl.toString(), {
 					method: "GET",
 					headers: {
 						"Content-Type": "application/json",
@@ -827,6 +985,7 @@ export function InspectionsPanel({
 			> = {};
 			const noLetterFlagsMap: Record<string, InspectionNoLetterFlags> = {};
 			const canEditMap: Record<string, boolean> = {};
+			const statusCodeByRowIdMap: Record<string, string> = {};
 			const lockRecordIdsMap: Record<string, string[]> = {};
 			const updatedAtMap: Record<string, string | null> = {};
 			const shortValuesByRowId: Record<string, InspectionShortValuesByColumn> = {};
@@ -911,6 +1070,15 @@ export function InspectionsPanel({
 								typeof value === "number" && Number.isFinite(value),
 						)
 					: [];
+				const rawStatusCode =
+					(rawRow as { statusKodPozycji?: unknown }).statusKodPozycji ??
+					(rawRow as { status_kod_pozycji?: unknown }).status_kod_pozycji ??
+					(rawRow as { statusCode?: unknown }).statusCode;
+				const normalizedStatusCode =
+					typeof rawStatusCode === "string" ? rawStatusCode.trim() : "";
+				if (normalizedStatusCode) {
+					statusCodeByRowIdMap[normalizedRow.id] = normalizedStatusCode;
+				}
 				acceptanceDatesMap[normalizedRow.id] = toDateList(maybeAcceptanceDates)
 					.length
 					? toDateList(maybeAcceptanceDates)
@@ -1002,6 +1170,7 @@ export function InspectionsPanel({
 			setInspectionNoAcceptanceDatesByRowId(noAcceptanceDatesMap);
 			setInspectionNoLetterFlagsByRowId(noLetterFlagsMap);
 			setInspectionCanEditByRowId(canEditMap);
+			setInspectionStatusCodeByRowId(statusCodeByRowIdMap);
 			setInspectionLockRecordIdsByRowId(lockRecordIdsMap);
 			setInspectionUpdatedAtByRowId(updatedAtMap);
 			setInspectionShortValuesByRowId(shortValuesByRowId);
@@ -1023,6 +1192,7 @@ export function InspectionsPanel({
 			setInspectionNoAcceptanceDatesByRowId({});
 			setInspectionNoLetterFlagsByRowId({});
 			setInspectionCanEditByRowId({});
+			setInspectionStatusCodeByRowId({});
 			setInspectionLockRecordIdsByRowId({});
 			setInspectionUpdatedAtByRowId({});
 			setInspectionShortValuesByRowId({});
@@ -1122,6 +1292,7 @@ export function InspectionsPanel({
 				inspectionTypesResult,
 				inspectionScopesResult,
 				marketsResult,
+				teamsResult,
 				entityTypesResult,
 				inspectionStatusesResult,
 			] = await Promise.all([
@@ -1129,6 +1300,7 @@ export function InspectionsPanel({
 				fetchDictionaryEntries("typy_inspekcji"),
 				fetchDictionaryEntries("zakresy_inspekcji"),
 				fetchDictionaryEntries("rynki"),
+				fetchDictionaryEntries("zespoly", operatorLogin),
 				fetchDictionaryEntries("rodzaje_podmiotu"),
 				fetchDictionaryEntries("statusy_inspekcji"),
 			]);
@@ -1335,6 +1507,43 @@ export function InspectionsPanel({
 					return { value, label: value };
 				}),
 			);
+			const nextMarketShortLabelByValue: Record<string, string> = {};
+			if (marketsResult.ok) {
+				for (const entry of marketsResult.data) {
+					const value = entry.nazwaPozycji.trim();
+					const shortLabel = (entry.skrotPozycji ?? "").trim();
+
+					if (!value || !shortLabel || nextMarketShortLabelByValue[value]) {
+						continue;
+					}
+
+					nextMarketShortLabelByValue[value] = shortLabel;
+				}
+			}
+			setMarketShortLabelByValue(nextMarketShortLabelByValue);
+			const nextTeamShortLabelByTeamId: Record<number, string> = {};
+			const nextTeamShortLabelByTeamName: Record<string, string> = {};
+			if (teamsResult.ok) {
+				for (const entry of teamsResult.data) {
+					const shortLabel =
+						(entry.skrotPozycji ?? entry.kodPozycji ?? "").trim();
+					if (!shortLabel) {
+						continue;
+					}
+
+					const teamId = Number(entry.teamId ?? entry.id ?? NaN);
+					if (Number.isFinite(teamId) && teamId > 0) {
+						nextTeamShortLabelByTeamId[teamId] = shortLabel;
+					}
+
+					const teamName = entry.nazwaPozycji.trim().toLowerCase();
+					if (teamName) {
+						nextTeamShortLabelByTeamName[teamName] = shortLabel;
+					}
+				}
+			}
+			setTeamShortLabelByTeamId(nextTeamShortLabelByTeamId);
+			setTeamShortLabelByTeamName(nextTeamShortLabelByTeamName);
 			setMarketOptions(resolveOptions(marketsResult));
 			setEntityTypeOptions(resolveOptions(entityTypesResult));
 			setInspectionStatusOptions(
@@ -1348,6 +1557,9 @@ export function InspectionsPanel({
 			setInspectionTypeOptions([]);
 			setInspectionScopeOptions([]);
 			setInspectionScopeMapByValue({});
+			setMarketShortLabelByValue({});
+			setTeamShortLabelByTeamId({});
+			setTeamShortLabelByTeamName({});
 			setMarketOptions([]);
 			setEntityTypeOptions([]);
 			setInspectionStatusOptions([]);
@@ -1696,11 +1908,34 @@ export function InspectionsPanel({
 			return inspectionRows.map((row) => {
 				const shortValues = inspectionShortValuesByRowId[row.id];
 				if (!shortValues) {
-					return row;
+					if (inspectionNameVariants.rynek !== "short") {
+						return row;
+					}
+
+					const marketShortLabel = marketShortLabelByValue[row.rynek] ?? "";
+					if (!marketShortLabel) {
+						return row;
+					}
+
+					return {
+						...row,
+						rynek: marketShortLabel,
+					};
 				}
 
 				const getDisplayValue = (columnKey: InspectionNameVariantColumnKey) => {
 					const shortValue = shortValues[columnKey]?.trim() ?? "";
+
+					if (columnKey === "rynek") {
+						if (inspectionNameVariants.rynek === "short") {
+							const marketShortLabel = marketShortLabelByValue[row.rynek] ?? "";
+							if (marketShortLabel) {
+								return marketShortLabel;
+							}
+						}
+
+						return row.rynek;
+					}
 
 					if (columnKey === "zakresInspekcji") {
 						if (inspectionNameVariants.zakresInspekcji === "short" && shortValue) {
@@ -1732,6 +1967,7 @@ export function InspectionsPanel({
 					nazwaPodmiotu: getDisplayValue("nazwaPodmiotu"),
 					typInspekcji: getDisplayValue("typInspekcji"),
 					zakresInspekcji: getDisplayValue("zakresInspekcji"),
+					rynek: getDisplayValue("rynek"),
 					rodzajPodmiotu: getDisplayValue("rodzajPodmiotu"),
 					status: getDisplayValue("status"),
 				};
@@ -1740,6 +1976,7 @@ export function InspectionsPanel({
 		[
 			inspectionNameVariants,
 			inspectionRows,
+			marketShortLabelByValue,
 			inspectionScopeMapByValue,
 			inspectionShortValuesByRowId,
 		],
@@ -1870,6 +2107,7 @@ export function InspectionsPanel({
 		handlePageChange(targetPage);
 		setSelectedInspectionId(targetRow.id);
 		setFlashInspectionId(targetRow.id);
+		setCenterInspectionId(targetRow.id);
 		setPendingDashboardInspectionCode(null);
 
 		if (typeof window !== "undefined") {
@@ -1911,6 +2149,29 @@ export function InspectionsPanel({
 			})
 			.filter((name): name is string => Boolean(name));
 	}, [allUsers, selectedTeamMemberIds]);
+
+	const activeUsersWithShortTeamLabel = useMemo(
+		() =>
+			activeUsers.map((user) => {
+				const shortById =
+					typeof user.teamId === "number"
+						? teamShortLabelByTeamId[user.teamId]
+						: undefined;
+				const normalizedTeamName =
+					typeof user.teamName === "string"
+						? user.teamName.trim().toLowerCase()
+						: "";
+				const shortByName = normalizedTeamName
+					? teamShortLabelByTeamName[normalizedTeamName]
+					: undefined;
+
+				return {
+					...user,
+					teamName: shortById || shortByName || user.teamName,
+				};
+			}),
+		[activeUsers, teamShortLabelByTeamId, teamShortLabelByTeamName],
+	);
 
 	useEffect(() => {
 		if (!teamMemberScopeError && outOfScopeTeamMemberUserId === null) {
@@ -2766,6 +3027,8 @@ export function InspectionsPanel({
 		setEditingInspectionId(null);
 		setShowRequiredInspectionFieldErrors(false);
 		setVersionConflictUpdatedAt(null);
+		setStatusValidationViolations([]);
+		setIsStatusValidationModalOpen(false);
 		setSaveLockConflict(null);
 		setIsAddModalOpen(true);
 	};
@@ -2855,6 +3118,8 @@ export function InspectionsPanel({
 		setEditingInspectionId(rowToEdit.id);
 		setShowRequiredInspectionFieldErrors(false);
 		setVersionConflictUpdatedAt(null);
+		setStatusValidationViolations([]);
+		setIsStatusValidationModalOpen(false);
 		setSaveLockConflict(null);
 		setIsAddModalOpen(true);
 	};
@@ -2932,6 +3197,8 @@ export function InspectionsPanel({
 		setEditingInspectionId(rowToPreview.id);
 		setShowRequiredInspectionFieldErrors(false);
 		setVersionConflictUpdatedAt(null);
+		setStatusValidationViolations([]);
+		setIsStatusValidationModalOpen(false);
 		setSaveLockConflict(null);
 		setIsPreviewMode(true);
 		setIsAddModalOpen(true);
@@ -2956,6 +3223,8 @@ export function InspectionsPanel({
 		setAddInspectionError(null);
 		setSaveLockConflict(null);
 		setVersionConflictUpdatedAt(null);
+		setStatusValidationViolations([]);
+		setIsStatusValidationModalOpen(false);
 		setShowRequiredInspectionFieldErrors(false);
 		setIsPreviewMode(false);
 	}, [
@@ -3180,6 +3449,8 @@ export function InspectionsPanel({
 		setIsDataAkceptacjiNotyBrak(false);
 		setDidToggleDataAkceptacjiNotyBrak(false);
 		setVersionConflictUpdatedAt(null);
+		setStatusValidationViolations([]);
+		setIsStatusValidationModalOpen(false);
 		setSaveLockConflict(null);
 		setShowRequiredInspectionFieldErrors(false);
 		setTeamMemberScopeError(null);
@@ -3195,6 +3466,8 @@ export function InspectionsPanel({
 		await loadInspections();
 		closeInspectionFormModal();
 		setVersionConflictUpdatedAt(null);
+		setStatusValidationViolations([]);
+		setIsStatusValidationModalOpen(false);
 		setSaveLockConflict(null);
 		setAddInspectionError(null);
 	};
@@ -3458,6 +3731,8 @@ export function InspectionsPanel({
 		setTeamMemberScopeError(null);
 		setOutOfScopeTeamMemberUserId(null);
 		setVersionConflictUpdatedAt(null);
+		setStatusValidationViolations([]);
+		setIsStatusValidationModalOpen(false);
 		setSaveLockConflict(null);
 
 		try {
@@ -3548,6 +3823,16 @@ export function InspectionsPanel({
 					}
 
 					if (updateResponse.status === 409) {
+						const statusValidationViolations =
+							await readInspectionStatusValidationViolations(updateResponse);
+						if (statusValidationViolations) {
+							setVersionConflictUpdatedAt(null);
+							setStatusValidationViolations(statusValidationViolations);
+							setIsStatusValidationModalOpen(true);
+							setAddInspectionError(null);
+							return;
+						}
+
 						let currentUpdatedAt: string | null = null;
 						try {
 							const payload = (await updateResponse.json()) as Record<
@@ -3614,6 +3899,18 @@ export function InspectionsPanel({
 			});
 
 			if (!createResponse.ok) {
+				if (createResponse.status === 409) {
+					const statusValidationViolations =
+						await readInspectionStatusValidationViolations(createResponse);
+					if (statusValidationViolations) {
+						setVersionConflictUpdatedAt(null);
+						setStatusValidationViolations(statusValidationViolations);
+						setIsStatusValidationModalOpen(true);
+						setAddInspectionError(null);
+						return;
+					}
+				}
+
 				const domainError = await readInspectionDomainError(createResponse);
 				if (
 					createResponse.status === 403 &&
@@ -3664,6 +3961,10 @@ export function InspectionsPanel({
 		}
 	};
 
+	const InspectionModalComponent = isPreviewMode
+		? InspectionsPreviewModal
+		: InspectionsFormModal;
+
 	return (
 		<section
 			className="rounded-2xl border border-slate-700/70 bg-[#101f39] p-4 sm:p-5"
@@ -3695,6 +3996,22 @@ export function InspectionsPanel({
 								>
 									<Plus size={15} />
 									Dodaj inspekcję
+								</button>
+
+								<button
+									type="button"
+									disabled={!selectedInspectionId}
+									onClick={() => {
+										if (!selectedInspectionId) {
+											return;
+										}
+
+										handleOpenPreviewModal(selectedInspectionId);
+									}}
+									className="inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 font-semibold text-sm transition-colors enabled:border-[#93b9ee] enabled:bg-[#d9e9ff] enabled:text-[#21508f] enabled:hover:bg-[#c9e0ff] disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#1a2946] disabled:text-slate-500"
+								>
+									<Eye size={15} />
+									Podgląd
 								</button>
 
 								<button
@@ -3739,8 +4056,11 @@ export function InspectionsPanel({
 				rows={paginatedInspectionRows}
 				noAcceptanceDatesByRowId={inspectionNoAcceptanceDatesByRowId}
 				noLetterFlagsByRowId={inspectionNoLetterFlagsByRowId}
+				statusCodeByRowId={inspectionStatusCodeByRowId}
 				selectedInspectionId={selectedInspectionId}
 				flashInspectionId={flashInspectionId}
+				centerOnInspectionId={centerInspectionId}
+				onInspectionCentered={() => setCenterInspectionId(null)}
 				onSelectInspection={setSelectedInspectionId}
 				onOpenInspectionPreview={handleOpenPreviewModal}
 				onSortByColumn={handleSortByColumn}
@@ -3818,7 +4138,7 @@ export function InspectionsPanel({
 				onClearAllFilters={clearFilters}
 			/>
 
-			<InspectionsFormModal
+			<InspectionModalComponent
 				isOpen={isAddModalOpen}
 				isPreviewMode={isPreviewMode}
 				canStartEditFromPreview={canManageInspections && previewInspectionCanEdit}
@@ -3850,6 +4170,13 @@ export function InspectionsPanel({
 				}}
 				addInspectionForm={addInspectionForm}
 				setAddInspectionForm={setAddInspectionForm}
+				inspectionNameVariants={inspectionNameVariants}
+				previewShortValuesByColumn={
+					editingInspectionId
+						? inspectionShortValuesByRowId[editingInspectionId]
+						: undefined
+				}
+				marketShortLabelByValue={marketShortLabelByValue}
 				entityNameOptions={entityNameOptions}
 				inspectionTypeOptions={inspectionTypeOptions}
 				inspectionScopeOptions={inspectionScopeOptions}
@@ -3867,7 +4194,7 @@ export function InspectionsPanel({
 				selectedTeamMembers={selectedTeamMembers}
 				teamMemberScopeError={teamMemberScopeError}
 				outOfScopeTeamMemberUserId={outOfScopeTeamMemberUserId}
-				activeUsers={activeUsers}
+				activeUsers={activeUsersWithShortTeamLabel}
 				availableLeaderUsers={leaderOptionsForModal}
 				leaderChangeIrreversibleWarning={leaderChangeIrreversibleWarning}
 				forceLeaderSelectionReadonly={!canChangeLeaderSelection}
@@ -4101,6 +4428,56 @@ export function InspectionsPanel({
 				}
 				isExporting={isExporting}
 			/>
+
+			{isStatusValidationModalOpen ? (
+				<div className="fixed inset-0 z-60 flex items-center justify-center p-4">
+					<button
+						type="button"
+						aria-label="Zamknij okno walidacji statusu"
+						className="absolute inset-0 bg-slate-950/65"
+						onClick={() => setIsStatusValidationModalOpen(false)}
+					/>
+
+					<div
+						role="dialog"
+						aria-modal="true"
+						aria-label="Walidacja statusu inspekcji"
+						className="relative z-10 w-full max-w-2xl rounded-2xl border border-slate-300 bg-white p-5 text-slate-900 shadow-[0_24px_56px_rgba(2,8,23,0.35)]"
+					>
+						<h3 className="font-semibold text-base text-slate-900">
+							Nie można zapisać inspekcji z tym statusem
+						</h3>
+						{selectedStatusForValidation ? (
+							<p className="mt-2 text-slate-800 text-sm">
+								Status: <span className="font-semibold">{selectedStatusForValidation}</span>
+							</p>
+						) : null}
+
+						<div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-3">
+							<p className="font-semibold text-rose-700 text-sm">Naruszenia:</p>
+							<ul className="mt-2 list-disc space-y-1 pl-5 text-rose-800 text-sm">
+								{statusValidationViolations.map((violation, index) => (
+									<li
+										key={`${String(violation.violationCodeId)}-${violation.message}-${index}`}
+									>
+										{violation.message}
+									</li>
+								))}
+							</ul>
+						</div>
+
+						<div className="mt-5 flex items-center justify-end gap-2">
+							<button
+								type="button"
+								onClick={() => setIsStatusValidationModalOpen(false)}
+								className="inline-flex h-10 items-center rounded-lg border border-slate-300 bg-white px-4 font-semibold text-slate-700 text-sm transition-colors hover:bg-slate-100"
+							>
+								Rozumiem
+							</button>
+						</div>
+					</div>
+				</div>
+			) : null}
 		</section>
 	);
 }
