@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime
-import logging
 import os
 import re
 from statistics import median
@@ -24,7 +23,6 @@ from app.permissions import (
 
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 
 class InspectionsMatrixRow(BaseModel):
@@ -86,8 +84,6 @@ class InspectionsTimeAnalyticsResponse(BaseModel):
 	filteredCount: int
 	departmentMinTime: int | None = None
 	departmentMaxTime: int | None = None
-	departmentMinTimeByYear: dict[str, int] = {}
-	departmentMaxTimeByYear: dict[str, int] = {}
 	myCountByYear: dict[str, int] = {}
 	myCountByYearBreakdown: dict[str, dict[str, int]] = {}
 	myMetricByYearBreakdown: dict[str, dict[str, float]] = {}
@@ -850,37 +846,22 @@ def get_inspections_time_analytics(
 		if row_type not in {"K", "W"}:
 			continue
 
-		try:
-			diff = _days_difference(row.get("data_protokolu_sprawozdania"), row.get("koniec_inspekcji"))
-			year = _year_from_date(row.get("poczatek_inspekcji"))
-			team_code = str(row.get("zespol_osoby_kierujacej_kod") or "-").strip() or "-"
-			status_label = _public_status_label(row.get("status_inspekcji"))
-			stage_payload = _stage_payload_from_status_code(row.get("status_inspekcji_kod"))
-			inspection_id = int(row["id"])
-			leader_user_id_raw = row.get("osoba_kierujaca_user_id")
-			leader_user_id = int(leader_user_id_raw) if leader_user_id_raw is not None else None
-			status_id_raw = row.get("status_inspekcji_id")
-			status_id = int(status_id_raw) if status_id_raw is not None else None
-		except (TypeError, ValueError, KeyError) as exc:
-			logger.warning(
-				"[reports.inspections-time-analytics] skipping malformed inspection row id=%r date=%r end=%r start=%r error=%s",
-				row.get("id"),
-				row.get("data_protokolu_sprawozdania"),
-				row.get("koniec_inspekcji"),
-				row.get("poczatek_inspekcji"),
-				exc,
-			)
-			continue
-
-		is_leader_current_user = leader_user_id is not None and leader_user_id == int(operator["id"])
+		diff = _days_difference(row.get("data_protokolu_sprawozdania"), row.get("koniec_inspekcji"))
+		year = _year_from_date(row.get("poczatek_inspekcji"))
+		team_code = str(row.get("zespol_osoby_kierujacej_kod") or "-").strip() or "-"
+		status_label = _public_status_label(row.get("status_inspekcji"))
+		stage_payload = _stage_payload_from_status_code(row.get("status_inspekcji_kod"))
+		inspection_id = int(row["id"])
+		leader_user_id = row.get("osoba_kierujaca_user_id")
+		is_leader_current_user = leader_user_id is not None and int(leader_user_id) == int(operator["id"])
 		is_member_current_user = inspection_id in operator_member_inspections
 		normalized_row = {
 			"inspectionId": inspection_id,
 			"kodInspekcji": str(row.get("kod_inspekcji") or "-").strip() or "-",
 			"inspekcja": row_type,
-			"statusInspekcjiId": status_id,
+			"statusInspekcjiId": int(row["status_inspekcji_id"]) if row.get("status_inspekcji_id") is not None else None,
 			"statusInspekcji": status_label,
-			"statusInspekcjiSkrot": str(row.get("status_inspekcji_skrot") or status_label or "-").strip() or "-",
+				"statusInspekcjiSkrot": str(row.get("status_inspekcji_skrot") or status_label or "-").strip() or "-",
 			"nazwaPodmiotu": str(row.get("nazwa_podmiotu") or "-").strip() or "-",
 			"osobaKierujaca": str(row.get("osoba_kierujaca") or "-").strip() or "-",
 			"rokPoczatku": year,
@@ -923,12 +904,7 @@ def get_inspections_time_analytics(
 
 	# Year-count section is intentionally based on all inspection types (K + W)
 	# and mirrors permission + team filtering used by this report.
-	# Keep it aligned with time-based sections: count only rows with computable time.
-	rows_for_counts = [
-		row
-		for row in all_type_base_rows
-		if row.get("rokPoczatku") is not None and isinstance(row.get("czas"), (int, float))
-	]
+	rows_for_counts = list(all_type_base_rows)
 	if year_filter:
 		rows_for_counts = [row for row in rows_for_counts if str(row.get("rokPoczatku") or "") in year_filter]
 	if team_filter:
@@ -965,24 +941,6 @@ def get_inspections_time_analytics(
 	department_times_for_bounds = [int(row["czas"]) for row in department_min_max_source]
 	department_min_time = min(department_times_for_bounds) if department_times_for_bounds else None
 	department_max_time = max(department_times_for_bounds) if department_times_for_bounds else None
-
-	department_time_by_year_groups: dict[str, list[int]] = defaultdict(list)
-	for row in department_min_max_source:
-		year_key = str(row.get("rokPoczatku") or "").strip()
-		if not year_key:
-			continue
-		department_time_by_year_groups[year_key].append(int(row["czas"]))
-
-	department_min_time_by_year = {
-		year: int(min(values))
-		for year, values in sorted(department_time_by_year_groups.items(), key=lambda item: item[0])
-		if values
-	}
-	department_max_time_by_year = {
-		year: int(max(values))
-		for year, values in sorted(department_time_by_year_groups.items(), key=lambda item: item[0])
-		if values
-	}
 
 	agg_filtered_rows = [row for row in filtered_rows if _is_valid_for_aggregations(row)]
 	department_scope_rows = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
@@ -1291,6 +1249,8 @@ def get_inspections_time_analytics(
 
 	my_count_by_year_groups: dict[str, int] = defaultdict(int)
 	for row in rows_after_year:
+		if not _is_valid_for_aggregations(row):
+			continue
 		if not (bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))):
 			continue
 		year_key = str(row.get("rokPoczatku") or "").strip()
@@ -1306,17 +1266,18 @@ def get_inspections_time_analytics(
 		lambda: {"leader": 0, "member": 0, "combined": 0}
 	)
 	for row in rows_after_year:
+		if not _is_valid_for_aggregations(row):
+			continue
 		year_key = str(row.get("rokPoczatku") or "").strip()
 		if not year_key:
 			continue
 		is_leader = bool(row.get("isLeaderCurrentUser"))
-		is_member = bool(row.get("isMemberCurrentUser"))
+		is_member = bool(row.get("isMemberCurrentUser")) and not is_leader
 		if not (is_leader or is_member):
 			continue
-		# Keep slash breakdown disjoint: leader bucket and member-only bucket.
 		if is_leader:
 			my_count_by_year_breakdown_groups[year_key]["leader"] += 1
-		if is_member and not is_leader:
+		if is_member:
 			my_count_by_year_breakdown_groups[year_key]["member"] += 1
 		my_count_by_year_breakdown_groups[year_key]["combined"] += 1
 
@@ -1340,12 +1301,12 @@ def get_inspections_time_analytics(
 			continue
 		czas_value = int(row["czas"])
 		is_leader = bool(row.get("isLeaderCurrentUser"))
-		is_member = bool(row.get("isMemberCurrentUser"))
+		is_member = bool(row.get("isMemberCurrentUser")) and not is_leader
 		if not (is_leader or is_member):
 			continue
 		if is_leader:
 			my_metric_by_year_leader_groups[year_key].append(czas_value)
-		if is_member and not is_leader:
+		if is_member:
 			my_metric_by_year_member_groups[year_key].append(czas_value)
 		my_metric_by_year_combined_groups[year_key].append(czas_value)
 
@@ -1436,8 +1397,6 @@ def get_inspections_time_analytics(
 		"filteredCount": len(filtered_rows),
 		"departmentMinTime": department_min_time,
 		"departmentMaxTime": department_max_time,
-		"departmentMinTimeByYear": department_min_time_by_year,
-		"departmentMaxTimeByYear": department_max_time_by_year,
 		"myCountByYear": my_count_by_year,
 		"myCountByYearBreakdown": my_count_by_year_breakdown,
 		"myMetricByYearBreakdown": my_metric_by_year_breakdown,
