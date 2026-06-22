@@ -84,6 +84,8 @@ class InspectionsTimeAnalyticsResponse(BaseModel):
 	filteredCount: int
 	departmentMinTime: int | None = None
 	departmentMaxTime: int | None = None
+	departmentMinTimeByYear: dict[str, int | None] = {}
+	departmentMaxTimeByYear: dict[str, int | None] = {}
 	myCountByYear: dict[str, int] = {}
 	myCountByYearBreakdown: dict[str, dict[str, int]] = {}
 	myMetricByYearBreakdown: dict[str, dict[str, float]] = {}
@@ -1200,6 +1202,26 @@ def get_inspections_time_analytics(
 			}
 		)
 
+	department_year_values: dict[str, list[int]] = defaultdict(list)
+	for row in department_min_max_source:
+		year_key = str(row.get("rokPoczatku") or "").strip()
+		if not year_key:
+			continue
+		department_year_values[year_key].append(int(row["czas"]))
+
+	target_years_for_bounds: list[str]
+	if year_filter:
+		target_years_for_bounds = sorted({str(item).strip() for item in year_filter if str(item).strip()})
+	else:
+		target_years_for_bounds = [str(item["year"]) for item in trend_rows if item.get("year") is not None]
+
+	department_min_time_by_year: dict[str, int | None] = {}
+	department_max_time_by_year: dict[str, int | None] = {}
+	for year_key in target_years_for_bounds:
+		year_values = department_year_values.get(year_key, [])
+		department_min_time_by_year[year_key] = min(year_values) if year_values else None
+		department_max_time_by_year[year_key] = max(year_values) if year_values else None
+
 	summary_pivot_years = sorted({str(row.get("rok")) for row in summary_rows if row.get("rok") not in {None, ""}})
 	pivot_team_order: list[str] = []
 	pivot_team_values: dict[str, dict[str, float]] = {}
@@ -1431,6 +1453,8 @@ def get_inspections_time_analytics(
 		"filteredCount": len(filtered_rows),
 		"departmentMinTime": department_min_time,
 		"departmentMaxTime": department_max_time,
+		"departmentMinTimeByYear": department_min_time_by_year,
+		"departmentMaxTimeByYear": department_max_time_by_year,
 		"myCountByYear": my_count_by_year,
 		"myCountByYearBreakdown": my_count_by_year_breakdown,
 		"myMetricByYearBreakdown": my_metric_by_year_breakdown,
