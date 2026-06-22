@@ -1,903 +1,1316 @@
-import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
+"use client";
 
-import { INSPECTION_COLUMN_TOOLTIPS } from "@/features/inspections/data";
+import { Pencil, Plus, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+
+import type { AuthRole } from "@/app/_components/home-tabs/types";
+import {
+	clearInspectionStatusStyle,
+	upsertInspectionStatusStyle,
+	updateDictionaryEntry,
+	updateTeamEntry,
+} from "@/features/dictionaries/api";
+import { AddDictionaryEntryModal } from "@/features/dictionaries/components/AddDictionaryEntryModal";
+import {
+	findInspectionStatusPresetKeyByValues,
+	INSPECTION_STATUS_COLOR_PRESETS,
+} from "@/features/dictionaries/constants";
+import { useDictionariesSheet } from "@/features/dictionaries/hooks/useDictionariesSheet";
 import type {
-	InspectionColumn,
-	InspectionColumnKey,
-	InspectionRow,
-} from "@/features/inspections/types";
-import { RegistryDataTable } from "@/shared/components/table/RegistryDataTable";
-import { formatDatesInDisplayText } from "@/shared/utils/date";
+	DictionaryColorPalette,
+	DictionaryColorShade,
+	DictionaryEntry,
+	DictionaryType,
+} from "@/features/dictionaries/types";
+import { SingleSelectPortalField } from "@/shared/components/forms/SingleSelectPortalField";
+import { TableSurface } from "@/shared/components/table/TableSurface";
 
-type SortDirection = "asc" | "desc";
-
-type InspectionNoLetterFlags = {
-	brakDataDoreczeniaPisma: boolean;
-	brakDataPismaZastrzezenia: boolean;
-	brakDataWyslaniaPismaZZastrzezeniami: boolean;
-	brakDataWplywuPisma: boolean;
-	brakDataPismaZOdpowiedzia: boolean;
-	brakDataWyslaniaPismaZOdpowiedzia: boolean;
+type DictionariesSheetPanelProps = {
+	operatorLogin: string;
+	authRole?: AuthRole;
+	preferredKodTypu?: string;
+	tableOnly?: boolean;
+	title?: string;
+	subtitle?: string;
+	canEdit?: boolean;
 };
 
-type InspectionNoAcceptanceDatesFlags = {
-	brakDatAkceptacjiNoty: boolean;
+type DictionaryCategoryOption = {
+	key: string;
+	label: string;
+	sortOrder: number;
 };
 
-type InspectionsDataTableProps = {
-	rowsError: string | null;
-	isRowsLoading: boolean;
-	visibleColumns: InspectionColumn[];
-	columnWidths?: Partial<Record<InspectionColumnKey, number>>;
-	minColumnWidth?: number;
-	sortColumnKey: InspectionColumnKey | null;
-	sortDirection: SortDirection | null;
-	advancedFilters: Partial<Record<InspectionColumnKey, string[]>>;
-	columnFilters: Partial<Record<InspectionColumnKey, string>>;
-	rows: InspectionRow[];
-	noLetterFlagsByRowId?: Record<string, InspectionNoLetterFlags>;
-	noAcceptanceDatesByRowId?: Record<string, InspectionNoAcceptanceDatesFlags>;
-	statusCodeByRowId?: Record<string, string>;
-	selectedInspectionId: string | null;
-	flashInspectionId?: string | null;
-	centerOnInspectionId?: string | null;
-	onInspectionCentered?: () => void;
-	onSelectInspection: (inspectionId: string) => void;
-	onOpenInspectionPreview?: (inspectionId: string) => void;
-	onSortByColumn: (columnKey: InspectionColumnKey) => void;
-	onResizeColumn?: (columnKey: InspectionColumnKey, width: number) => void;
-	onOpenAdvancedFilter: (
-		columnKey: InspectionColumnKey,
-		triggerElement: HTMLElement,
-	) => void;
-	onFilterChange: (columnKey: InspectionColumnKey, value: string) => void;
-	footer?: ReactNode;
+type DictionaryEditFormState = {
+	nazwaPozycji: string;
+	nazwaUzytkowa: string;
+	skrotPozycji: string;
+	aktywny: boolean;
+	kolor: DictionaryColorPalette | null;
+	odcien: DictionaryColorShade | null;
+	intensywnosc: number | null;
 };
 
-function resolveInspectionTypeFlags(inspectionType: string) {
-	const normalizedType = inspectionType.trim().toLowerCase();
-	const isControlType =
-		normalizedType.includes("kontrol") ||
-		normalizedType.startsWith("kont") ||
-		normalizedType === "k";
-	const isSupervisoryVisitType =
-		normalizedType.includes("wizyta") ||
-		normalizedType.startsWith("wiz") ||
-		normalizedType === "w";
+const DICTIONARIES_CHANGED_EVENT = "dictionaries:changed";
 
-	return {
-		isControlType,
-		isSupervisoryVisitType,
-	};
-}
+const SANCTION_DICTIONARY_CODES = new Set([
+	"department",
+	"informacja_o_wszczeciu_postepowania_sankcyjnego",
+	"naruszenia_skutkujace_sankcja",
+	"nazwy_podmiotow_sankcje",
+	"podstawa_prawna_sankcji",
+	"rozstrzygniecie_wniosku_sankcyjnego_i",
+	"sankcja",
+]);
 
-function isNotApplicableByInspectionType(
-	inspectionType: string,
-	columnKey: InspectionColumnKey,
-) {
-	const { isControlType, isSupervisoryVisitType } =
-		resolveInspectionTypeFlags(inspectionType);
+const COMMITMENT_DECISION_DICTIONARY_CODES = new Set([
+	"rozstrzygniecie_decyzji_i",
+	"rozstrzygniecie_decyzji_ii",
+]);
 
-	if (isControlType && !isSupervisoryVisitType) {
-		return columnKey === "dataAkceptacjiSprawozdania" || columnKey === "dataDoreczeniaPisma";
-	}
+const GENERAL_DICTIONARY_CODES = new Set(["department_ogolne"]);
 
-	if (isSupervisoryVisitType && !isControlType) {
-		return (
-			columnKey === "dataDoreczeniaProtokolu" ||
-			columnKey === "dataWyslaniaPismaZOdpowiedzia" ||
-			columnKey === "dataPismaZOdpowiedzia"
-		);
-	}
+const TEAM_LEAD_EDITABLE_DICTIONARY_TYPE_CODES = new Set([
+	"department_ogolne",
+	"nazwy_podmiotow",
+	"zakresy_inspekcji",
+	"department",
+	"podstawa_prawna_sankcji",
+	"naruszenia_skutkujace_sankcja",
+	"nazwy_podmiotow_sankcje",
+]);
 
-	return false;
-}
-
-function resolveStatusRowClass(statusCode: string | undefined) {
-	void statusCode;
-	return "";
-}
-
-const STATUS_PALETTES = [
-	"slate",
-	"gray",
-	"zinc",
-	"neutral",
-	"stone",
-	"red",
-	"orange",
-	"amber",
-	"yellow",
-	"lime",
-	"green",
-	"emerald",
-	"teal",
-	"cyan",
-	"sky",
-	"blue",
-	"indigo",
-	"violet",
-	"purple",
-	"fuchsia",
-	"pink",
-	"rose",
-] as const;
-
-const STATUS_SHADES = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950] as const;
-const SI2_PALETTES = ["emerald", "green", "teal", "lime"] as const;
-const SI3_PALETTES = ["sky", "cyan", "blue", "indigo"] as const;
-const SI4_PALETTES = ["rose", "red", "pink", "fuchsia"] as const;
-const SI5_TO_9_PALETTES = ["yellow", "amber", "orange"] as const;
-
-type StatusPalette = (typeof STATUS_PALETTES)[number];
-type StatusShade = (typeof STATUS_SHADES)[number];
-
-type ColorSettings = {
-	color: StatusPalette;
-	shade: StatusShade;
-	opacity: number;
+const COLOR_LABEL_BY_KEY: Record<string, string> = {
+	emerald: "Szmaragdowy",
+	green: "Zielony",
+	teal: "Morski",
+	lime: "Limonkowy",
+	sky: "Błękitny",
+	cyan: "Cyjan",
+	blue: "Niebieski",
+	indigo: "Indygo",
+	rose: "Różany",
+	red: "Czerwony",
+	pink: "Różowy",
+	fuchsia: "Fuksja",
+	yellow: "Żółty",
+	amber: "Bursztynowy",
+	orange: "Pomarańczowy",
 };
 
-type StatusColorConfig = {
-	si2: ColorSettings;
-	si3: ColorSettings;
-	si4: ColorSettings;
-	si5To9: ColorSettings;
+const PALETTE_HUE_SAT_BY_KEY: Record<string, string> = {
+	emerald: "160 84%",
+	green: "142 76%",
+	teal: "173 80%",
+	lime: "84 81%",
+	sky: "198 93%",
+	cyan: "188 94%",
+	blue: "221 83%",
+	indigo: "239 84%",
+	rose: "343 87%",
+	red: "0 84%",
+	pink: "330 81%",
+	fuchsia: "292 84%",
+	yellow: "48 96%",
+	amber: "43 96%",
+	orange: "27 96%",
 };
 
-type HoverTooltipState = {
-	content: string;
-	x: number;
-	y: number;
-};
-
-type HoverEffectOption =
-	| "none"
-	| "softShadowBold"
-	| "strongEdgeShadow"
-	| "smallBlurSelectedColor"
-	| "deepInnerBlur";
-
-const PALETTE_HUE_SAT: Record<StatusPalette, { hue: number; saturation: number }> = {
-	slate: { hue: 215, saturation: 20 },
-	gray: { hue: 215, saturation: 10 },
-	zinc: { hue: 240, saturation: 6 },
-	neutral: { hue: 30, saturation: 5 },
-	stone: { hue: 24, saturation: 9 },
-	red: { hue: 0, saturation: 84 },
-	orange: { hue: 24, saturation: 92 },
-	amber: { hue: 43, saturation: 96 },
-	yellow: { hue: 55, saturation: 96 },
-	lime: { hue: 83, saturation: 86 },
-	green: { hue: 142, saturation: 71 },
-	emerald: { hue: 160, saturation: 84 },
-	teal: { hue: 173, saturation: 80 },
-	cyan: { hue: 188, saturation: 94 },
-	sky: { hue: 199, saturation: 95 },
-	blue: { hue: 221, saturation: 83 },
-	indigo: { hue: 239, saturation: 84 },
-	violet: { hue: 258, saturation: 90 },
-	purple: { hue: 270, saturation: 91 },
-	fuchsia: { hue: 292, saturation: 84 },
-	pink: { hue: 330, saturation: 81 },
-	rose: { hue: 350, saturation: 89 },
-};
-
-const SHADE_TO_LIGHTNESS: Record<StatusShade, number> = {
+const SHADE_TO_LIGHTNESS: Record<number, number> = {
 	50: 97,
-	100: 93,
-	200: 86,
-	300: 76,
-	400: 65,
-	500: 54,
-	600: 45,
-	700: 37,
-	800: 30,
-	900: 23,
+	100: 94,
+	200: 88,
+	300: 79,
+	400: 67,
+	500: 56,
+	600: 46,
+	700: 38,
+	800: 31,
+	900: 26,
 	950: 14,
 };
 
-const PALETTE_LIGHTNESS_COMPENSATION: Partial<Record<StatusPalette, number>> = {
-	yellow: -8,
-	amber: -6,
-	orange: -4,
-	lime: -2,
-	cyan: -1,
-	sky: -1,
-};
-
-function resolvePerceptualLightness(palette: StatusPalette, lightness: number) {
-	const compensation = PALETTE_LIGHTNESS_COMPENSATION[palette] ?? 0;
-	return Math.max(8, Math.min(97, lightness + compensation));
-}
-
-function resolveStatusRowStyle(
-	statusCode: string | undefined,
-	config: StatusColorConfig,
-	isHovered: boolean,
-	hoverEffect: HoverEffectOption,
-): CSSProperties {
-	const normalized = (statusCode ?? "").trim().toUpperCase();
-	const { si2, si3, si4, si5To9 } = config;
-
-	const yellowStatusCodes = new Set([
-		"I_SI_5",
-		"I_SI_6",
-		"I_SI_7",
-		"I_SI_8",
-		"I_SI_9",
-	]);
-
-	const getOpacity = (opacity: number) => Math.max(0, Math.min(opacity, 100)) / 100;
-
-	const buildStatusBackground = (settings: ColorSettings) => {
-		const palette = PALETTE_HUE_SAT[settings.color];
-		const baseLightness = SHADE_TO_LIGHTNESS[settings.shade];
-		const lightness = resolvePerceptualLightness(settings.color, baseLightness);
-		const edgeOpacity = getOpacity(settings.opacity);
-		const statusColor = `hsl(${palette.hue} ${palette.saturation}% ${lightness}% / ${edgeOpacity})`;
-		const darkerEdgeLightness = Math.max(8, lightness - 16);
-		const darkerOutlineColor = `hsl(${palette.hue} ${palette.saturation}% ${Math.max(8, lightness - 12)}% / ${Math.min(1, edgeOpacity + 0.12)})`;
-		const edgeFrameColor = `hsl(${palette.hue} ${palette.saturation}% ${darkerEdgeLightness}% / ${Math.min(1, edgeOpacity + 0.24)})`;
-		const strongBlurColor = `hsl(${palette.hue} ${palette.saturation}% ${darkerEdgeLightness}% / ${Math.min(1, edgeOpacity + 0.34)})`;
-
-		const hoverShadow =
-			hoverEffect === "softShadowBold"
-				? `0 0 0 2px ${darkerOutlineColor}, 0 10px 22px -16px ${statusColor}`
-				: hoverEffect === "strongEdgeShadow"
-					? `inset 0 0 0 3px ${edgeFrameColor}, 0 18px 34px -14px ${strongBlurColor}`
-					: hoverEffect === "smallBlurSelectedColor"
-						? `0 0 0 2px ${darkerOutlineColor}, 0 6px 12px -10px ${statusColor}`
-						: hoverEffect === "deepInnerBlur"
-							? `inset 0 0 0 2px ${darkerOutlineColor}, inset 0 0 30px 8px ${statusColor}`
-					: undefined;
-
-		return {
-			backgroundColor: statusColor,
-			...(isHovered && hoverShadow
-				? {
-					boxShadow: hoverShadow,
-				}
-				: {}),
-		};
-	};
-
-	if (normalized === "I_SI_2") {
-		return buildStatusBackground(si2);
+function resolveColorSwatchStyle(
+	color: string | null | undefined,
+	shade: number | null | undefined,
+	intensity: number | null | undefined,
+): React.CSSProperties | undefined {
+	const normalizedColor = String(color ?? "").trim().toLowerCase();
+	if (!normalizedColor) {
+		return undefined;
 	}
 
-	if (normalized === "I_SI_3") {
-		return buildStatusBackground(si3);
+	const hueSat = PALETTE_HUE_SAT_BY_KEY[normalizedColor];
+	if (!hueSat) {
+		return undefined;
 	}
 
-	if (normalized === "I_SI_4") {
-		return buildStatusBackground(si4);
-	}
-
-	if (yellowStatusCodes.has(normalized)) {
-		return buildStatusBackground(si5To9);
-	}
+	const normalizedShade =
+		typeof shade === "number" && Number.isFinite(shade)
+			? Math.round(shade)
+			: 200;
+	const lightness = SHADE_TO_LIGHTNESS[normalizedShade] ?? SHADE_TO_LIGHTNESS[200];
+	const alpha =
+		typeof intensity === "number" && Number.isFinite(intensity)
+			? Math.min(1, Math.max(0, intensity / 100))
+			: 0.75;
 
 	return {
-		backgroundColor: "rgb(255 255 255 / 1)",
+		backgroundColor: `hsl(${hueSat} ${lightness}% / ${alpha})`,
 	};
 }
 
+function inferCategoryKeyFromCode(kodTypu: string): string {
+	const normalizedCode = kodTypu.trim().toLowerCase();
 
-export function InspectionsDataTable({
-	rowsError,
-	isRowsLoading,
-	visibleColumns,
-	columnWidths,
-	minColumnWidth,
-	sortColumnKey,
-	sortDirection,
-	advancedFilters,
-	columnFilters,
-	rows,
-	noLetterFlagsByRowId = {},
-	noAcceptanceDatesByRowId = {},
-	statusCodeByRowId = {},
-	selectedInspectionId,
-	flashInspectionId = null,
-	centerOnInspectionId = null,
-	onInspectionCentered,
-	onSelectInspection,
-	onOpenInspectionPreview,
-	onSortByColumn,
-	onResizeColumn,
-	onOpenAdvancedFilter,
-	onFilterChange,
-	footer,
-}: InspectionsDataTableProps) {
-	const tbodyRef = useRef<HTMLTableSectionElement | null>(null);
-	const [emeraldSettings, setEmeraldSettings] = useState<ColorSettings>({
-		color: "emerald",
-		shade: 200,
-		opacity: 55,
-	});
-	const [skySettings, setSkySettings] = useState<ColorSettings>({
-		color: "sky",
-		shade: 200,
-		opacity: 51,
-	});
-	const [pinkSettings, setPinkSettings] = useState<ColorSettings>({
-		color: "rose",
-		shade: 200,
-		opacity: 39,
-	});
-	const [amberSettings, setAmberSettings] = useState<ColorSettings>({
-		color: "yellow",
-		shade: 200,
-		opacity: 31,
-	});
-	const [hoverEffect, setHoverEffect] = useState<HoverEffectOption>("softShadowBold");
-	const [hoveredInspectionId, setHoveredInspectionId] = useState<string | null>(null);
-	const [hoverTooltip, setHoverTooltip] = useState<HoverTooltipState | null>(null);
-	const [isTooltipVisible, setIsTooltipVisible] = useState(false);
+	if (normalizedCode === "statusy_zalecen") {
+		return "1";
+	}
 
-	useEffect(() => {
-		if (!centerOnInspectionId) {
-			return;
+	if (GENERAL_DICTIONARY_CODES.has(normalizedCode)) {
+		return "3";
+	}
+
+	if (COMMITMENT_DECISION_DICTIONARY_CODES.has(normalizedCode)) {
+		return "4";
+	}
+
+	if (SANCTION_DICTIONARY_CODES.has(normalizedCode)) {
+		return "2";
+	}
+
+	return "0";
+}
+
+function toHumanLabel(value: string) {
+	return value
+		.replace(/[_-]+/g, " ")
+		.split(" ")
+		.filter(Boolean)
+		.map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+		.join(" ");
+}
+
+function resolveCategoryOption(type: DictionaryType): DictionaryCategoryOption {
+	const normalizedCode = type.kodTypu.trim().toLowerCase();
+	if (GENERAL_DICTIONARY_CODES.has(normalizedCode)) {
+		return { key: "3", label: "Ogólne", sortOrder: -1 };
+	}
+
+	if (COMMITMENT_DECISION_DICTIONARY_CODES.has(normalizedCode)) {
+		return { key: "4", label: "Decyzje zobowiązujące", sortOrder: 4 };
+	}
+
+	const rawCategory = type.kategoria;
+
+	if (typeof rawCategory === "number" && Number.isFinite(rawCategory)) {
+		const key = String(rawCategory);
+		if (key === "0") {
+			return { key, label: "Inspekcje", sortOrder: 0 };
+		}
+		if (key === "1") {
+			return { key, label: "Zalecenia", sortOrder: 1 };
+		}
+		if (key === "2") {
+			return { key, label: "Wnioski sankcyjne", sortOrder: 2 };
+		}
+		if (key === "3") {
+			return { key, label: "Ogólne", sortOrder: -1 };
+		}
+		if (key === "4") {
+			return { key, label: "Decyzje zobowiązujące", sortOrder: 4 };
 		}
 
-		const rows = tbodyRef.current?.querySelectorAll<HTMLTableRowElement>(
-			"tr[data-inspection-id]",
-		);
-		if (!rows || rows.length === 0) {
-			return;
+		return { key, label: `Kategoria ${key}`, sortOrder: rawCategory };
+	}
+
+	if (typeof rawCategory === "string" && rawCategory.trim()) {
+		const normalized = rawCategory.trim().toLowerCase();
+		if (["0", "inspekcje", "inspections"].includes(normalized)) {
+			return { key: "0", label: "Inspekcje", sortOrder: 0 };
+		}
+		if (["1", "zalecenia", "recommendations"].includes(normalized)) {
+			return { key: "1", label: "Zalecenia", sortOrder: 1 };
+		}
+		if (
+			[
+				"2",
+				"wnioski sankcyjne",
+				"wnioski_sankcyjne",
+				"sanction requests",
+				"sankcje",
+			].includes(normalized)
+		) {
+			return { key: "2", label: "Wnioski sankcyjne", sortOrder: 2 };
+		}
+		if (
+			[
+				"3",
+				"ogolne",
+				"ogólne",
+				"general",
+				"common",
+			].includes(normalized)
+		) {
+			return { key: "3", label: "Ogólne", sortOrder: -1 };
+		}
+		if (
+			[
+				"4",
+				"decyzje zobowiązujące",
+				"decyzje zobowiazujace",
+				"decyzje_zobowiazujace",
+				"commitment decisions",
+			].includes(normalized)
+		) {
+			return { key: "4", label: "Decyzje zobowiązujące", sortOrder: 4 };
 		}
 
-		const targetRow = Array.from(rows).find(
-			(row) => row.dataset.inspectionId === centerOnInspectionId,
-		);
-		if (!targetRow) {
-			return;
+		return { key: normalized, label: toHumanLabel(rawCategory.trim()), sortOrder: 100 };
+	}
+
+	const fallbackKey = inferCategoryKeyFromCode(type.kodTypu);
+	if (fallbackKey === "1") {
+		return { key: fallbackKey, label: "Zalecenia", sortOrder: 1 };
+	}
+	if (fallbackKey === "2") {
+		return { key: fallbackKey, label: "Wnioski sankcyjne", sortOrder: 2 };
+	}
+	if (fallbackKey === "3") {
+		return { key: fallbackKey, label: "Ogólne", sortOrder: -1 };
+	}
+	if (fallbackKey === "4") {
+		return { key: fallbackKey, label: "Decyzje zobowiązujące", sortOrder: 4 };
+	}
+
+	return { key: fallbackKey, label: "Inspekcje", sortOrder: 0 };
+}
+
+function toTitleCaseFromCode(kodTypu: string) {
+	return kodTypu
+		.split("_")
+		.filter(Boolean)
+		.map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+		.join(" ");
+}
+
+function getDictionaryTypeLabel(type: DictionaryType) {
+	const normalizedCode = type.kodTypu.trim().toLowerCase();
+	if (normalizedCode === "rozstrzygniecie_decyzji_i") {
+		return "Rozstrzygnięcie decyzji I";
+	}
+	if (normalizedCode === "rozstrzygniecie_decyzji_ii") {
+		return "Rozstrzygnięcie decyzji II";
+	}
+	if (normalizedCode === "rozstrzygniecie_wniosku_sankcyjnego_i") {
+		return "Rozstrzygnięcie wniosku sankcyjnego";
+	}
+	if (normalizedCode === "rynki") {
+		return "Rynek";
+	}
+	if (normalizedCode === "statusy_inspekcji") {
+		return "Status inspekcji";
+	}
+	if (normalizedCode === "statusy_zalecen") {
+		return "Status zaleceń";
+	}
+	if (normalizedCode === "department_ogolne") {
+		return "Departament";
+	}
+
+	const trimmedName = type.nazwaTypu.trim();
+	if (trimmedName) {
+		return trimmedName.charAt(0).toUpperCase() + trimmedName.slice(1);
+	}
+
+	return toTitleCaseFromCode(type.kodTypu);
+}
+
+export function DictionariesSheetPanel({
+	operatorLogin,
+	authRole,
+	preferredKodTypu,
+	tableOnly = false,
+	title = "Arkusz słowników",
+	subtitle = "Wybierz typ słownika, przeglądaj pozycje i dodawaj nowe wpisy.",
+	canEdit = true,
+}: DictionariesSheetPanelProps) {
+	const {
+		types,
+		entries,
+		selectedKodTypu,
+		selectedType,
+		setSelectedKodTypu,
+		isTypesLoading,
+		isEntriesLoading,
+		typesError,
+		entriesError,
+		loadTypes,
+		loadEntries,
+		loadTeamLeaders,
+		isAddModalOpen,
+		openAddModal,
+		closeAddModal,
+		isAddingEntry,
+		addEntryError,
+		addEntryForm,
+		setAddEntryForm,
+		teamLeaders,
+		isTeamLeadersLoading,
+		isTeamsType,
+		submitAddEntry,
+	} = useDictionariesSheet({ operatorLogin });
+
+	const [editingTeamEntry, setEditingTeamEntry] =
+		useState<DictionaryEntry | null>(null);
+	const [editingDictionaryEntry, setEditingDictionaryEntry] =
+		useState<DictionaryEntry | null>(null);
+	const [editDictionaryForm, setEditDictionaryForm] = useState<DictionaryEditFormState>({
+		nazwaPozycji: "",
+		nazwaUzytkowa: "",
+		skrotPozycji: "",
+		aktywny: true,
+		kolor: null,
+		odcien: null,
+		intensywnosc: null,
+	});
+	const [editDictionaryError, setEditDictionaryError] = useState<string | null>(
+		null,
+	);
+	const [isSubmittingDictionaryEdit, setIsSubmittingDictionaryEdit] =
+		useState(false);
+	const [editTeamCode, setEditTeamCode] = useState("");
+	const [editTeamName, setEditTeamName] = useState("");
+	const [editTeamLeaderId, setEditTeamLeaderId] = useState<number | null>(null);
+	const [editTeamError, setEditTeamError] = useState<string | null>(null);
+	const [isSubmittingTeamEdit, setIsSubmittingTeamEdit] = useState(false);
+	const [selectedCategoryKey, setSelectedCategoryKey] = useState("");
+
+	const sortedTypes = useMemo(() => {
+		const orderByCode: Record<string, number> = {
+			nazwy_podmiotow: 10,
+			typy_inspekcji: 20,
+			zakresy_inspekcji: 30,
+			rynki: 40,
+			rodzaje_podmiotu: 50,
+			statusy_inspekcji: 60,
+			statusy_zalecen: 70,
+			department_ogolne: 75,
+			zespoly: 80,
+			department: 210,
+			sankcja: 220,
+			podstawa_prawna_sankcji: 230,
+			naruszenia_skutkujace_sankcja: 240,
+			informacja_o_wszczeciu_postepowania_sankcyjnego: 250,
+			rozstrzygniecie_wniosku_sankcyjnego_i: 260,
+			nazwy_podmiotow_sankcje: 270,
+			rozstrzygniecie_decyzji_i: 310,
+			rozstrzygniecie_decyzji_ii: 320,
+		};
+
+		return types
+			.filter((type) => {
+				const normalizedCode = type.kodTypu.trim().toLowerCase();
+				const hideTeamsInGeneralDictionaryView = !tableOnly;
+
+				return (
+					normalizedCode !== "osoby" &&
+					normalizedCode !== "rozstrzygniecie_wniosku_sankcyjnego_ii" &&
+					(!hideTeamsInGeneralDictionaryView || normalizedCode !== "zespoly")
+				);
+			})
+			.sort((left, right) => {
+				const leftCode = left.kodTypu.trim().toLowerCase();
+				const rightCode = right.kodTypu.trim().toLowerCase();
+				const leftOrder = orderByCode[leftCode] ?? Number.MAX_SAFE_INTEGER;
+				const rightOrder = orderByCode[rightCode] ?? Number.MAX_SAFE_INTEGER;
+
+				if (leftOrder !== rightOrder) {
+					return leftOrder - rightOrder;
+				}
+
+				return getDictionaryTypeLabel(left).localeCompare(
+					getDictionaryTypeLabel(right),
+					"pl",
+					{
+						sensitivity: "base",
+					},
+				);
+			});
+	}, [tableOnly, types]);
+
+	const categoryOptions = useMemo(() => {
+		const categoryMap = new Map<string, DictionaryCategoryOption>();
+
+		for (const type of sortedTypes) {
+			const category = resolveCategoryOption(type);
+			if (!categoryMap.has(category.key)) {
+				categoryMap.set(category.key, category);
+			}
 		}
 
-		targetRow.scrollIntoView({ block: "center", inline: "nearest" });
-		onInspectionCentered?.();
-	}, [centerOnInspectionId, onInspectionCentered, rows]);
+		return Array.from(categoryMap.values()).sort((left, right) => {
+			if (left.sortOrder !== right.sortOrder) {
+				return left.sortOrder - right.sortOrder;
+			}
 
-	useEffect(() => {
-		if (!hoverTooltip) {
-			setIsTooltipVisible(false);
-			return;
-		}
-
-		setIsTooltipVisible(false);
-		const frameId = requestAnimationFrame(() => {
-			setIsTooltipVisible(true);
+			return left.label.localeCompare(right.label, "pl", { sensitivity: "base" });
 		});
+	}, [sortedTypes]);
 
-		return () => cancelAnimationFrame(frameId);
-	}, [hoverTooltip]);
+	const visibleTypes = useMemo(() => {
+		if (tableOnly || !selectedCategoryKey) {
+			return sortedTypes;
+		}
+
+		return sortedTypes.filter(
+			(type) => resolveCategoryOption(type).key === selectedCategoryKey,
+		);
+	}, [selectedCategoryKey, sortedTypes, tableOnly]);
+
+	const visibleSelectedType = useMemo(
+		() => visibleTypes.find((type) => type.kodTypu === selectedKodTypu) ?? null,
+		[selectedKodTypu, visibleTypes],
+	);
+
+	const handleCategorySelect = (categoryKey: string) => {
+		setSelectedCategoryKey(categoryKey);
+
+		const selectedStillVisible = sortedTypes.some(
+			(type) =>
+				type.kodTypu === selectedKodTypu &&
+				resolveCategoryOption(type).key === categoryKey,
+		);
+
+		if (selectedStillVisible) {
+			return;
+		}
+
+		const firstTypeInCategory = sortedTypes.find(
+			(type) => resolveCategoryOption(type).key === categoryKey,
+		);
+
+		setSelectedKodTypu(firstTypeInCategory?.kodTypu ?? "");
+	};
+
+	const isTeamsSelected = selectedKodTypu.trim().toLowerCase() === "zespoly";
+	const normalizedSelectedKodTypu = selectedKodTypu.trim().toLowerCase();
+	const isInspectionStatusesSelected = normalizedSelectedKodTypu === "statusy_inspekcji";
+	const selectedEditInspectionPresetKey = findInspectionStatusPresetKeyByValues(
+		editDictionaryForm.kolor,
+		editDictionaryForm.odcien,
+		editDictionaryForm.intensywnosc,
+	);
+	const isEditNoColorSelected =
+		editDictionaryForm.kolor === null &&
+		editDictionaryForm.odcien === null &&
+		editDictionaryForm.intensywnosc === null;
+	const PRESET_SWATCH_CLASS_BY_KEY: Record<string, string> = {
+		si2: "bg-green-500/75",
+		si3: "bg-cyan-500/75",
+		si4: "bg-rose-300/75",
+		si5to9: "bg-yellow-300/75",
+	};
+	const canEditCurrentType =
+		canEdit &&
+		(authRole !== "team_lead" ||
+			TEAM_LEAD_EDITABLE_DICTIONARY_TYPE_CODES.has(normalizedSelectedKodTypu));
+	const tableColumnCount = isTeamsSelected ? 5 : isInspectionStatusesSelected ? 5 : 4;
+
+	const openTeamEditModal = (entry: DictionaryEntry) => {
+		if (!canEditCurrentType) {
+			return;
+		}
+
+		if (!entry.teamId) {
+			return;
+		}
+
+		setEditingTeamEntry(entry);
+		setEditTeamCode(entry.kodPozycji);
+		setEditTeamName(entry.nazwaPozycji);
+		setEditTeamLeaderId(entry.kierownikUserId ?? null);
+		setEditTeamError(null);
+		void loadTeamLeaders();
+	};
+
+	const openDictionaryEditModal = (entry: DictionaryEntry) => {
+		if (!canEditCurrentType) {
+			return;
+		}
+
+		setEditingDictionaryEntry(entry);
+		setEditDictionaryForm({
+			nazwaPozycji: entry.nazwaPozycji,
+			nazwaUzytkowa: entry.nazwaUzytkowa ?? "",
+			skrotPozycji: entry.skrotPozycji ?? "",
+			aktywny: entry.aktywny,
+			kolor: entry.kolor ?? null,
+			odcien: entry.odcien ?? null,
+			intensywnosc: entry.intensywnosc ?? null,
+		});
+		setEditDictionaryError(null);
+	};
+
+	const closeDictionaryEditModal = () => {
+		setEditingDictionaryEntry(null);
+		setEditDictionaryError(null);
+		setIsSubmittingDictionaryEdit(false);
+	};
+
+	const handleSubmitDictionaryEdit = async (
+		event: React.FormEvent<HTMLFormElement>,
+	) => {
+		event.preventDefault();
+
+		if (!canEditCurrentType) {
+			setEditDictionaryError("Brak uprawnień do edycji słownika.");
+			return;
+		}
+
+		if (!editingDictionaryEntry) {
+			return;
+		}
+
+		if (!editDictionaryForm.nazwaPozycji.trim()) {
+			setEditDictionaryError("Uzupełnij wymagane pola.");
+			return;
+		}
+
+		setIsSubmittingDictionaryEdit(true);
+		setEditDictionaryError(null);
+
+		try {
+			const result = await updateDictionaryEntry({
+				operatorLogin,
+				kodTypu: selectedKodTypu,
+				entryId: editingDictionaryEntry.id,
+				form: {
+					kodPozycji: editingDictionaryEntry.kodPozycji,
+					...editDictionaryForm,
+					kierownikUserId: null,
+				},
+			});
+
+			if (!result.ok) {
+				setEditDictionaryError(result.error);
+				return;
+			}
+
+			const resolvedDictionaryEntryId =
+				typeof result.entryId === "number" && Number.isFinite(result.entryId)
+					? result.entryId
+					: typeof editingDictionaryEntry.id === "number" &&
+						  Number.isFinite(editingDictionaryEntry.id)
+					? editingDictionaryEntry.id
+					: null;
+
+			if (isInspectionStatusesSelected) {
+				if (!resolvedDictionaryEntryId) {
+					setEditDictionaryError(
+						"Brak identyfikatora pozycji statusu. Odśwież listę słowników i spróbuj ponownie.",
+					);
+					return;
+				}
+
+				const styleResult =
+					editDictionaryForm.kolor &&
+					typeof editDictionaryForm.odcien === "number" &&
+					typeof editDictionaryForm.intensywnosc === "number"
+						? await upsertInspectionStatusStyle({
+								operatorLogin,
+								slownikPozycjaId: resolvedDictionaryEntryId,
+								kolor: editDictionaryForm.kolor,
+								odcien: editDictionaryForm.odcien,
+								intensywnosc: editDictionaryForm.intensywnosc,
+							})
+						: await clearInspectionStatusStyle({
+								operatorLogin,
+								slownikPozycjaId: resolvedDictionaryEntryId,
+							});
+
+				if (!styleResult.ok) {
+					setEditDictionaryError(styleResult.error);
+					return;
+				}
+			}
+
+			await loadEntries(selectedKodTypu, { forceRefresh: true });
+			if (typeof window !== "undefined") {
+				window.dispatchEvent(
+					new CustomEvent(DICTIONARIES_CHANGED_EVENT, {
+						detail: { kodTypu: selectedKodTypu },
+					}),
+				);
+			}
+			closeDictionaryEditModal();
+		} catch {
+			setEditDictionaryError("Nie udało się zaktualizować pozycji słownika.");
+		} finally {
+			setIsSubmittingDictionaryEdit(false);
+		}
+	};
+
+	const closeTeamEditModal = () => {
+		setEditingTeamEntry(null);
+		setEditTeamCode("");
+		setEditTeamName("");
+		setEditTeamLeaderId(null);
+		setEditTeamError(null);
+		setIsSubmittingTeamEdit(false);
+	};
+
+	const handleSubmitTeamEdit = async (
+		event: React.FormEvent<HTMLFormElement>,
+	) => {
+		event.preventDefault();
+
+		if (!canEditCurrentType) {
+			setEditTeamError("Brak uprawnień do edycji słownika.");
+			return;
+		}
+
+		if (!editingTeamEntry?.teamId) {
+			return;
+		}
+
+		if (!editTeamName.trim()) {
+			setEditTeamError("Nazwa zespołu jest wymagana.");
+			return;
+		}
+
+		if (!editTeamCode.trim()) {
+			setEditTeamError("Kod zespołu jest wymagany.");
+			return;
+		}
+
+		setIsSubmittingTeamEdit(true);
+		setEditTeamError(null);
+
+		try {
+			const result = await updateTeamEntry({
+				operatorLogin,
+				teamId: editingTeamEntry.teamId,
+				kod: editTeamCode,
+				nazwa: editTeamName,
+				kierownikUserId: editTeamLeaderId,
+			});
+
+			if (!result.ok) {
+				setEditTeamError(result.error);
+				return;
+			}
+
+			await loadEntries(selectedKodTypu, { forceRefresh: true });
+			closeTeamEditModal();
+		} catch {
+			setEditTeamError("Nie udało się zaktualizować zespołu.");
+		} finally {
+			setIsSubmittingTeamEdit(false);
+		}
+	};
+
+	useEffect(() => {
+		void loadTypes();
+	}, [loadTypes]);
+
+	useEffect(() => {
+		if (!selectedKodTypu) {
+			return;
+		}
+
+		void loadEntries(selectedKodTypu);
+	}, [loadEntries, selectedKodTypu]);
+
+	useEffect(() => {
+		if (tableOnly) {
+			return;
+		}
+
+		if (categoryOptions.length === 0) {
+			if (selectedCategoryKey) {
+				setSelectedCategoryKey("");
+			}
+			return;
+		}
+
+		const isSelectedCategoryVisible = categoryOptions.some(
+			(category) => category.key === selectedCategoryKey,
+		);
+
+		if (!isSelectedCategoryVisible) {
+			setSelectedCategoryKey(categoryOptions[0]?.key ?? "");
+		}
+	}, [categoryOptions, selectedCategoryKey, tableOnly]);
+
+	useEffect(() => {
+		if (visibleTypes.length === 0) {
+			setSelectedKodTypu("");
+			return;
+		}
+
+		const selectedIsVisible = visibleTypes.some(
+			(type) => type.kodTypu === selectedKodTypu,
+		);
+		if (!selectedIsVisible) {
+			const firstVisibleType = visibleTypes[0];
+			if (firstVisibleType) {
+				setSelectedKodTypu(firstVisibleType.kodTypu);
+			}
+		}
+	}, [selectedKodTypu, setSelectedKodTypu, visibleTypes]);
+
+	useEffect(() => {
+		const normalizedPreferred = preferredKodTypu?.trim();
+		if (!normalizedPreferred) {
+			return;
+		}
+
+		const preferredType = sortedTypes.find(
+			(type) => type.kodTypu === normalizedPreferred,
+		);
+		if (!preferredType) {
+			return;
+		}
+
+		const preferredCategoryKey = resolveCategoryOption(preferredType).key;
+		if (preferredCategoryKey !== selectedCategoryKey) {
+			setSelectedCategoryKey(preferredCategoryKey);
+		}
+
+		if (selectedKodTypu !== normalizedPreferred) {
+			setSelectedKodTypu(normalizedPreferred);
+		}
+	}, [
+		preferredKodTypu,
+		selectedCategoryKey,
+		selectedKodTypu,
+		setSelectedKodTypu,
+		sortedTypes,
+	]);
+
+	const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		if (!canEditCurrentType) {
+			return;
+		}
+		await submitAddEntry();
+	};
 
 	return (
-		<div className="space-y-2">
-			<div className="grid gap-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 sm:grid-cols-2 xl:grid-cols-5">
-				<div className="flex flex-col gap-2 rounded border border-slate-200 p-2">
-					<span className="font-medium text-slate-800">Zielony I_SI_2</span>
-					<label className="flex flex-col gap-1">
-						<span>Kolor</span>
-						<select
-							value={emeraldSettings.color}
-							onChange={(event) =>
-								setEmeraldSettings((current) => ({
-									...current,
-									color: event.target.value as StatusPalette,
-								}))
-							}
-							className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-						>
-							{SI2_PALETTES.map((palette) => (
-								<option key={palette} value={palette}>
-									{palette}
-								</option>
-							))}
-						</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span>Odcien</span>
-					<select
-						value={emeraldSettings.shade}
-						onChange={(event) =>
-							setEmeraldSettings((current) => ({
-								...current,
-								shade: Number(event.target.value) as StatusShade,
-							}))
-						}
-						className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-					>
-						{STATUS_SHADES.map((shade) => (
-							<option key={shade} value={shade}>
-								{shade}
-							</option>
-						))}
-					</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span>Intensywnosc</span>
-					<input
-						type="range"
-						min={0}
-						max={100}
-						value={emeraldSettings.opacity}
-						onChange={(event) =>
-							setEmeraldSettings((current) => ({
-								...current,
-								opacity: Number(event.target.value),
-							}))
-						}
-						className="h-1.5 w-32 cursor-pointer accent-blue-600"
-					/>
-					<span className="w-10 text-right font-medium">{emeraldSettings.opacity}%</span>
-					</label>
-				</div>
-				<div className="flex flex-col gap-2 rounded border border-slate-200 p-2">
-					<span className="font-medium text-slate-800">Niebieski I_SI_3</span>
-					<label className="flex flex-col gap-1">
-						<span>Kolor</span>
-						<select
-							value={skySettings.color}
-							onChange={(event) =>
-								setSkySettings((current) => ({
-									...current,
-									color: event.target.value as StatusPalette,
-								}))
-							}
-							className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-						>
-							{SI3_PALETTES.map((palette) => (
-								<option key={palette} value={palette}>
-									{palette}
-								</option>
-							))}
-						</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span>Odcien</span>
-					<select
-						value={skySettings.shade}
-						onChange={(event) =>
-							setSkySettings((current) => ({
-								...current,
-								shade: Number(event.target.value) as StatusShade,
-							}))
-						}
-						className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-					>
-						{STATUS_SHADES.map((shade) => (
-							<option key={shade} value={shade}>
-								{shade}
-							</option>
-						))}
-					</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span>Intensywnosc</span>
-					<input
-						type="range"
-						min={0}
-						max={100}
-						value={skySettings.opacity}
-						onChange={(event) =>
-							setSkySettings((current) => ({
-								...current,
-								opacity: Number(event.target.value),
-							}))
-						}
-						className="h-1.5 w-32 cursor-pointer accent-blue-600"
-					/>
-					<span className="w-10 text-right font-medium">{skySettings.opacity}%</span>
-					</label>
-				</div>
-				<div className="flex flex-col gap-2 rounded border border-slate-200 p-2">
-					<span className="font-medium text-slate-800">Czerwony I_SI_4</span>
-					<label className="flex flex-col gap-1">
-						<span>Kolor</span>
-						<select
-							value={pinkSettings.color}
-							onChange={(event) =>
-								setPinkSettings((current) => ({
-									...current,
-									color: event.target.value as StatusPalette,
-								}))
-							}
-							className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-						>
-							{SI4_PALETTES.map((palette) => (
-								<option key={palette} value={palette}>
-									{palette}
-								</option>
-							))}
-						</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span>Odcien</span>
-					<select
-						value={pinkSettings.shade}
-						onChange={(event) =>
-							setPinkSettings((current) => ({
-								...current,
-								shade: Number(event.target.value) as StatusShade,
-							}))
-						}
-						className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-					>
-						{STATUS_SHADES.map((shade) => (
-							<option key={shade} value={shade}>
-								{shade}
-							</option>
-						))}
-					</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span>Intensywnosc</span>
-					<input
-						type="range"
-						min={0}
-						max={100}
-						value={pinkSettings.opacity}
-						onChange={(event) =>
-							setPinkSettings((current) => ({
-								...current,
-								opacity: Number(event.target.value),
-							}))
-						}
-						className="h-1.5 w-32 cursor-pointer accent-blue-600"
-					/>
-					<span className="w-10 text-right font-medium">{pinkSettings.opacity}%</span>
-					</label>
-				</div>
-				<div className="flex flex-col gap-2 rounded border border-slate-200 p-2">
-					<span className="font-medium text-slate-800">Zolto-pomaranczowy I_SI_5-9</span>
-					<label className="flex flex-col gap-1">
-						<span>Kolor</span>
-						<select
-							value={amberSettings.color}
-							onChange={(event) =>
-								setAmberSettings((current) => ({
-									...current,
-									color: event.target.value as StatusPalette,
-								}))
-							}
-							className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-						>
-							{SI5_TO_9_PALETTES.map((palette) => (
-								<option key={palette} value={palette}>
-									{palette}
-								</option>
-							))}
-						</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span>Odcien</span>
-					<select
-						value={amberSettings.shade}
-						onChange={(event) =>
-							setAmberSettings((current) => ({
-								...current,
-								shade: Number(event.target.value) as StatusShade,
-							}))
-						}
-						className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-					>
-						{STATUS_SHADES.map((shade) => (
-							<option key={shade} value={shade}>
-								{shade}
-							</option>
-						))}
-					</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span>Intensywnosc</span>
-					<input
-						type="range"
-						min={0}
-						max={100}
-						value={amberSettings.opacity}
-						onChange={(event) =>
-							setAmberSettings((current) => ({
-								...current,
-								opacity: Number(event.target.value),
-							}))
-						}
-						className="h-1.5 w-32 cursor-pointer accent-blue-600"
-					/>
-					<span className="w-10 text-right font-medium">{amberSettings.opacity}%</span>
-					</label>
-				</div>
-				<div className="flex flex-col gap-2 rounded border border-slate-200 p-2">
-					<span className="font-medium text-slate-800">Efekt po najechaniu</span>
-					<label className="flex flex-col gap-1">
-						<span>Tryb</span>
-						<select
-							value={hoverEffect}
-							onChange={(event) => setHoverEffect(event.target.value as HoverEffectOption)}
-							className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-						>
-							<option value="softShadowBold">Maly shadow + pogrubienie</option>
-							<option value="strongEdgeShadow">Mocne krawedzie + wieksze rozmycie</option>
-							<option value="smallBlurSelectedColor">Mniejsze rozmycie + wybrany kolor</option>
-							<option value="deepInnerBlur">Wieksze rozmycie do srodka</option>
-							<option value="none">Brak</option>
-						</select>
-					</label>
+		<section
+			className={`rounded-2xl border border-slate-700/70 bg-[#101f39] p-4 sm:p-5 ${
+				tableOnly
+					? "relative flex h-[calc(100vh-2.2rem)] min-h-[40rem] flex-col"
+					: ""
+			}`}
+		>
+			<div className="mb-4 border-slate-700/70 border-b pb-3">
+				<div>
+					<h2 className="font-semibold text-lg text-slate-100">
+						{title}
+					</h2>
+					{subtitle.trim() ? (
+						<p className="mt-1 text-slate-300/85 text-sm">
+							{subtitle}
+						</p>
+					) : null}
 				</div>
 			</div>
 
-			<RegistryDataTable
-			isLoading={isRowsLoading}
-			errorMessage={rowsError}
-			footer={footer}
-			containerClassName="-mt-1"
-			scrollAreaClassName="h-[calc(96vh-11rem)] min-h-88"
-			tableClassName="min-w-350 table-fixed border-collapse text-slate-900 text-sm"
-			visibleColumns={visibleColumns.map((column) => ({
-				...column,
-				tooltip: INSPECTION_COLUMN_TOOLTIPS[column.key],
-			}))}
-			sortColumnKey={sortColumnKey}
-			sortDirection={sortDirection}
-			advancedFilters={advancedFilters}
-			columnFilters={columnFilters}
-			onSortByColumn={onSortByColumn}
-			columnWidths={columnWidths}
-			minColumnWidth={minColumnWidth}
-			wrapHeaderLabels
-			controlsInFilterRow
-			showInfoIcon
-			infoIconSize={11}
-			onResizeColumn={onResizeColumn}
-			onOpenAdvancedFilter={onOpenAdvancedFilter}
-			onFilterChange={onFilterChange}
-		>
-				<tbody ref={tbodyRef}>
-					{rows.map((row) => {
-						const isActive = selectedInspectionId === row.id;
-						const isFlashing = flashInspectionId === row.id;
-						const isHovered = hoveredInspectionId === row.id;
-						const statusRowClass = resolveStatusRowClass(statusCodeByRowId[row.id]);
-						const statusRowStyle = resolveStatusRowStyle(statusCodeByRowId[row.id], {
-							si2: emeraldSettings,
-							si3: skySettings,
-							si4: pinkSettings,
-							si5To9: amberSettings,
-						}, isHovered, hoverEffect);
+			{!tableOnly ? (
+				<div className="mb-4 rounded-xl border border-slate-700/70 bg-[#0f1c34] p-2">
+					<p className="mb-2 px-1 font-semibold text-slate-300/90 text-xs uppercase tracking-[0.08em]">
+						Kategoria słowników
+					</p>
+					<div className="flex flex-wrap gap-2">
+						{categoryOptions.map((category) => {
+							const isActive = selectedCategoryKey === category.key;
 
-						return (
-							<tr
-								key={row.id}
-								data-inspection-id={row.id}
-								onClick={() => onSelectInspection(row.id)}
-								onDoubleClick={() => onOpenInspectionPreview?.(row.id)}
-								onMouseEnter={() => setHoveredInspectionId(row.id)}
-								onMouseLeave={() => setHoveredInspectionId((current) => (current === row.id ? null : current))}
-								className={`cursor-pointer border-slate-200 border-b transition-[box-shadow] last:border-b-0 ${
-									isFlashing || isActive
-										? "bg-blue-100 text-slate-900 [&>td]:border-blue-300 [&>td]:border-y [&>td:first-child]:border-l [&>td:last-child]:border-r"
-										: `${statusRowClass} text-slate-900`
-								}`}
-								style={isFlashing || isActive ? undefined : statusRowStyle}
-							>
-								{visibleColumns.map((column) => {
-									const value = row[column.key];
-									const rawValue = String(value ?? "").trim();
-									const normalizedValue = rawValue.toLowerCase();
-									const rowFlags = noLetterFlagsByRowId[row.id];
-									const acceptanceFlags = noAcceptanceDatesByRowId[row.id];
-									const shouldShowNoLetter =
-										(column.key === "dataDoreczeniaPisma" &&
-											rowFlags?.brakDataDoreczeniaPisma) ||
-										(column.key === "dataPismaZastrzezenia" &&
-											rowFlags?.brakDataPismaZastrzezenia) ||
-										(column.key === "dataWyslaniaPismaZZastrzezeniami" &&
-											rowFlags?.brakDataWyslaniaPismaZZastrzezeniami) ||
-										(column.key === "dataWplywuPisma" &&
-											rowFlags?.brakDataWplywuPisma) ||
-										(column.key === "dataPismaZOdpowiedzia" &&
-											rowFlags?.brakDataPismaZOdpowiedzia) ||
-										(column.key === "dataWyslaniaPismaZOdpowiedzia" &&
-											rowFlags?.brakDataWyslaniaPismaZOdpowiedzia);
-									const shouldShowNoAcceptanceDates =
-										column.key === "dataAkceptacjiNoty" &&
-										acceptanceFlags?.brakDatAkceptacjiNoty;
-									const shouldShowNotApplicable = isNotApplicableByInspectionType(
-										String(row.typInspekcji ?? ""),
-										column.key,
-									);
-									const displayValue =
-										shouldShowNotApplicable
-											? "Nie dotyczy"
-											: shouldShowNoLetter
-											? "Brak pisma"
-											: shouldShowNoAcceptanceDates
-												? "Brak pisma"
-												: normalizedValue === "" || normalizedValue === "brak"
-												? "-"
-												: rawValue;
-									const formattedDisplayValue = formatDatesInDisplayText(displayValue);
-									const isLongTextColumn =
-										column.key === "zakresInspekcji" ||
-										column.key === "skladZespolu" ||
-										column.key === "szczegolyDotyczaceZakresu" ||
-										column.key === "dataAkceptacjiNoty" ||
-										column.key === "dataZalecen";
-									const isEntityNameColumn = column.key === "nazwaPodmiotu";
-									const isScopeDetailsColumn =
-										column.key === "szczegolyDotyczaceZakresu";
-									const isStatusColumn = column.key === "status";
-									const isCommentColumn = column.key === "komentarz";
-									const columnWidth = columnWidths?.[column.key];
-									const isScopeColumn = column.key === "zakresInspekcji";
-									const isTeamColumn = column.key === "skladZespolu";
-									const isAcceptanceDatesColumn =
-										column.key === "dataAkceptacjiNoty";
-									const isRecommendationDatesColumn =
-										column.key === "dataZalecen";
-									const verticalListItems = isTeamColumn
-										? formattedDisplayValue
-											.split(";")
-											.map((item) => item.trim())
-											.filter(Boolean)
-										: isScopeColumn
-											? formattedDisplayValue
-												.split(";")
-												.map((item) => item.trim())
-												.filter(Boolean)
-										: isAcceptanceDatesColumn || isRecommendationDatesColumn
-												? formattedDisplayValue
-												.split(",")
-												.map((item) => item.trim())
-												.filter(Boolean)
-										: [];
-									const shouldUseNumberedList =
-										(isScopeColumn && verticalListItems.length > 0) ||
-										(isTeamColumn && verticalListItems.length > 1);
-									const tooltipListValue = shouldUseNumberedList
-										? verticalListItems
-												.map((item, index) => `${index + 1}. ${item}`)
-												.join("\n")
-										: verticalListItems.join("\n");
-									const tooltipValue = isLongTextColumn
-										? (verticalListItems.length > 0
-											? tooltipListValue
-											: formattedDisplayValue)
-										: undefined;
-
-									return (
-										<td
-											key={column.key}
-											className={`overflow-hidden align-top px-3 py-2.5 whitespace-normal break-words ${
-												(hoverEffect === "softShadowBold" && isHovered) ||
-												((column.key === "lp" || column.key === "kodInspekcji") && isActive)
-													? "font-medium"
-													: "font-normal"
-											}`}
-											onMouseEnter={(event) => {
-												if (!tooltipValue) {
-													return;
-												}
-
-												setHoverTooltip({
-													content: tooltipValue,
-													x: event.clientX,
-													y: event.clientY,
-												});
-											}}
-											onMouseMove={(event) => {
-												if (!tooltipValue) {
-													return;
-												}
-
-												setHoverTooltip({
-													content: tooltipValue,
-													x: event.clientX,
-													y: event.clientY,
-												});
-											}}
-											onMouseLeave={() => {
-												setHoverTooltip((current) =>
-													current?.content === tooltipValue ? null : current,
-												);
-											}}
-											style={
-												columnWidth
-													? { width: columnWidth, minWidth: columnWidth, maxWidth: columnWidth }
-													: undefined
-											}
-										>
-											{(isTeamColumn || isScopeColumn) && formattedDisplayValue !== "-" ? (
-												<div className="subtle-vertical-scroll max-h-28 w-full space-y-1 overflow-y-auto pr-1">
-													{shouldUseNumberedList ? (
-														<ol className="list-inside list-decimal space-y-1 pl-1">
-															{verticalListItems.map((item, index) => (
-																<li
-																	key={`${row.id}-${column.key}-${index}`}
-																	className="whitespace-normal break-words"
-																>
-																	{item}
-																</li>
-															))}
-														</ol>
-													) : (
-														verticalListItems.map((item, index) => (
-															<div
-																key={`${row.id}-${column.key}-${index}`}
-																className="whitespace-normal break-words"
-															>
-																{item}
-															</div>
-														))
-													)}
-												</div>
-											) : (isAcceptanceDatesColumn || isRecommendationDatesColumn) && formattedDisplayValue !== "-" ? (
-												<div className="subtle-vertical-scroll max-h-28 w-full space-y-1 overflow-y-auto pr-1">
-													{verticalListItems.map((item, index) => (
-														<div key={`${row.id}-${column.key}-${index}`} className="whitespace-normal break-words">
-															{item}
-														</div>
-													))}
-												</div>
-											) : isEntityNameColumn || isScopeDetailsColumn || isStatusColumn || isCommentColumn ? (
-												<div className="w-full whitespace-normal break-words leading-5">
-													{shouldShowNotApplicable ? (
-														<span className="italic text-slate-400">{formattedDisplayValue}</span>
-													) : (
-														formattedDisplayValue
-													)}
-												</div>
-											) : isLongTextColumn ? (
-												<div className="w-full whitespace-normal break-words leading-5">
-													{shouldShowNotApplicable ? (
-														<span className="italic text-slate-400">{formattedDisplayValue}</span>
-													) : (
-														formattedDisplayValue
-													)}
-												</div>
-											) : (
-												<div className="w-full whitespace-normal break-words leading-5">
-													{shouldShowNotApplicable ? (
-														<span className="italic text-slate-400">{formattedDisplayValue}</span>
-													) : (
-														formattedDisplayValue
-													)}
-												</div>
-											)}
-										</td>
-									);
-								})}
-							</tr>
-						);
-					})}
-
-					{rows.length === 0 ? (
-						<tr>
-							<td
-								colSpan={visibleColumns.length}
-								className="px-3 py-6 text-center text-slate-500 text-sm"
-							>
-								Brak rekordów spełniających aktualne filtry.
-							</td>
-						</tr>
-					) : null}
-				</tbody>
-			</RegistryDataTable>
-
-			{hoverTooltip ? (
-				<div
-					className={`pointer-events-none fixed z-50 max-w-[34rem] rounded-xl border border-slate-300/90 bg-slate-100/98 px-3 py-2 text-slate-900 text-sm leading-6 whitespace-pre-line shadow-[0_16px_32px_-18px_rgba(30,64,175,0.35)] transition-[opacity,transform] duration-150 ease-out ${
-						isTooltipVisible ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0"
-					}`}
-					style={{
-						left: hoverTooltip.x + 14,
-						top: hoverTooltip.y + 14,
-					}}
-				>
-					{hoverTooltip.content}
+							return (
+								<button
+									key={category.key}
+									type="button"
+									onClick={() => handleCategorySelect(category.key)}
+									className={`inline-flex items-center whitespace-nowrap rounded-lg border px-3 py-2 font-semibold text-sm transition-colors ${
+										isActive
+											? "border-[#84b0f2] bg-[#345689] text-white"
+											: "border-slate-600/50 bg-slate-900/40 text-slate-200 hover:bg-slate-800/70"
+									}`}
+								>
+									{category.label}
+								</button>
+							);
+						})}
+					</div>
 				</div>
 			) : null}
-		</div>
+
+			<div
+				className={
+					tableOnly
+						? "flex min-h-0 flex-1 flex-col"
+						: "grid gap-4 lg:grid-cols-[minmax(220px,260px)_1fr]"
+				}
+			>
+				{!tableOnly ? (
+					<aside className="rounded-xl border border-slate-700/70 bg-[#0f1c34] p-3">
+						<p className="mb-2 font-semibold text-slate-300/90 text-xs uppercase tracking-[0.08em]">
+							Typ słownika
+						</p>
+
+						{isTypesLoading ? (
+							<p className="text-slate-300 text-sm">Ładowanie typów...</p>
+						) : null}
+						{typesError ? (
+							<p className="font-medium text-rose-300 text-sm">{typesError}</p>
+						) : null}
+
+						<div className="subtle-vertical-scroll min-h-64 max-h-[calc(100vh-24rem)] space-y-1.5 overflow-y-auto pr-1">
+							{visibleTypes.length === 0 ? (
+								<p className="rounded-lg border border-slate-600/40 bg-slate-900/35 px-2.5 py-2 text-slate-300 text-sm">
+									Brak typów słowników w tej kategorii.
+								</p>
+							) : null}
+							{visibleTypes.map((type) => {
+								const isActive = type.kodTypu === selectedKodTypu;
+
+								return (
+									<button
+										key={type.kodTypu}
+										type="button"
+										onClick={() => setSelectedKodTypu(type.kodTypu)}
+										className={`w-full rounded-lg border px-2.5 py-2 text-left text-sm transition-colors ${
+											isActive
+												? "border-[#84b0f2] bg-[#345689] text-white"
+												: "border-slate-600/50 bg-slate-900/40 text-slate-200 hover:bg-slate-800/70"
+										}`}
+									>
+										<p className="font-semibold">
+											{getDictionaryTypeLabel(type)}
+										</p>
+									</button>
+								);
+							})}
+						</div>
+					</aside>
+				) : null}
+
+				<div className={tableOnly ? "flex min-h-0 flex-1 flex-col" : ""}>
+					<div className="mb-3 flex flex-wrap justify-end gap-2">
+						{canEditCurrentType ? (
+							<button
+								type="button"
+								onClick={openAddModal}
+								disabled={!selectedKodTypu}
+								className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#8ec5a1] bg-[#b9e8c9] px-3.5 font-semibold text-[#1f5130] text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.45)] transition-colors hover:bg-[#a5debb] disabled:cursor-not-allowed disabled:opacity-60"
+							>
+								<Plus size={15} />
+								Dodaj pozycję słownika
+							</button>
+						) : (
+							<span className="inline-flex h-10 items-center rounded-lg border border-slate-300 bg-slate-100 px-3.5 font-semibold text-slate-600 text-sm">
+								Tryb tylko do odczytu
+							</span>
+						)}
+					</div>
+
+					<TableSurface
+						isLoading={isEntriesLoading}
+						loadingMessage="Ładowanie pozycji..."
+						errorMessage={entriesError}
+						containerClassName={tableOnly ? "min-h-0 flex-1" : ""}
+						scrollAreaClassName={
+							tableOnly ? "h-full min-h-0 pr-2" : "h-[calc(100vh-19rem)] min-h-96 pr-2"
+						}
+					>
+					<table className="min-w-full table-fixed border-collapse text-slate-900 text-sm">
+						<thead className="sticky top-0 z-10">
+							<tr className="bg-slate-100 text-slate-800">
+								<th className="w-[48%] border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
+									{isTeamsSelected ? "Nazwa zespołu" : "Nazwa pełna"}
+								</th>
+								<th className="w-[22%] border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
+									{isTeamsSelected ? "Skrót nazwy zespołu" : "Nazwa skrócona"}
+								</th>
+								{isTeamsSelected ? (
+									<th className="w-[18%] border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
+										Kierownik
+									</th>
+								) : null}
+								<th className="whitespace-nowrap border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
+									Status
+								</th>
+								{isInspectionStatusesSelected ? (
+									<th className="whitespace-nowrap border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
+										Kolor
+									</th>
+								) : null}
+								<th className="whitespace-nowrap border-slate-300 border-b bg-slate-100 px-3 py-2 text-left font-semibold text-slate-800">
+									
+								</th>
+							</tr>
+						</thead>
+
+						<tbody>
+							{entries.map((entry) => (
+								<tr
+									key={`${entry.kodTypu}-${entry.kodPozycji}`}
+									className="border-slate-200 border-b text-slate-900 last:border-b-0 hover:bg-slate-50"
+								>
+									<td
+										className="break-words px-3 py-2.5 align-top whitespace-normal"
+										title={entry.nazwaPozycji}
+									>
+										{entry.nazwaPozycji}
+									</td>
+									<td
+										className="break-words px-3 py-2.5 align-top whitespace-normal"
+										title={entry.skrotPozycji || "-"}
+									>
+										{entry.skrotPozycji || "-"}
+									</td>
+									{isTeamsSelected ? (
+										<td
+											className="break-words px-3 py-2.5 align-top whitespace-normal"
+											title={entry.kierownikDisplayName || "-"}
+										>
+											{entry.kierownikDisplayName || "-"}
+										</td>
+									) : null}
+									<td className="whitespace-nowrap px-3 py-2.5">
+										<span
+											className={`inline-flex rounded-full px-2 py-0.5 font-semibold text-xs ${
+												entry.aktywny
+													? "bg-emerald-100 text-emerald-800"
+													: "bg-slate-200 text-slate-700"
+											}`}
+										>
+											{entry.aktywny ? "Aktywny" : "Nieaktywny"}
+										</span>
+									</td>
+									{isInspectionStatusesSelected ? (
+										<td className="whitespace-nowrap px-3 py-2.5">
+											{entry.kolor ? (
+												<span
+													className="inline-flex h-5 w-5 rounded-sm border border-slate-300 shadow-[inset_0_1px_1px_rgba(255,255,255,0.45)]"
+													style={resolveColorSwatchStyle(
+														entry.kolor,
+														entry.odcien,
+														entry.intensywnosc,
+													)}
+												/>
+											) : (
+												<span className="text-slate-400 text-xs">Brak</span>
+											)}
+										</td>
+									) : null}
+									<td className="whitespace-nowrap px-3 py-2.5">
+										<button
+											type="button"
+											onClick={() =>
+												isTeamsSelected
+													? openTeamEditModal(entry)
+													: openDictionaryEditModal(entry)
+											}
+											disabled={!canEditCurrentType || (isTeamsSelected ? !entry.teamId : false)}
+											className="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2 py-1 font-semibold text-slate-700 text-xs transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+										>
+											<Pencil size={12} />
+											Edytuj
+										</button>
+									</td>
+								</tr>
+							))}
+
+							{!isEntriesLoading && entries.length === 0 ? (
+								<tr>
+									<td
+										colSpan={tableColumnCount}
+										className="px-3 py-8 text-center text-slate-500"
+									>
+										Brak pozycji dla wybranego typu słownika.
+									</td>
+								</tr>
+							) : null}
+						</tbody>
+					</table>
+					</TableSurface>
+				</div>
+			</div>
+
+			{canEditCurrentType ? (
+				<AddDictionaryEntryModal
+					isOpen={isAddModalOpen}
+					isSubmitting={isAddingEntry}
+					error={addEntryError}
+					form={addEntryForm}
+					isTeamsType={isTeamsType}
+					isInspectionStatusesType={isInspectionStatusesSelected}
+					teamLeaders={teamLeaders}
+					isTeamLeadersLoading={isTeamLeadersLoading}
+					onClose={closeAddModal}
+					onSubmit={handleSubmit}
+					onFormChange={setAddEntryForm}
+				/>
+			) : null}
+
+			{editingDictionaryEntry ? (
+				<div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+					<div
+						aria-hidden="true"
+						className="absolute inset-0 bg-slate-950/65"
+					/>
+
+					<div
+						role="dialog"
+						aria-modal="true"
+						aria-label="Edytuj pozycję słownika"
+						className="relative z-10 w-full max-w-2xl rounded-2xl border border-slate-300 bg-white p-4 text-slate-900 shadow-[0_24px_56px_rgba(2,8,23,0.35)] sm:p-5"
+					>
+						<div className="mb-4 flex items-center justify-between gap-3 border-slate-200 border-b pb-3">
+							<div>
+								<h3 className="font-semibold text-base text-slate-900">
+									Edytuj pozycję słownika
+								</h3>
+							</div>
+
+							<button
+								type="button"
+								onClick={closeDictionaryEditModal}
+								className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-600 transition-colors hover:bg-slate-100"
+							>
+								<X size={14} />
+							</button>
+						</div>
+
+						<form className="space-y-4" onSubmit={handleSubmitDictionaryEdit}>
+							<div className="grid gap-3 sm:grid-cols-2">
+								<label className="text-slate-700 text-sm">
+									<span className="mb-1 block">Nazwa pełna *</span>
+									<input
+										required
+										value={editDictionaryForm.nazwaPozycji}
+										onChange={(event) =>
+											setEditDictionaryForm((previous) => ({
+												...previous,
+												nazwaPozycji: event.target.value,
+											}))
+										}
+										className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-400"
+									/>
+								</label>
+
+								<label className="text-slate-700 text-sm">
+									<span className="mb-1 block">Nazwa skrócona</span>
+									<input
+										value={editDictionaryForm.skrotPozycji}
+										onChange={(event) =>
+											setEditDictionaryForm((previous) => ({
+												...previous,
+												skrotPozycji: event.target.value,
+											}))
+										}
+										className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-400"
+									/>
+								</label>
+							</div>
+
+							<label className="inline-flex items-center gap-2 text-slate-700 text-sm">
+								<input
+									type="checkbox"
+									checked={editDictionaryForm.aktywny}
+									onChange={(event) =>
+										setEditDictionaryForm((previous) => ({
+											...previous,
+											aktywny: event.target.checked,
+										}))
+									}
+								/>
+								Aktywny
+							</label>
+
+							{isInspectionStatusesSelected ? (
+								<div className="text-slate-700 text-sm">
+									<span className="mb-1 block">Schemat koloru</span>
+									<div className="flex items-center gap-2">
+										<button
+											type="button"
+											onClick={() =>
+												setEditDictionaryForm((previous) => ({
+													...previous,
+													kolor: null,
+													odcien: null,
+													intensywnosc: null,
+												}))
+											}
+											className={`inline-flex h-8 items-center rounded border px-2 text-xs transition-colors ${
+												isEditNoColorSelected
+													? "border-blue-600 ring-2 ring-blue-200"
+													: "border-slate-300"
+											}`}
+										>
+											Brak
+										</button>
+										{INSPECTION_STATUS_COLOR_PRESETS.map((preset) => {
+											const isActive = selectedEditInspectionPresetKey === preset.key;
+
+											return (
+												<button
+													key={preset.key}
+													type="button"
+													onClick={() =>
+														setEditDictionaryForm((previous) => ({
+															...previous,
+															kolor: preset.kolor,
+															odcien: preset.odcien,
+															intensywnosc: preset.intensywnosc,
+														}))
+													}
+													className={`h-8 w-8 rounded border transition-colors ${
+														isActive
+															? "border-blue-600 ring-2 ring-blue-200"
+															: "border-slate-300"
+													} ${PRESET_SWATCH_CLASS_BY_KEY[preset.key] ?? "bg-slate-300"}`}
+													aria-label={preset.label}
+												/>
+											);
+										})}
+									</div>
+								</div>
+							) : null}
+
+							{editDictionaryError ? (
+								<p className="font-medium text-rose-600 text-sm">
+									{editDictionaryError}
+								</p>
+							) : null}
+
+							<div className="flex flex-wrap justify-end gap-2 border-slate-200 border-t pt-3">
+								<button
+									type="button"
+									onClick={closeDictionaryEditModal}
+									className="inline-flex h-9 items-center rounded-lg border border-slate-300 bg-transparent px-3 font-semibold text-slate-700 text-sm transition-colors hover:bg-slate-100"
+								>
+									Anuluj
+								</button>
+
+								<button
+									type="submit"
+									disabled={isSubmittingDictionaryEdit}
+									className="inline-flex h-9 items-center rounded-lg border border-[#6ea3f0] bg-[#2d4d7f] px-3 font-semibold text-slate-100 text-sm transition-colors hover:bg-[#375f99] disabled:cursor-not-allowed disabled:opacity-70"
+								>
+									{isSubmittingDictionaryEdit
+										? "Zapisywanie..."
+										: "Zapisz zmiany"}
+								</button>
+							</div>
+						</form>
+					</div>
+				</div>
+			) : null}
+
+			{editingTeamEntry ? (
+				<div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+					<div
+						aria-hidden="true"
+						className="absolute inset-0 bg-slate-950/65"
+					/>
+
+					<div
+						role="dialog"
+						aria-modal="true"
+						aria-label="Edytuj zespół"
+						className="relative z-10 w-full max-w-xl rounded-2xl border border-slate-300 bg-white p-4 text-slate-900 shadow-[0_24px_56px_rgba(2,8,23,0.35)] sm:p-5"
+					>
+						<div className="mb-4 flex items-center justify-between gap-3 border-slate-200 border-b pb-3">
+							<div>
+								<h3 className="font-semibold text-base text-slate-900">
+									Edytuj zespół
+								</h3>
+								<p className="mt-1 text-slate-600 text-sm">
+									Skrót nazwy zespołu: {editingTeamEntry.kodPozycji}
+								</p>
+							</div>
+
+							<button
+								type="button"
+								onClick={closeTeamEditModal}
+								className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-600 transition-colors hover:bg-slate-100"
+							>
+								<X size={14} />
+							</button>
+						</div>
+
+						<form className="space-y-4" onSubmit={handleSubmitTeamEdit}>
+							<label className="block text-slate-700 text-sm">
+								<span className="mb-1 block">Skrót nazwy zespołu *</span>
+								<input
+									required
+									value={editTeamCode}
+									onChange={(event) =>
+										setEditTeamCode(event.target.value.toUpperCase())
+									}
+									className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm uppercase outline-none transition-colors focus:border-blue-400"
+								/>
+							</label>
+
+							<label className="block text-slate-700 text-sm">
+								<span className="mb-1 block">Nazwa zespołu *</span>
+								<input
+									required
+									value={editTeamName}
+									onChange={(event) => setEditTeamName(event.target.value)}
+									className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-400"
+								/>
+							</label>
+
+							<div className="block">
+								<SingleSelectPortalField
+									label="Kierownik zespołu (opcjonalnie)"
+									value={editTeamLeaderId ? String(editTeamLeaderId) : ""}
+									options={teamLeaders.map((leader) => ({
+										value: String(leader.id),
+										label: leader.displayName,
+									}))}
+									placeholder="Bez kierownika"
+									onChange={(next) => setEditTeamLeaderId(next ? Number(next) : null)}
+									disabled={isTeamLeadersLoading}
+								/>
+								{isTeamLeadersLoading ? (
+									<p className="mt-1 text-slate-500 text-xs">
+										Ładowanie użytkowników...
+									</p>
+								) : null}
+							</div>
+
+							{editTeamError ? (
+								<p className="font-medium text-rose-600 text-sm">
+									{editTeamError}
+								</p>
+							) : null}
+
+							<div className="flex flex-wrap justify-end gap-2 border-slate-200 border-t pt-3">
+								<button
+									type="button"
+									onClick={closeTeamEditModal}
+									className="inline-flex h-9 items-center rounded-lg border border-slate-300 bg-transparent px-3 font-semibold text-slate-700 text-sm transition-colors hover:bg-slate-100"
+								>
+									Anuluj
+								</button>
+
+								<button
+									type="submit"
+									disabled={isSubmittingTeamEdit}
+									className="inline-flex h-9 items-center rounded-lg border border-[#6ea3f0] bg-[#2d4d7f] px-3 font-semibold text-slate-100 text-sm transition-colors hover:bg-[#375f99] disabled:cursor-not-allowed disabled:opacity-70"
+								>
+									{isSubmittingTeamEdit ? "Zapisywanie..." : "Zapisz zmiany"}
+								</button>
+							</div>
+						</form>
+					</div>
+				</div>
+			) : null}
+		</section>
 	);
 }
