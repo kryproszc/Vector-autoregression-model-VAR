@@ -5,7 +5,7 @@ import re
 import unicodedata
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
 from app.database import get_connection
@@ -22,6 +22,26 @@ _DECISION_RESOLUTION_KOD_TYPY = {
     "rozstrzygniecie_decyzji_i",
     "rozstrzygniecie_decyzji_ii",
 }
+
+_STATUS_STYLE_ALLOWED_KOLORY = {
+    "emerald",
+    "green",
+    "teal",
+    "lime",
+    "sky",
+    "cyan",
+    "blue",
+    "indigo",
+    "rose",
+    "red",
+    "pink",
+    "fuchsia",
+    "yellow",
+    "amber",
+    "orange",
+}
+
+_STATUS_STYLE_ALLOWED_ODCIEN = {50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950}
 
 
 class SlownikTypRead(BaseModel):
@@ -44,6 +64,9 @@ class SlownikPozycjaRead(BaseModel):
     skrotPozycji: str | None = None
     nazwaPozycjiSkrocona: str | None = None
     nazwaPozycjiSkrot: str | None = None
+    kolor: str | None = None
+    odcien: int | None = None
+    intensywnosc: int | None = None
     kolejnosc: int
     aktywny: bool
 
@@ -72,6 +95,21 @@ class SlownikPozycjaUpdateById(BaseModel):
     nazwaUzytkowa: str | None = None
     skrotPozycji: str | None = None
     aktywny: bool
+
+
+class StatusInspekcjiStylUpsert(BaseModel):
+    slownikPozycjaId: int
+    kolor: str | None = None
+    odcien: int | None = None
+    intensywnosc: int | None = None
+
+
+class StatusInspekcjiStylRead(BaseModel):
+    id: int
+    slownikPozycjaId: int
+    kolor: str
+    odcien: int
+    intensywnosc: int
 
 
 def _get_operator(conn: Any, operator_login: str) -> dict[str, Any]:
@@ -154,12 +192,28 @@ def _ensure_manager_can_modify_entry(operator: dict[str, Any], kod_typu: str, ko
         raise HTTPException(status_code=403, detail="Ta pozycja slownika jest zablokowana do edycji dla kierownika")
 
 
+def _slownik_aux_column(conn: Any) -> str:
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(slownik_pozycje)").fetchall()}
+    if "nazwa_uzytkowa" in columns:
+        return "nazwa_uzytkowa"
+    if "pomocnicza" in columns:
+        return "pomocnicza"
+    # Fallback to legacy contract name.
+    return "nazwa_uzytkowa"
+
+
 def _map_slownik_pozycja_row(row: dict[str, Any]) -> dict[str, Any]:
     skrot = row["skrot_pozycji"]
     if isinstance(skrot, str):
         skrot = skrot.strip() or None
+    if skrot is None:
+        raw_code = row.get("kod_pozycji")
+        if isinstance(raw_code, str):
+            skrot = raw_code.strip() or None
 
     nazwa_uzytkowa = row.get("nazwa_uzytkowa")
+    if nazwa_uzytkowa is None:
+        nazwa_uzytkowa = row.get("pomocnicza")
     if isinstance(nazwa_uzytkowa, str):
         nazwa_uzytkowa = nazwa_uzytkowa.strip() or None
 
@@ -169,6 +223,19 @@ def _map_slownik_pozycja_row(row: dict[str, Any]) -> dict[str, Any]:
         skrot = str(row["nazwa_pozycji"] or "").strip() or None
     if kod_typu != "zakresy_inspekcji":
         nazwa_uzytkowa = None
+
+    kolor = row.get("kolor")
+    if isinstance(kolor, str):
+        kolor = kolor.strip().lower() or None
+    odcien = row.get("odcien")
+    intensywnosc = row.get("intensywnosc")
+    if kod_typu != "statusy_inspekcji":
+        kolor = None
+        odcien = None
+        intensywnosc = None
+    else:
+        odcien = int(odcien) if odcien is not None else None
+        intensywnosc = int(intensywnosc) if intensywnosc is not None else None
 
     return {
         "id": row["id"],
@@ -180,9 +247,23 @@ def _map_slownik_pozycja_row(row: dict[str, Any]) -> dict[str, Any]:
         "skrotPozycji": skrot,
         "nazwaPozycjiSkrocona": skrot,
         "nazwaPozycjiSkrot": skrot,
+        "kolor": kolor,
+        "odcien": odcien,
+        "intensywnosc": intensywnosc,
         "kolejnosc": row["kolejnosc"],
         "aktywny": bool(row["aktywny"]),
     }
+
+
+def _validate_status_style_payload(kolor: str, odcien: int, intensywnosc: int) -> tuple[str, int, int]:
+    normalized_kolor = str(kolor or "").strip().lower()
+    if normalized_kolor not in _STATUS_STYLE_ALLOWED_KOLORY:
+        raise HTTPException(status_code=400, detail="Nieprawidlowy kolor")
+    if int(odcien) not in _STATUS_STYLE_ALLOWED_ODCIEN:
+        raise HTTPException(status_code=400, detail="Nieprawidlowy odcien")
+    if int(intensywnosc) < 0 or int(intensywnosc) > 100:
+        raise HTTPException(status_code=400, detail="Nieprawidlowa intensywnosc")
+    return normalized_kolor, int(odcien), int(intensywnosc)
 
 
 def _validate_inspection_type_name(raw_name: str) -> None:
@@ -202,20 +283,25 @@ def _kategoria_nazwa(kategoria: int) -> str:
 
 
 def _list_items_by_kod_typu(conn: Any, kod_typu: str) -> list[dict[str, Any]]:
+    aux_col = _slownik_aux_column(conn)
     rows = conn.execute(
-        """
+        f"""
         SELECT
             p.id,
             t.id AS typ_id,
             t.kod_typu,
             p.kod_pozycji,
             p.nazwa_pozycji,
-            p.nazwa_uzytkowa,
+            p.{aux_col} AS nazwa_uzytkowa,
             p.skrot_pozycji,
+            st.kolor,
+            st.odcien,
+            st.intensywnosc,
             p.kolejnosc,
             p.aktywny
         FROM slownik_pozycje p
         JOIN slownik_typy t ON t.kod_typu = p.kod_typu
+        LEFT JOIN slownik_status_inspekcji_styl st ON st.slownik_pozycja_id = p.id
         WHERE lower(p.kod_typu) = lower(?)
           AND (
               lower(?) <> 'osoby'
@@ -428,6 +514,7 @@ def create_slownik_item(
 
     with get_connection() as conn:
         operator = _get_operator(conn, x_operator_login)
+        aux_col = _slownik_aux_column(conn)
 
         typ = conn.execute(
             "SELECT id, kod_typu, prefix_kodu FROM slownik_typy WHERE lower(kod_typu) = lower(?) LIMIT 1",
@@ -457,9 +544,9 @@ def create_slownik_item(
             resolved_kolejnosc = int(max_row["max_kolejnosc"]) + 1
 
         cursor = conn.execute(
-            """
+            f"""
             INSERT INTO slownik_pozycje
-            (kod_typu, kod_pozycji, nazwa_pozycji, nazwa_uzytkowa, skrot_pozycji, kolejnosc, aktywny)
+            (kod_typu, kod_pozycji, nazwa_pozycji, {aux_col}, skrot_pozycji, kolejnosc, aktywny)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -475,14 +562,14 @@ def create_slownik_item(
         conn.commit()
 
         row = conn.execute(
-            """
+            f"""
             SELECT
                 p.id,
                 t.id AS typ_id,
                 t.kod_typu,
                 p.kod_pozycji,
                 p.nazwa_pozycji,
-                p.nazwa_uzytkowa,
+                p.{aux_col} AS nazwa_uzytkowa,
                 p.skrot_pozycji,
                 p.kolejnosc,
                 p.aktywny
@@ -498,6 +585,135 @@ def create_slownik_item(
         raise HTTPException(status_code=500, detail="Nie udalo sie pobrac zapisanej pozycji")
 
     return _map_slownik_pozycja_row(dict(row))
+
+
+@router.put("/api/slowniki/statusy-inspekcji/styl", response_model=StatusInspekcjiStylRead)
+def upsert_status_inspekcji_style(
+    payload: StatusInspekcjiStylUpsert,
+    x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> dict[str, Any] | Response:
+    clear_requested = payload.kolor is None and payload.odcien is None and payload.intensywnosc is None
+    if not clear_requested and (payload.kolor is None or payload.odcien is None or payload.intensywnosc is None):
+        raise HTTPException(status_code=400, detail="Dla czyszczenia ustaw kolor, odcien i intensywnosc na null")
+
+    kolor: str
+    odcien: int
+    intensywnosc: int
+    if not clear_requested:
+        kolor, odcien, intensywnosc = _validate_status_style_payload(
+            payload.kolor,
+            payload.odcien,
+            payload.intensywnosc,
+        )
+
+    with get_connection() as conn:
+        operator = _get_operator(conn, x_operator_login)
+
+        status_row = conn.execute(
+            """
+            SELECT id, kod_typu
+            FROM slownik_pozycje
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (int(payload.slownikPozycjaId),),
+        ).fetchone()
+
+        if status_row is None:
+            raise HTTPException(status_code=404, detail="Pozycja slownika nie istnieje")
+        if str(status_row["kod_typu"] or "").strip().lower() != "statusy_inspekcji":
+            raise HTTPException(status_code=400, detail="Pozycja nie nalezy do statusy_inspekcji")
+
+        if clear_requested:
+            conn.execute(
+                """
+                DELETE FROM slownik_status_inspekcji_styl
+                WHERE slownik_pozycja_id = ?
+                """,
+                (int(payload.slownikPozycjaId),),
+            )
+            conn.commit()
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+        conn.execute(
+            """
+            INSERT INTO slownik_status_inspekcji_styl
+                (slownik_pozycja_id, kolor, odcien, intensywnosc, utworzono_przez, zaktualizowano_przez)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(slownik_pozycja_id)
+            DO UPDATE SET
+                kolor = excluded.kolor,
+                odcien = excluded.odcien,
+                intensywnosc = excluded.intensywnosc,
+                zaktualizowano_o = CURRENT_TIMESTAMP,
+                zaktualizowano_przez = excluded.zaktualizowano_przez
+            """,
+            (
+                int(payload.slownikPozycjaId),
+                kolor,
+                odcien,
+                intensywnosc,
+                str(operator["login"]),
+                str(operator["login"]),
+            ),
+        )
+        conn.commit()
+
+        style_row = conn.execute(
+            """
+            SELECT id, slownik_pozycja_id, kolor, odcien, intensywnosc
+            FROM slownik_status_inspekcji_styl
+            WHERE slownik_pozycja_id = ?
+            LIMIT 1
+            """,
+            (int(payload.slownikPozycjaId),),
+        ).fetchone()
+
+    if style_row is None:
+        raise HTTPException(status_code=500, detail="Nie udalo sie zapisac stylu statusu")
+
+    return {
+        "id": int(style_row["id"]),
+        "slownikPozycjaId": int(style_row["slownik_pozycja_id"]),
+        "kolor": str(style_row["kolor"]),
+        "odcien": int(style_row["odcien"]),
+        "intensywnosc": int(style_row["intensywnosc"]),
+    }
+
+
+@router.delete("/api/slowniki/statusy-inspekcji/styl/{slownik_pozycja_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_status_inspekcji_style(
+    slownik_pozycja_id: int,
+    x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> Response:
+    with get_connection() as conn:
+        _get_operator(conn, x_operator_login)
+
+        status_row = conn.execute(
+            """
+            SELECT id, kod_typu
+            FROM slownik_pozycje
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (int(slownik_pozycja_id),),
+        ).fetchone()
+
+        if status_row is None:
+            raise HTTPException(status_code=404, detail="Pozycja slownika nie istnieje")
+        if str(status_row["kod_typu"] or "").strip().lower() != "statusy_inspekcji":
+            raise HTTPException(status_code=400, detail="Pozycja nie nalezy do statusy_inspekcji")
+
+        conn.execute(
+            """
+            DELETE FROM slownik_status_inspekcji_styl
+            WHERE slownik_pozycja_id = ?
+            """,
+            (int(slownik_pozycja_id),),
+        )
+        conn.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.put("/api/slowniki/pozycje", response_model=SlownikPozycjaRead)
@@ -524,6 +740,7 @@ def update_slownik_item(
 
     with get_connection() as conn:
         operator = _get_operator(conn, x_operator_login)
+        aux_col = _slownik_aux_column(conn)
 
         typ = conn.execute(
             "SELECT id, kod_typu FROM slownik_typy WHERE lower(kod_typu) = lower(?) LIMIT 1",
@@ -558,10 +775,10 @@ def update_slownik_item(
             raise HTTPException(status_code=404, detail="Pozycja slownika nie istnieje")
 
         conn.execute(
-            """
+            f"""
             UPDATE slownik_pozycje
             SET nazwa_pozycji = ?,
-                nazwa_uzytkowa = ?,
+                {aux_col} = ?,
                 skrot_pozycji = ?,
                 aktywny = ?,
                 zaktualizowano_o = CURRENT_TIMESTAMP
@@ -578,14 +795,14 @@ def update_slownik_item(
         conn.commit()
 
         row = conn.execute(
-            """
+            f"""
             SELECT
                 p.id,
                 t.id AS typ_id,
                 t.kod_typu,
                 p.kod_pozycji,
                 p.nazwa_pozycji,
-                p.nazwa_uzytkowa,
+                p.{aux_col} AS nazwa_uzytkowa,
                 p.skrot_pozycji,
                 p.kolejnosc,
                 p.aktywny
@@ -619,6 +836,7 @@ def update_slownik_item_by_id(
 
     with get_connection() as conn:
         operator = _get_operator(conn, x_operator_login)
+        aux_col = _slownik_aux_column(conn)
 
         current = conn.execute(
             """
@@ -644,10 +862,10 @@ def update_slownik_item_by_id(
             nazwa_uzytkowa = None
 
         conn.execute(
-            """
+            f"""
             UPDATE slownik_pozycje
             SET nazwa_pozycji = ?,
-                nazwa_uzytkowa = ?,
+                {aux_col} = ?,
                 skrot_pozycji = ?,
                 aktywny = ?,
                 zaktualizowano_o = CURRENT_TIMESTAMP
@@ -664,14 +882,14 @@ def update_slownik_item_by_id(
         conn.commit()
 
         row = conn.execute(
-            """
+            f"""
             SELECT
                 p.id,
                 t.id AS typ_id,
                 t.kod_typu,
                 p.kod_pozycji,
                 p.nazwa_pozycji,
-                p.nazwa_uzytkowa,
+                p.{aux_col} AS nazwa_uzytkowa,
                 p.skrot_pozycji,
                 p.kolejnosc,
                 p.aktywny

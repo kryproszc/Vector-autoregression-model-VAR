@@ -199,13 +199,10 @@ class InspectionStructureRead(BaseModel):
     canEdit: bool
     nazwaPodmiotu: str
     nazwaPodmiotuSkrocona: str | None = None
-    nazwaPodmiotuSkrot: str | None = None
     typInspekcji: str | None = None
     typInspekcjiSkrocona: str | None = None
-    typInspekcjiSkrot: str | None = None
     zakresInspekcji: str | None = None
     zakresInspekcjiSkrocona: str | None = None
-    zakresInspekcjiSkrot: str | None = None
     zakresInspekcjiIds: list[int]
     poczatekInspekcji: str
     koniecInspekcji: str
@@ -216,7 +213,6 @@ class InspectionStructureRead(BaseModel):
     rynek: str | None = None
     rodzajPodmiotu: str | None = None
     rodzajPodmiotuSkrocona: str | None = None
-    rodzajPodmiotuSkrot: str | None = None
     aspektKonsumencki: str | None = None
     dataProtokolu: str | None = None
     dataDoreczeniaProtokolu: str | None = None
@@ -239,9 +235,7 @@ class InspectionStructureRead(BaseModel):
     dataAkceptacjiNoty: str | None = None
     dataZalecen: str | None = None
     status: str | None = None
-    statusKodPozycji: str | None = None
     statusSkrocona: str | None = None
-    statusSkrot: str | None = None
     komentarz: str | None = None
     szczegolyDotyczaceZakresu: str | None = None
     zaktualizowanoO: str | None = None
@@ -264,7 +258,6 @@ class InspectionPeopleOption(BaseModel):
     createdByLogin: str | None = None
     teamId: int | None = None
     teamName: str | None = None
-    teamCode: str | None = None
     accountType: str | None = None
 
 
@@ -1088,9 +1081,9 @@ def _base_select_sql() -> str:
             i.kod_inspekcji,
             i.created_by_user_id,
             np.nazwa_pozycji AS nazwa_podmiotu_nazwa,
-            COALESCE(NULLIF(trim(np.skrot_pozycji), ''), np.kod_pozycji) AS nazwa_podmiotu_skrot,
+            np.skrot_pozycji AS nazwa_podmiotu_skrot,
             ti.nazwa_pozycji AS typ_inspekcji_nazwa,
-            COALESCE(NULLIF(trim(ti.skrot_pozycji), ''), ti.kod_pozycji) AS typ_inspekcji_skrot,
+            ti.skrot_pozycji AS typ_inspekcji_skrot,
             (
                 SELECT group_concat(x.scope_name, '; ')
                 FROM (
@@ -1104,7 +1097,7 @@ def _base_select_sql() -> str:
             (
                 SELECT group_concat(x.scope_short, '; ')
                 FROM (
-                    SELECT COALESCE(NULLIF(trim(sp.skrot_pozycji), ''), sp.kod_pozycji) AS scope_short
+                    SELECT sp.skrot_pozycji AS scope_short
                     FROM inspection_scopes isc
                     JOIN slownik_pozycje sp ON sp.id = isc.scope_id
                     WHERE isc.inspection_id = i.id
@@ -1119,13 +1112,12 @@ def _base_select_sql() -> str:
             ulead.nazwisko AS lead_nazwisko,
             r.nazwa_pozycji AS rynek_nazwa,
             rp.nazwa_pozycji AS rodzaj_podmiotu_nazwa,
-            COALESCE(NULLIF(trim(rp.skrot_pozycji), ''), rp.kod_pozycji) AS rodzaj_podmiotu_skrot,
+            rp.skrot_pozycji AS rodzaj_podmiotu_skrot,
             i.aspekt_konsumencki,
             i.komentarz,
             i.szczegoly_dotyczace_zakresu,
             si.nazwa_pozycji AS status_nazwa,
-            si.kod_pozycji AS status_kod_pozycji,
-            COALESCE(NULLIF(trim(si.skrot_pozycji), ''), si.kod_pozycji) AS status_skrot,
+            si.skrot_pozycji AS status_skrot,
             i.data_protokolu_sprawozdania,
             i.data_doreczenia_protokolu,
             i.data_akceptacji_sprawozdania,
@@ -1279,13 +1271,10 @@ def _row_to_structure_payload(row: dict[str, Any], can_edit: bool) -> dict[str, 
         "canEdit": can_edit,
         "nazwaPodmiotu": row.get("nazwa_podmiotu_nazwa") or "brak",
         "nazwaPodmiotuSkrocona": row.get("nazwa_podmiotu_skrot"),
-        "nazwaPodmiotuSkrot": row.get("nazwa_podmiotu_skrot"),
         "typInspekcji": row.get("typ_inspekcji_nazwa") or "brak",
         "typInspekcjiSkrocona": row.get("typ_inspekcji_skrot"),
-        "typInspekcjiSkrot": row.get("typ_inspekcji_skrot"),
         "zakresInspekcji": row.get("zakres_inspekcji_nazwa") or "brak",
         "zakresInspekcjiSkrocona": row.get("zakres_inspekcji_skrot"),
-        "zakresInspekcjiSkrot": row.get("zakres_inspekcji_skrot"),
         "zakresInspekcjiIds": scope_ids,
         "poczatekInspekcji": row.get("poczatek_inspekcji"),
         "koniecInspekcji": row.get("koniec_inspekcji"),
@@ -1296,7 +1285,6 @@ def _row_to_structure_payload(row: dict[str, Any], can_edit: bool) -> dict[str, 
         "rynek": row.get("rynek_nazwa") or "brak",
         "rodzajPodmiotu": row.get("rodzaj_podmiotu_nazwa") or "brak",
         "rodzajPodmiotuSkrocona": row.get("rodzaj_podmiotu_skrot"),
-        "rodzajPodmiotuSkrot": row.get("rodzaj_podmiotu_skrot"),
         "aspektKonsumencki": row.get("aspekt_konsumencki"),
         "dataProtokolu": row.get("data_protokolu_sprawozdania"),
         "dataDoreczeniaProtokolu": row.get("data_doreczenia_protokolu"),
@@ -1320,9 +1308,7 @@ def _row_to_structure_payload(row: dict[str, Any], can_edit: bool) -> dict[str, 
         "dataAkceptacjiNoty": data_akceptacji_noty_list[-1] if data_akceptacji_noty_list else None,
         "dataZalecen": row.get("data_zalecen") or (data_zalecen_list[-1] if data_zalecen_list else None),
         "status": row.get("status_nazwa") or "brak",
-        "statusKodPozycji": row.get("status_kod_pozycji"),
         "statusSkrocona": row.get("status_skrot"),
-        "statusSkrot": row.get("status_skrot"),
         "komentarz": row.get("komentarz"),
         "szczegolyDotyczaceZakresu": row.get("szczegoly_dotyczace_zakresu"),
         "zaktualizowanoO": row.get("zaktualizowano_o"),
@@ -1810,11 +1796,13 @@ def list_inspection_people_options(
                 u.created_by_user_id,
                 cbu.login AS created_by_login,
                 u.zespol_id,
-                t.kod AS team_code,
-                COALESCE(NULLIF(trim(t.kod), ''), t.nazwa) AS team_name
+                COALESCE(sp.nazwa_pozycji, t.nazwa) AS team_name
             FROM users u
             LEFT JOIN teams t ON t.id = u.zespol_id
             LEFT JOIN users cbu ON cbu.id = u.created_by_user_id
+            LEFT JOIN slownik_pozycje sp
+                ON sp.id = t.slownik_pozycja_id
+               AND sp.kod_typu = 'zespoly'
             """,
         ).fetchall()
 
@@ -1850,7 +1838,6 @@ def list_inspection_people_options(
                     "createdByLogin": row_dict.get("created_by_login"),
                     "teamId": row_dict["zespol_id"],
                     "teamName": row_dict["team_name"],
-                    "teamCode": row_dict.get("team_code"),
                     "accountType": account_type or None,
                 }
             )

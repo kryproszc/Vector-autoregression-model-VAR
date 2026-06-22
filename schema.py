@@ -815,6 +815,76 @@ CREATE INDEX IF NOT EXISTS idx_slownik_pozycje_kod_typu
 ON slownik_pozycje(kod_typu)
 """
 
+CREATE_SLOWNIK_STATUS_INSPEKCJI_STYL_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS slownik_status_inspekcji_styl (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slownik_pozycja_id INTEGER NOT NULL UNIQUE,
+    kolor TEXT NOT NULL,
+    odcien INTEGER NOT NULL,
+    intensywnosc INTEGER NOT NULL,
+    utworzono_o TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    zaktualizowano_o TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    utworzono_przez TEXT,
+    zaktualizowano_przez TEXT,
+    FOREIGN KEY (slownik_pozycja_id) REFERENCES slownik_pozycje(id) ON DELETE CASCADE,
+    CHECK (odcien IN (50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950)),
+    CHECK (intensywnosc >= 0 AND intensywnosc <= 100),
+    CHECK (lower(kolor) IN (
+        'emerald', 'green', 'teal', 'lime',
+        'sky', 'cyan', 'blue', 'indigo',
+        'rose', 'red', 'pink', 'fuchsia',
+        'yellow', 'amber', 'orange'
+    ))
+)
+"""
+
+CREATE_INDEX_SLOWNIK_STATUS_INSPEKCJI_STYL_POZYCJA_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_slownik_status_inspekcji_styl_pozycja
+ON slownik_status_inspekcji_styl(slownik_pozycja_id)
+"""
+
+SEED_SLOWNIK_STATUS_INSPEKCJI_STYL_SQL = """
+INSERT INTO slownik_status_inspekcji_styl
+    (slownik_pozycja_id, kolor, odcien, intensywnosc, utworzono_przez, zaktualizowano_przez)
+SELECT
+    p.id,
+    CASE upper(p.kod_pozycji)
+        WHEN 'I_SI_2' THEN 'green'
+        WHEN 'I_SI_3' THEN 'cyan'
+        WHEN 'I_SI_4' THEN 'rose'
+        WHEN 'I_SI_5' THEN 'yellow'
+        WHEN 'I_SI_6' THEN 'yellow'
+        WHEN 'I_SI_7' THEN 'yellow'
+        WHEN 'I_SI_8' THEN 'yellow'
+        WHEN 'I_SI_9' THEN 'yellow'
+        ELSE NULL
+    END AS kolor,
+    CASE upper(p.kod_pozycji)
+        WHEN 'I_SI_2' THEN 300
+        WHEN 'I_SI_3' THEN 400
+        WHEN 'I_SI_4' THEN 200
+        WHEN 'I_SI_5' THEN 200
+        WHEN 'I_SI_6' THEN 200
+        WHEN 'I_SI_7' THEN 200
+        WHEN 'I_SI_8' THEN 200
+        WHEN 'I_SI_9' THEN 200
+        ELSE NULL
+    END AS odcien,
+    75,
+    'system-seed',
+    'system-seed'
+FROM slownik_pozycje p
+WHERE lower(p.kod_typu) = 'statusy_inspekcji'
+  AND upper(p.kod_pozycji) IN ('I_SI_2', 'I_SI_3', 'I_SI_4', 'I_SI_5', 'I_SI_6', 'I_SI_7', 'I_SI_8', 'I_SI_9')
+ON CONFLICT(slownik_pozycja_id)
+DO UPDATE SET
+    kolor = excluded.kolor,
+    odcien = excluded.odcien,
+    intensywnosc = excluded.intensywnosc,
+    zaktualizowano_o = CURRENT_TIMESTAMP,
+    zaktualizowano_przez = excluded.zaktualizowano_przez
+"""
+
 SEED_TEAMS_SQL = """
 INSERT OR IGNORE INTO teams (kod, nazwa) VALUES
     ('A', 'Zespol A'),
@@ -1494,7 +1564,14 @@ def _ensure_slowniki_schema(conn: sqlite3.Connection, *, seed_slownik_pozycje: b
         row[1] for row in conn.execute("PRAGMA table_info(slownik_pozycje)").fetchall()
     }
     if "nazwa_uzytkowa" not in pozycje_columns_after:
-        conn.execute("ALTER TABLE slownik_pozycje ADD COLUMN nazwa_uzytkowa TEXT")
+        if "pomocnicza" in pozycje_columns_after:
+            try:
+                conn.execute("ALTER TABLE slownik_pozycje RENAME COLUMN pomocnicza TO nazwa_uzytkowa")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE slownik_pozycje ADD COLUMN nazwa_uzytkowa TEXT")
+                conn.execute("UPDATE slownik_pozycje SET nazwa_uzytkowa = pomocnicza WHERE nazwa_uzytkowa IS NULL")
+        else:
+            conn.execute("ALTER TABLE slownik_pozycje ADD COLUMN nazwa_uzytkowa TEXT")
 
     if seed_slownik_pozycje:
         conn.execute(SEED_SLOWNIK_ZESPOLY_SQL)
@@ -1503,6 +1580,10 @@ def _ensure_slowniki_schema(conn: sqlite3.Connection, *, seed_slownik_pozycje: b
         conn.execute(SEED_SLOWNIK_ZAKRESY_INSPEKCJI_SQL)
         conn.execute(SEED_SLOWNIK_DECYZJE_ZOBOWIAZUJACE_SQL)
         conn.execute(SEED_SLOWNIK_ROZSTRZYGNIECIA_WNIOSKU_SQL)
+
+    conn.execute(CREATE_SLOWNIK_STATUS_INSPEKCJI_STYL_TABLE_SQL)
+    conn.execute(CREATE_INDEX_SLOWNIK_STATUS_INSPEKCJI_STYL_POZYCJA_SQL)
+    conn.execute(SEED_SLOWNIK_STATUS_INSPEKCJI_STYL_SQL)
 
 
 
