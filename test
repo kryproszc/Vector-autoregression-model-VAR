@@ -1044,12 +1044,8 @@ export function TimeReportPanel({
 	const yearRangeAreas = useMemo(() => {
 		return chartTrendData.flatMap((yearData) => {
 			const yearKey = String(yearData.year);
-			const minByYear = departmentMinTimeByYear[yearKey] ?? null;
-			const maxByYear = departmentMaxTimeByYear[yearKey] ?? null;
-			const minSource =
-				minByYear ?? departmentMinTime ?? yearData.departmentMinTime ?? yearData.min;
-			const maxSource =
-				maxByYear ?? departmentMaxTime ?? yearData.departmentMaxTime ?? yearData.max;
+			const minSource = departmentMinTimeByYear[yearKey] ?? null;
+			const maxSource = departmentMaxTimeByYear[yearKey] ?? null;
 
 			if (minSource === null || maxSource === null) {
 				return [];
@@ -1069,9 +1065,7 @@ export function TimeReportPanel({
 		});
 	}, [
 		chartTrendData,
-		departmentMaxTime,
 		departmentMaxTimeByYear,
-		departmentMinTime,
 		departmentMinTimeByYear,
 	]);
 
