@@ -835,6 +835,12 @@ def get_inspections_time_analytics(
 			"""
 		).fetchall()
 
+		def _can_access_time_analytics_inspection(inspection_row: dict[str, Any]) -> bool:
+			# Business rule: in "Zestawienie czasu" manager should see the same dataset as director.
+			if int(operator["rola_id"]) == 2:
+				return True
+			return _can_access_inspection_for_reports(conn, inspection_row, operator)
+
 	typed_rows: list[dict[str, Any]] = []
 	all_type_base_rows: list[dict[str, Any]] = []
 	base_rows: list[dict[str, Any]] = []
@@ -855,6 +861,14 @@ def get_inspections_time_analytics(
 		leader_user_id = row.get("osoba_kierujaca_user_id")
 		is_leader_current_user = leader_user_id is not None and int(leader_user_id) == int(operator["id"])
 		is_member_current_user = inspection_id in operator_member_inspections
+		is_in_manager_team_scope = False
+		is_in_manager_added_scope = False
+		if int(operator["rola_id"]) == 2:
+			is_in_manager_team_scope, is_in_manager_added_scope = _manager_scope_flags_for_inspection(
+				conn,
+				inspection_id,
+				operator,
+			)
 		normalized_row = {
 			"inspectionId": inspection_id,
 			"kodInspekcji": str(row.get("kod_inspekcji") or "-").strip() or "-",
@@ -872,6 +886,8 @@ def get_inspections_time_analytics(
 			"czas": diff,
 			"isLeaderCurrentUser": is_leader_current_user,
 			"isMemberCurrentUser": is_member_current_user,
+			"isInManagerTeamScope": bool(is_in_manager_team_scope),
+			"isInManagerAddedScope": bool(is_in_manager_added_scope),
 			"leadTeamId": row.get("lead_team_id"),
 			"stageGroupCode": stage_payload["stage_group_code"],
 			"stageGroupLabel": stage_payload["stage_group_label"],
@@ -881,7 +897,7 @@ def get_inspections_time_analytics(
 			"stageSubgroupOrder": stage_payload["stage_subgroup_order"],
 		}
 
-		if _can_access_inspection_for_reports(conn, row, operator):
+		if _can_access_time_analytics_inspection(row):
 			all_type_base_rows.append(normalized_row)
 
 		if row_type != inspection_type:
@@ -889,7 +905,7 @@ def get_inspections_time_analytics(
 
 		typed_rows.append(normalized_row)
 
-		if _can_access_inspection_for_reports(conn, row, operator):
+		if _can_access_time_analytics_inspection(row):
 			base_rows.append(normalized_row)
 
 	if year_filter:
@@ -903,12 +919,18 @@ def get_inspections_time_analytics(
 		filtered_rows = list(rows_after_year)
 
 	# Year-count section is intentionally based on all inspection types (K + W)
-	# and mirrors permission + team filtering used by this report.
+	# and mirrors permission + filtering used by this report, including
+	# excluding records without computable protocol/report time.
 	rows_for_counts = list(all_type_base_rows)
 	if year_filter:
 		rows_for_counts = [row for row in rows_for_counts if str(row.get("rokPoczatku") or "") in year_filter]
 	if team_filter:
 		rows_for_counts = [row for row in rows_for_counts if str(row.get("zespol") or "") in team_filter]
+	rows_for_counts = [
+		row
+		for row in rows_for_counts
+		if row.get("rokPoczatku") is not None and isinstance(row.get("czas"), (int, float))
+	]
 
 	(
 		year_count_columns,
@@ -1215,6 +1237,12 @@ def get_inspections_time_analytics(
 			for row in detail_source_rows
 			if bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))
 		]
+	elif int(operator["rola_id"]) == 2:
+		detail_source_rows = [
+			row
+			for row in detail_source_rows
+			if bool(row.get("isInManagerTeamScope")) or bool(row.get("isInManagerAddedScope"))
+		]
 
 	detail_rows = [
 		{
@@ -1350,6 +1378,12 @@ def get_inspections_time_analytics(
 			row
 			for row in scatter_source_rows
 			if bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))
+		]
+	elif int(operator["rola_id"]) == 2:
+		scatter_source_rows = [
+			row
+			for row in scatter_source_rows
+			if bool(row.get("isInManagerTeamScope")) or bool(row.get("isInManagerAddedScope"))
 		]
 
 	scatter_rows = [
