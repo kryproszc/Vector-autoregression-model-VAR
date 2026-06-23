@@ -1,2214 +1,1306 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from datetime import date, datetime
+from datetime import date
 import os
 import re
-from statistics import median
-from typing import Any
+from app.permissions import PERMISSION_RECOMMENDATIONS_READ, require_permission, require_write_access
 import unicodedata
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.reports.generation_data import build_year_count_sections
-from app.db import get_connection
-from app.permissions import (
-	PERMISSION_RECOMMENDATIONS_READ,
-	PERMISSION_REPORTS_EXECUTED_INSPECTIONS_READ,
-	PERMISSION_REPORTS_PROTOCOL_TIME_READ,
-	PERMISSION_REPORTS_REPORT_TIME_READ,
-	require_permission,
+from app.audit import (
+    AKCJA_CREATE,
+    AKCJA_DELETE,
+    AKCJA_UPDATE,
+    REJESTR_ZALECENIA,
+    build_create_changes,
+    build_recommendation_changes,
+    new_session_id,
+    write_audit_log,
 )
-
+from app.database import get_connection
+from app.record_locks import assert_expected_updated_at, assert_lock_for_save, now_rfc3339_utc_ms
 
 router = APIRouter()
 
-
-class InspectionsMatrixRow(BaseModel):
-	nazwa_podmiotu: str
-	rodzaj_podmiotu: str
-	wartosci: dict[str, str]
-	cells: dict[str, list[dict[str, Any]]]
-
-
-class InspectionsMatrixResponse(BaseModel):
-	formatVersion: str
-	lata: list[str]
-	rows: list[InspectionsMatrixRow]
-
-
-class InspectionsDetailedRow(BaseModel):
-	kod_inspekcji: str
-	nazwa_podmiotu: str
-	nazwa_podmiotu_skrocona: str | None = None
-	nazwa_podmiotu_skrot: str | None = None
-	nazwaPodmiotuSkrocona: str | None = None
-	nazwaPodmiotuSkrot: str | None = None
-	rodzaj_podmiotu: str | None = None
-	inspekcja: str
-	typ_inspekcji: str | None = None
-	status: str | None = None
-	status_inspekcji_skrot: str | None = None
-	status_inspekcji_id: int | None = None
-	status_inspekcji: str | None = None
-	zakres_inspekcji: str | None = None
-	typ_zakres_inspekcji: str
-	rok_poczatku: str
-	poczatek_inspekcji: str
-	koniec_inspekcji: str
-	inspektor_kierujacy: str
-	is_leader_current_user: bool = False
-	is_leader_in_manager_team: bool = False
-	is_member_current_user: bool = False
-	is_member_in_manager_team: bool = False
-	liczba_dni_od_konca_inspekcji_do_dzis: int | None = None
-	wartosc_liczbowa_przedzialu: int | None = None
-	wartosc_liczbowa_przedzialu_alt: int | None = None
-	osoba_kierujaca: str
-	zespol_osoby_kierujacej_kod: str
-	data_protokolu_sprawozdania: str | None = None
-	roznica_dni_miedzy_data_protokolu_a_koncem: int | None = None
-
-
-class InspectionsDetailedResponse(BaseModel):
-	rows: list[InspectionsDetailedRow]
-
-
-class InspectionsTimeAnalyticsResponse(BaseModel):
-	inspectionType: str
-	trendMode: str
-	selectedMetric: str
-	selectedMetricLabel: str
-	baseCount: int
-	filteredCount: int
-	departmentMinTime: int | None = None
-	departmentMaxTime: int | None = None
-	departmentMinTimeByYear: dict[str, int] = {}
-	departmentMaxTimeByYear: dict[str, int] = {}
-	myCountByYear: dict[str, int] = {}
-	myCountByYearBreakdown: dict[str, dict[str, int]] = {}
-	myMetricByYearBreakdown: dict[str, dict[str, float]] = {}
-	myCountAllYearsBreakdown: dict[str, int] = {}
-	myMetricAllYearsBreakdown: dict[str, float] = {}
-	teamOptions: list[str]
-	yearOptions: list[str]
-	detailRows: list[dict[str, Any]]
-	summaryColumns: list[dict[str, str]] = []
-	summaryRows: list[dict[str, Any]]
-	summaryPivotYears: list[str] = []
-	summaryPivotRows: list[dict[str, Any]] = []
-	trendRows: list[dict[str, Any]]
-	scatterRows: list[dict[str, Any]]
-	overallColumns: list[dict[str, str]] = []
-	overallRows: list[dict[str, Any]] = []
-	yearCountColumns: list[str] = []
-	yearCountRows: list[dict[str, Any]] = []
-	yearCountByTeamColumns: list[str] = []
-	yearCountByTeamRows: list[dict[str, Any]] = []
-	alertStatusCounts: list[dict[str, Any]] = []
-	alertPiszemyProtokolCount: int = 0
-
-
-class StageSummarySubgroup(BaseModel):
-	stageSubgroupCode: str
-	stageSubgroupLabel: str
-	stageSubgroupOrder: int
-	count: int
-	countTeam: int
-	countManagerAdded: int
-	countTeamAndManagerAdded: int
-
-
-class StageSummaryGroup(BaseModel):
-	stageGroupCode: str
-	stageGroupLabel: str
-	stageGroupOrder: int
-	count: int
-	countTeam: int
-	countManagerAdded: int
-	countTeamAndManagerAdded: int
-	subgroups: list[StageSummarySubgroup]
-
-
-class StageSummaryFlatSubgroup(BaseModel):
-	stageGroupCode: str
-	stageGroupLabel: str
-	stageGroupOrder: int
-	stageSubgroupCode: str
-	stageSubgroupLabel: str
-	stageSubgroupOrder: int
-	count: int
-	countTeam: int
-	countManagerAdded: int
-	countTeamAndManagerAdded: int
-
-
-class InspectionsStageSummaryResponse(BaseModel):
-	generatedAt: str
-	stageDictionaryVersion: str
-	totalInspections: int
-	qualityErrorCount: int
-	statuses: list[RecommendationStatusGroup]
-
-
-class RecommendationStatusGroup(BaseModel):
-	stageGroupCode: str
-	stageGroupLabel: str
-	stageGroupShortLabel: str | None = None
-	stageGroupOrder: int
-	count: int
-	countTeam: int
-	countManagerAdded: int
-	countTeamAndManagerAdded: int
-
-
-class RecommendationsStageSummaryResponse(BaseModel):
-	generatedAt: str
-	stageDictionaryVersion: str
-	totalRecommendations: int
-	qualityErrorCount: int
-	groups: list[RecommendationStatusGroup]
-
-
-class RecommendationsDetailedRow(BaseModel):
-	status: str
-	status_skrot: str | None = None
-	statusSkrot: str | None = None
-	kod_zalecenia: str | None = None
-	kod_inspekcji: str | None = None
-	kodZalecenia: str | None = None
-	kodInspekcji: str | None = None
-	nazwa_podmiotu: str
-	nazwa_podmiotu_skrocona: str | None = None
-	nazwa_podmiotu_skrot: str | None = None
-	nazwaPodmiotuSkrocona: str | None = None
-	nazwaPodmiotuSkrot: str | None = None
-	data_zalecen: str | None = None
-	termin_zalecen: str | None = None
-	termin_wykonania_zalecen: str | None = None
-	liczba_zalecen: int
-
-
-class RecommendationsDetailedResponse(BaseModel):
-	rows: list[RecommendationsDetailedRow]
-
-
-STAGE_DICTIONARY_VERSION = "1.0.0"
-RECOMMENDATIONS_STAGE_DICTIONARY_VERSION = "1.0.0"
-
-STAGE_GROUPS: list[dict[str, Any]] = [
-	{
-		"code": "pre",
-		"label": "Przed inspekcja",
-		"order": 1,
-		"subgroups": [
-			{"code": "pre_planned", "label": "Plan", "order": 1},
-			{"code": "pre_preparation", "label": "Przygotowanie", "order": 2},
-		],
-	},
-	{
-		"code": "during",
-		"label": "W trakcie inspekcji",
-		"order": 2,
-		"subgroups": [
-			{"code": "in_progress_active", "label": "Trwa", "order": 1},
-			{"code": "in_progress_report_writing", "label": "Zakonczona - piszemy", "order": 2},
-		],
-	},
-	{
-		"code": "post",
-		"label": "Po inspekcji",
-		"order": 3,
-		"subgroups": [
-			{"code": "post_protocol_sent", "label": "Przekazano protokol", "order": 1},
-			{"code": "post_post_visit_letter_sent", "label": "Przekazano pismo po wizycie", "order": 2},
-			{"code": "post_objections_received", "label": "Wplynely zastrzezenia", "order": 3},
-			{"code": "post_post_visit_response_received", "label": "Wplynela odpowiedz po wizycie", "order": 4},
-		],
-	},
-	{
-		"code": "recommendations",
-		"label": "Rekomendacje",
-		"order": 4,
-		"subgroups": [
-			{"code": "rec_writing_recommendations", "label": "Piszemy zalecenia/odstapienie", "order": 1},
-			{"code": "rec_findings_letter", "label": "Pismo ustalenia", "order": 2},
-		],
-	},
-	{
-		"code": "closed",
-		"label": "Zamkniete inspekcje",
-		"order": 5,
-		"subgroups": [
-			{"code": "closed_with_recommendations", "label": "Zamkniete - wydano zalecenia", "order": 1},
-			{"code": "closed_without_recommendations", "label": "Zamkniete - brak zalecen", "order": 2},
-		],
-	},
-	{
-		"code": "unknown",
-		"label": "Nieprzypisane",
-		"order": 99,
-		"subgroups": [
-			{"code": "unknown_unmapped", "label": "Brak mapowania", "order": 1},
-		],
-	},
-]
-
-STAGE_SUBGROUP_INDEX: dict[str, dict[str, Any]] = {
-	subgroup["code"]: {
-		"stage_group_code": group["code"],
-		"stage_group_label": group["label"],
-		"stage_group_order": int(group["order"]),
-		"stage_subgroup_code": subgroup["code"],
-		"stage_subgroup_label": subgroup["label"],
-		"stage_subgroup_order": int(subgroup["order"]),
-	}
-	for group in STAGE_GROUPS
-	for subgroup in group["subgroups"]
+FORBIDDEN_INSPECTION_STATUS_CODES = {
+    "CLOSED_WITH_RECOMMENDATIONS",
+    "CLOSED_WITHOUT_RECOMMENDATIONS",
 }
+FORBIDDEN_INSPECTION_STATUS_LABEL_KEYS = {
+    "zamkniete - wydano zalecenia",
+    "zamkniete - brak zalecen",
+}
+INSPECTION_STATUS_BLOCK_ERROR_CODE = "INSPECTION_STATUS_BLOCKS_OPERATION"
+
+
+class RecommendationCreate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "inspectionId": 1,
+                "pozycja": 1,
+                "nazwaPodmiotu": "Zaklad Tamy",
+                "dataZalecen": "2026-10-31",
+                "status": "W toku",
+                "komentarz": "Opis zalecenia",
+                "terminyWykonaniaZalecenList": ["2026-10-01", "2026-10-05"],
+                "dataAkceptacjiNotyWeryfikacjiList": ["2026-10-10"],
+            }
+        }
+    )
+
+    inspectionId: int | None = None
+    pozycja: int = Field(ge=1)
+    nazwaPodmiotu: str | None = None
+    dataZalecen: str | None = None
+    terminyWykonaniaZalecenList: list[str] | None = None
+    # Legacy aliases kept for backward compatibility.
+    terminWykonaniaZalecen: str | None = None
+    status: str | None = None
+    komentarz: str | None = None
+    dataZalecenList: list[str] | None = None
+    dataAkceptacjiNotyWeryfikacjiList: list[str] | None = None
+    brakTerminowWykonaniaZalecen: bool = False
+    brakDatAkceptacjiNotyWeryfikacji: bool = False
+
+
+class RecommendationUpdate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "pozycja": 2,
+                "status": "Zamkniete",
+                "komentarz": "Po weryfikacji",
+                "terminyWykonaniaZalecenList": ["2026-10-15"],
+                "dataAkceptacjiNotyWeryfikacjiList": ["2026-10-20", "2026-10-22"],
+            }
+        }
+    )
+
+    inspectionId: int | None = None
+    lockToken: str | None = None
+    expectedUpdatedAt: str | None = None
+    pozycja: int | None = Field(default=None, ge=1)
+    nazwaPodmiotu: str | None = None
+    dataZalecen: str | None = None
+    terminyWykonaniaZalecenList: list[str] | None = None
+    # Legacy aliases kept for backward compatibility.
+    terminWykonaniaZalecen: str | None = None
+    status: str | None = None
+    komentarz: str | None = None
+    dataZalecenList: list[str] | None = None
+    dataAkceptacjiNotyWeryfikacjiList: list[str] | None = None
+    brakTerminowWykonaniaZalecen: bool | None = None
+    brakDatAkceptacjiNotyWeryfikacji: bool | None = None
+
+
+class RecommendationRead(BaseModel):
+    id: int
+    lp: int
+    kodZalecenia: str | None = None
+    canEdit: bool
+    inspectionId: int | None = None
+    inspectionLp: int | None = None
+    inspectionKod: str | None = None
+    pozycja: int
+    nazwaPodmiotu: str | None = None
+    nazwaPodmiotuSkrocona: str | None = None
+    nazwaPodmiotuSkrot: str | None = None
+    dataZalecen: str | None = None
+    terminyWykonaniaZalecenList: list[str]
+    # Legacy aliases kept for backward compatibility.
+    terminWykonaniaZalecen: str | None = None
+    status: str | None = None
+    statusSkrocona: str | None = None
+    statusSkrot: str | None = None
+    komentarz: str | None = None
+    dataZalecenList: list[str]
+    dataAkceptacjiNotyWeryfikacjiList: list[str]
+    brakTerminowWykonaniaZalecen: bool
+    brakDatAkceptacjiNotyWeryfikacji: bool
+    utworzonoO: str
+    zaktualizowanoO: str
+
+
+class RecommendationListResponse(BaseModel):
+    items: list[RecommendationRead]
+    total: int
+
+
+class RecommendationInspectionOption(BaseModel):
+    id: int
+    lp: int
+    kodInspekcji: str | None = None
+    nazwaPodmiotu: str
+    nazwaPodmiotuSkrocona: str | None = None
+    nazwaPodmiotuSkrot: str | None = None
+    poczatekInspekcji: str
+    koniecInspekcji: str
+    osobaKierujacaUserId: int | None = None
+    osobaKierujaca: str | None = None
+
+
+def _norm(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned if cleaned else None
+
+
+def _slug_code(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    code = re.sub(r"[^A-Za-z0-9]+", "_", ascii_only).strip("_").upper()
+    return code or "POZYCJA"
+
+
+def _status_label_key(value: str | None) -> str | None:
+    normalized = _norm(value)
+    if normalized is None:
+        return None
+    ascii_value = unicodedata.normalize("NFKD", normalized).encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_value.casefold().split())
+
+
+def _parse_status_codes_env(name: str) -> set[str]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return set()
+    values: set[str] = set()
+    for token in re.split(r"[,;\n]", raw):
+        cleaned = token.strip().upper()
+        if cleaned:
+            values.add(cleaned)
+    return values
+
+
+def _blocked_status_codes_for_operator(operator: dict[str, Any] | None) -> set[str]:
+    blocked = _parse_status_codes_env("RECOMMENDATIONS_BLOCKED_INSPECTION_STATUS_CODES")
+    if operator is None:
+        return blocked
+
+    role_id_raw = operator.get("rola_id")
+    if role_id_raw is None:
+        return blocked
+
+    role_id = int(role_id_raw)
+    blocked |= _parse_status_codes_env(f"RECOMMENDATIONS_BLOCKED_INSPECTION_STATUS_CODES_ROLE_{role_id}")
+    return blocked
+
+
+def _inspection_status_info(conn: Any, inspection_id: int) -> tuple[str | None, str | None]:
+    row = conn.execute(
+        """
+        SELECT sp.kod_pozycji AS status_code, sp.nazwa_pozycji AS status_label
+        FROM inspections i
+        LEFT JOIN slownik_pozycje sp ON sp.id = i.status_inspekcji_id
+        WHERE i.id = ?
+        LIMIT 1
+        """,
+        (inspection_id,),
+    ).fetchone()
+    if row is None:
+        return None, None
+
+    code_value = _norm(row["status_code"])
+    label_value = _norm(row["status_label"])
+    return (code_value.upper() if code_value else None), label_value
+
+
+def _inspection_status_is_forbidden(
+    conn: Any,
+    inspection_id: int,
+    operator: dict[str, Any] | None = None,
+) -> tuple[bool, str | None, str | None]:
+    status_code, status_label = _inspection_status_info(conn, inspection_id)
+    label_key = _status_label_key(status_label)
+    blocked_codes = set(FORBIDDEN_INSPECTION_STATUS_CODES)
+    blocked_codes |= _blocked_status_codes_for_operator(operator)
+    blocked = (status_code in blocked_codes) or (label_key in FORBIDDEN_INSPECTION_STATUS_LABEL_KEYS)
+    return blocked, status_code, status_label
+
+
+def _raise_inspection_status_block(inspection_id: int, status_code: str | None, status_label: str | None) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": INSPECTION_STATUS_BLOCK_ERROR_CODE,
+            "message": "Nie mozna zapisac rekordu dla inspekcji zamknietej.",
+            "inspectionId": inspection_id,
+            "inspectionStatusCode": status_code,
+            "inspectionStatus": status_label,
+        },
+    )
 
 
 def _resolve_operator(conn: Any, operator_login: str | None) -> dict[str, Any]:
-	login = (operator_login or "").strip()
-	if not login:
-		raise HTTPException(status_code=401, detail="Operator nie istnieje")
+    login = (operator_login or "").strip()
+    if not login:
+        raise HTTPException(status_code=401, detail="Operator nie istnieje")
 
-	row = conn.execute(
-		"""
-		SELECT id, login, rola_id, zespol_id, aktywny
-		FROM users
-		WHERE lower(login)=lower(?)
-		LIMIT 1
-		""",
-		(login,),
-	).fetchone()
-	if row is None:
-		raise HTTPException(status_code=401, detail="Operator nie istnieje")
+    row = conn.execute(
+        """
+        SELECT id, login, rola_id, zespol_id, aktywny
+        FROM users
+        WHERE lower(login)=lower(?)
+        LIMIT 1
+        """,
+        (login,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=401, detail="Operator nie istnieje")
 
-	operator = dict(row)
-	if int(operator["aktywny"]) != 1:
-		raise HTTPException(status_code=403, detail="Operator jest nieaktywny")
+    operator = dict(row)
+    if int(operator["aktywny"]) != 1:
+        raise HTTPException(status_code=403, detail="Operator jest nieaktywny")
 
-	return operator
-
-
-def _year_from_date(value: str | None) -> str | None:
-	if value is None:
-		return None
-	cleaned = value.strip()
-	if len(cleaned) < 4:
-		return None
-	year = cleaned[:4]
-	if not year.isdigit():
-		return None
-	return year
+    return {
+        "id": int(operator["id"]),
+        "login": operator["login"],
+        "rola_id": int(operator["rola_id"]),
+        "zespol_id": operator["zespol_id"],
+    }
 
 
-def _matrix_cell_value(typ_inspekcji: str | None, zakres_inspekcji: str | None) -> str:
-	typ_clean = (typ_inspekcji or "").strip()
-	zakres_clean = (zakres_inspekcji or "").strip()
-
-	first_letter = typ_clean[:1].upper() if typ_clean else ""
-	if first_letter and zakres_clean:
-		parts = [part.strip() for part in re.split(r"[;,]", zakres_clean) if part.strip()]
-		if parts:
-			return ", ".join(f"{first_letter}_{part}" for part in parts)
-		return f"{first_letter}_{zakres_clean}"
-	return "-"
+def _ensure_director(operator: dict[str, Any]) -> None:
+    if int(operator["rola_id"]) != 3:
+        raise HTTPException(status_code=403, detail="Brak uprawnien")
 
 
-def _parse_iso_date(value: str | None) -> date | None:
-	if value is None:
-		return None
-	cleaned = value.strip()
-	if len(cleaned) < 10:
-		return None
-	try:
-		return date.fromisoformat(cleaned[:10])
-	except ValueError:
-		return None
+def _resolve_slownik_item_id(conn: Any, kod_typu: str, raw_value: str | None) -> int | None:
+    value = _norm(raw_value)
+    if value is None or value.lower() == "brak":
+        return None
+
+    row = conn.execute(
+        """
+        SELECT id FROM slownik_pozycje
+        WHERE lower(kod_typu) = lower(?) AND lower(nazwa_pozycji) = lower(?)
+        LIMIT 1
+        """,
+        (kod_typu, value),
+    ).fetchone()
+    if row is not None:
+        return int(row["id"])
+
+    base_code = _slug_code(value)
+    code = base_code
+    suffix = 2
+    while True:
+        exists = conn.execute(
+            """
+            SELECT id FROM slownik_pozycje
+            WHERE lower(kod_typu) = lower(?) AND lower(kod_pozycji) = lower(?)
+            LIMIT 1
+            """,
+            (kod_typu, code),
+        ).fetchone()
+        if exists is None:
+            break
+        code = f"{base_code}_{suffix}"
+        suffix += 1
+
+    max_row = conn.execute(
+        "SELECT COALESCE(MAX(kolejnosc), 0) AS max_kolejnosc FROM slownik_pozycje WHERE lower(kod_typu) = lower(?)",
+        (kod_typu,),
+    ).fetchone()
+    next_order = int(max_row["max_kolejnosc"]) + 1
+
+    cursor = conn.execute(
+        """
+        INSERT INTO slownik_pozycje
+        (kod_typu, kod_pozycji, nazwa_pozycji, kolejnosc, aktywny)
+        VALUES (?, ?, ?, ?, 1)
+        """,
+        (kod_typu, code, value, next_order),
+    )
+    return int(cursor.lastrowid)
 
 
-def _days_difference(date_from: str | None, date_to: str | None) -> int | None:
-	left = _parse_iso_date(date_from)
-	right = _parse_iso_date(date_to)
-	if left is None or right is None:
-		return None
-	# Analytics in "czas protokolu" should not expose negative durations.
-	return max((left - right).days, 0)
+def _normalize_date_list(raw_values: list[str] | None, field_name: str) -> list[str]:
+    if raw_values is None:
+        return []
+
+    normalized: list[str] = []
+    for raw in raw_values:
+        if not isinstance(raw, str):
+            raise HTTPException(status_code=422, detail=f"{field_name} zawiera niepoprawny typ")
+        value = raw.strip()
+        if not value:
+            raise HTTPException(status_code=422, detail=f"{field_name} nie moze zawierac pustych wartosci")
+        if value.lower() in {"brak", "0", "0000-00-00"}:
+            raise HTTPException(status_code=422, detail=f"{field_name} ma niepoprawny format daty")
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{field_name} ma niepoprawny format daty") from exc
+        normalized.append(parsed.isoformat())
+
+    # Keep deterministic order and remove duplicates.
+    return sorted(set(normalized))
 
 
-def _days_from_end_to_today(end_date: str | None) -> int | None:
-	parsed_end = _parse_iso_date(end_date)
-	if parsed_end is None:
-		return None
-	return (date.today() - parsed_end).days
+def _normalize_date_absence_state(
+    *,
+    dates: list[str],
+    brak: bool,
+    list_field_name: str,
+    bool_field_name: str,
+) -> tuple[list[str], bool]:
+    if brak and dates:
+        raise HTTPException(status_code=422, detail=f"Gdy {bool_field_name}=true, {list_field_name} musi byc puste")
+    if brak:
+        return [], True
+    if dates:
+        return dates, False
+    return [], False
 
 
-def _end_to_today_bucket(days_value: int | None) -> int | None:
-	if days_value is None:
-		return None
-	if days_value < 21:
-		return 0
-	if days_value <= 26:
-		return 1
-	if days_value <= 29:
-		return 2
-	if days_value > 29:
-		return 3
-	return None
+def _validate_optional_iso_date(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        parsed = date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} ma niepoprawny format daty") from exc
+    return parsed.isoformat()
 
 
-def _end_to_today_bucket_alt(days_value: int | None) -> int | None:
-	if days_value is None:
-		return None
-	if days_value < 14:
-		return 0
-	if days_value <= 21:
-		return 1
-	if days_value <= 28:
-		return 2
-	if days_value > 29:
-		return 3
-	return None
+def _resolve_single_data_zalecen(
+    *,
+    data_zalecen: str | None,
+    legacy_termin_wykonania: str | None,
+) -> str | None:
+    normalized_data = _validate_optional_iso_date(data_zalecen, "dataZalecen") if data_zalecen is not None else None
+    normalized_legacy = (
+        _validate_optional_iso_date(legacy_termin_wykonania, "terminWykonaniaZalecen")
+        if legacy_termin_wykonania is not None
+        else None
+    )
+    # Frontend may send canonical and legacy fields together during transition.
+    # Canonical field always wins to avoid silent save failures.
+    return normalized_data if normalized_data is not None else normalized_legacy
 
 
-def _inspekcja_code(typ_inspekcji: str | None) -> str:
-	cleaned = (typ_inspekcji or "").strip().lower()
-	if cleaned.startswith("kontrola"):
-		return "K"
-	if cleaned.startswith("wizyta nadzorcza"):
-		return "W"
-	return "-"
+def _resolve_terminy_wykonania_list(
+    *,
+    terminy_wykonania_list: list[str] | None,
+    legacy_data_zalecen_list: list[str] | None,
+) -> list[str]:
+    normalized_new = (
+        _normalize_date_list(terminy_wykonania_list, "terminyWykonaniaZalecenList")
+        if terminy_wykonania_list is not None
+        else None
+    )
+    normalized_legacy = (
+        _normalize_date_list(legacy_data_zalecen_list, "dataZalecenList")
+        if legacy_data_zalecen_list is not None
+        else None
+    )
+    # Frontend may send canonical and legacy fields together during transition.
+    # Canonical field always wins to avoid silent save failures.
+    if normalized_new is not None:
+        return normalized_new
+    if normalized_legacy is not None:
+        return normalized_legacy
+    return []
 
 
-def _matrix_type_code(typ_inspekcji: str | None) -> str:
-	code = _inspekcja_code(typ_inspekcji)
-	if code == "W":
-		return "WN"
-	return code
+def _recommendation_code_year(
+    data_zalecen: str | None,
+    inspection_start: str | None,
+    terminy_wykonania_list: list[str],
+) -> str:
+    year_source = data_zalecen
+    if not year_source:
+        year_source = terminy_wykonania_list[0] if terminy_wykonania_list else None
+    if not year_source:
+        year_source = inspection_start
+
+    raw = str(year_source or "").strip()
+    if len(raw) >= 4 and raw[:4].isdigit():
+        return raw[:4]
+    return str(date.today().year)
 
 
-def _normalize_matrix_scopes(raw_scopes: str | None) -> list[str]:
-	if raw_scopes is None:
-		return []
-	parts: list[str] = []
-	for part in str(raw_scopes).split(";"):
-		cleaned = part.strip()
-		if cleaned and cleaned != "-":
-			parts.append(cleaned)
-	# Keep insertion order while removing duplicates.
-	return list(dict.fromkeys(parts))
+def _next_recommendation_code(conn: Any, year: str) -> str:
+    prefix = "Z"
+    pattern = f"{prefix}/{year}/%"
+    rows = conn.execute(
+        "SELECT kod_zalecenia FROM recommendations WHERE kod_zalecenia LIKE ?",
+        (pattern,),
+    ).fetchall()
+
+    max_seq = 0
+    for row in rows:
+        raw = str(row["kod_zalecenia"] or "").strip()
+        parts = raw.split("/")
+        if len(parts) != 3 or parts[0] != prefix or parts[1] != year:
+            continue
+        try:
+            seq = int(parts[2])
+        except ValueError:
+            continue
+        max_seq = max(max_seq, seq)
+
+    return f"{prefix}/{year}/{max_seq + 1}"
 
 
-def _normalize_text_key(value: str | None) -> str:
-	cleaned = (value or "").strip().lower()
-	if not cleaned:
-		return ""
-	normalized = unicodedata.normalize("NFKD", cleaned)
-	ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
-	return " ".join(ascii_only.split())
+def _sync_multi_dates(
+    conn: Any,
+    recommendation_id: int,
+    date_type: Literal["TERMIN_WYKONANIA_ZALECEN", "AKCEPTACJA_NOTY_WERYFIKACJI"],
+    target_dates: list[str],
+    operator_user_id: int,
+) -> None:
+    existing_rows = conn.execute(
+        """
+        SELECT id, date_value
+        FROM recommendation_multi_dates
+        WHERE recommendation_id = ? AND date_type = ?
+        """,
+        (recommendation_id, date_type),
+    ).fetchall()
+
+    existing_by_value = {str(r["date_value"]): int(r["id"]) for r in existing_rows}
+    target_set = set(target_dates)
+    existing_set = set(existing_by_value.keys())
+
+    to_delete = sorted(existing_set - target_set)
+    to_insert = sorted(target_set - existing_set)
+
+    for date_value in to_delete:
+        conn.execute(
+            "DELETE FROM recommendation_multi_dates WHERE id = ?",
+            (existing_by_value[date_value],),
+        )
+
+    for date_value in to_insert:
+        conn.execute(
+            """
+            INSERT INTO recommendation_multi_dates
+            (recommendation_id, date_type, date_value, created_by_user_id, updated_by_user_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (recommendation_id, date_type, date_value, operator_user_id, operator_user_id),
+        )
 
 
-def _normalize_code_key(value: str | None) -> str:
-	cleaned = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
-	if not cleaned:
-		return ""
-	normalized = unicodedata.normalize("NFKD", cleaned)
-	ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
-	return re.sub(r"_+", "_", ascii_only)
+def _parse_dates_csv(csv_value: str | None) -> list[str]:
+    if not csv_value:
+        return []
+    return [part for part in str(csv_value).split(",") if part]
 
 
-def _resolve_stage_subgroup_code(status_code: str | None) -> str:
-	code = _normalize_code_key(status_code)
-	if code == "plan":
-		return "pre_planned"
-	if code == "przygotowanie":
-		return "pre_preparation"
-	if code == "trwa":
-		return "in_progress_active"
-	if code == "zakonczona_piszemy":
-		return "in_progress_report_writing"
-	if code.startswith("przekazano_protoko"):
-		return "post_protocol_sent"
-	if code == "przekazano_pismo_po_wizycie":
-		return "post_post_visit_letter_sent"
-	if code == "wplynely_zastrzezenia":
-		return "post_objections_received"
-	if code == "wplynela_odp_po_wizycie":
-		return "post_post_visit_response_received"
-	if code == "piszemy_zalecenia_odstapienie":
-		return "rec_writing_recommendations"
-	if code.startswith("pismo_ustalen"):
-		return "rec_findings_letter"
-	if "zamkn" in code and ("wydano_zalec" in code or "z_zalec" in code):
-		return "closed_with_recommendations"
-	if "zamkn" in code and ("brak_zalec" in code or "bez_zalec" in code):
-		return "closed_without_recommendations"
-	return "unknown_unmapped"
+def _first_date_or_none(values: list[str]) -> str | None:
+    return values[0] if values else None
 
 
-def _stage_payload_from_status_code(status_code: str | None) -> dict[str, Any]:
-	subgroup_code = _resolve_stage_subgroup_code(status_code)
-	return dict(STAGE_SUBGROUP_INDEX.get(subgroup_code, STAGE_SUBGROUP_INDEX["unknown_unmapped"]))
+def _sync_inspection_recommendation_dates(
+    conn: Any,
+    inspection_id: int | None,
+    operator_user_id: int,
+) -> None:
+    if inspection_id is None:
+        return
+
+    rows = conn.execute(
+        """
+                SELECT DISTINCT r.data_zalecen AS date_value
+                FROM recommendations r
+        WHERE r.inspection_id = ?
+                    AND r.data_zalecen IS NOT NULL
+                    AND trim(r.data_zalecen) <> ''
+                ORDER BY r.data_zalecen ASC
+        """,
+        (inspection_id,),
+    ).fetchall()
+    target_dates = [str(r["date_value"]) for r in rows]
+
+    existing_rows = conn.execute(
+        """
+        SELECT id, date_value
+        FROM inspection_multi_dates
+        WHERE inspection_id = ?
+          AND date_type = 'ZALECENIE'
+        """,
+        (inspection_id,),
+    ).fetchall()
+    existing_by_value = {str(r["date_value"]): int(r["id"]) for r in existing_rows}
+
+    target_set = set(target_dates)
+    existing_set = set(existing_by_value.keys())
+
+    to_delete = sorted(existing_set - target_set)
+    to_insert = sorted(target_set - existing_set)
+
+    for date_value in to_delete:
+        conn.execute(
+            "DELETE FROM inspection_multi_dates WHERE id = ?",
+            (existing_by_value[date_value],),
+        )
+
+    for date_value in to_insert:
+        conn.execute(
+            """
+            INSERT INTO inspection_multi_dates
+            (inspection_id, date_type, date_value, created_by_user_id, updated_by_user_id)
+            VALUES (?, 'ZALECENIE', ?, ?, ?)
+            """,
+            (inspection_id, date_value, operator_user_id, operator_user_id),
+        )
+
+    latest_date = target_dates[-1] if target_dates else None
+    conn.execute(
+        "UPDATE inspections SET data_zalecen = ? WHERE id = ?",
+        (latest_date, inspection_id),
+    )
 
 
-def _manager_scope_flags_for_inspection(conn: Any, inspection_id: int, manager: dict[str, Any]) -> tuple[bool, bool]:
-	team_id = manager.get("zespol_id")
-	has_team = team_id is not None
+def _can_edit_recommendation(
+    conn: Any,
+    inspection_id: int | None,
+    operator: dict[str, Any],
+    created_by_user_id: int | None,
+) -> bool:
+    # dyrektor: pelny dostep do wszystkich inspekcji
+    if operator["rola_id"] == 3:
+        return True
 
-	leader_row = conn.execute(
-		"""
-		SELECT u.zespol_id AS leader_team_id, u.created_by_user_id AS leader_created_by
-		FROM inspections i
-		LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
-		WHERE i.id = ?
-		LIMIT 1
-		""",
-		(int(inspection_id),),
-	).fetchone()
+    if inspection_id is None:
+        if created_by_user_id is None:
+            return False
 
-	in_team_scope = False
-	in_added_scope = False
-	if leader_row is not None:
-		leader_team_id = leader_row["leader_team_id"]
-		leader_created_by = leader_row["leader_created_by"]
-		if has_team and leader_team_id is not None and int(leader_team_id) == int(team_id):
-			in_team_scope = True
-		if leader_created_by is not None and int(leader_created_by) == int(manager["id"]):
-			in_added_scope = True
+        if int(created_by_user_id) == operator["id"]:
+            return True
 
-	if has_team:
-		member_row = conn.execute(
-			"""
-			SELECT
-				MAX(CASE WHEN u.zespol_id = ? THEN 1 ELSE 0 END) AS has_team_member,
-				MAX(CASE WHEN u.created_by_user_id = ? THEN 1 ELSE 0 END) AS has_added_member
-			FROM inspection_members im
-			JOIN users u ON u.id = im.user_id
-			WHERE im.inspection_id = ?
-			""",
-			(int(team_id), int(manager["id"]), int(inspection_id)),
-		).fetchone()
-	else:
-		member_row = conn.execute(
-			"""
-			SELECT
-				0 AS has_team_member,
-				MAX(CASE WHEN u.created_by_user_id = ? THEN 1 ELSE 0 END) AS has_added_member
-			FROM inspection_members im
-			JOIN users u ON u.id = im.user_id
-			WHERE im.inspection_id = ?
-			""",
-			(int(manager["id"]), int(inspection_id)),
-		).fetchone()
-	if member_row is not None:
-		in_team_scope = in_team_scope or int(member_row["has_team_member"] or 0) == 1
-		in_added_scope = in_added_scope or int(member_row["has_added_member"] or 0) == 1
+        if operator["rola_id"] == 2:
+            author_row = conn.execute(
+                "SELECT zespol_id, created_by_user_id FROM users WHERE id = ? LIMIT 1",
+                (int(created_by_user_id),),
+            ).fetchone()
+            if author_row is None:
+                return False
+            created_by = author_row["created_by_user_id"]
+            if created_by is not None and int(created_by) == int(operator["id"]):
+                return True
+            if operator["zespol_id"] is None or author_row["zespol_id"] is None:
+                return False
+            return int(author_row["zespol_id"]) == int(operator["zespol_id"])
 
-	return in_team_scope, in_added_scope
+        return False
 
+    if created_by_user_id is None:
+        inspection_row = conn.execute(
+            "SELECT created_by_user_id FROM inspections WHERE id = ? LIMIT 1",
+            (inspection_id,),
+        ).fetchone()
+        if inspection_row is not None and inspection_row["created_by_user_id"] is not None:
+            created_by_user_id = int(inspection_row["created_by_user_id"])
 
-def _public_status_label(value: str | None) -> str:
-	return str(value or "-").strip() or "-"
+    # kierownik: moze dodawac/edytowac zalecenia dla inspekcji,
+    # gdzie osoba kierujaca LUB dowolny czlonek skladu jest z jego zespolu.
+    if operator["rola_id"] == 2:
+        leader_row = conn.execute(
+            """
+            SELECT 1
+            FROM inspections i
+            JOIN users u ON u.id = i.osoba_kierujaca_user_id
+            WHERE i.id = ?
+                            AND (
+                                        (u.zespol_id = ?)
+                                        OR (u.created_by_user_id = ?)
+                                    )
+            LIMIT 1
+            """,
+                        (inspection_id, operator["zespol_id"], int(operator["id"])),
+        ).fetchone()
+        if leader_row is not None:
+            return True
 
+        team_member_row = conn.execute(
+            """
+            SELECT 1
+            FROM inspection_members im
+            JOIN users u ON u.id = im.user_id
+            WHERE im.inspection_id = ?
+                            AND (
+                                        (u.zespol_id = ?)
+                                        OR (u.created_by_user_id = ?)
+                                    )
+            LIMIT 1
+            """,
+                        (inspection_id, operator["zespol_id"], int(operator["id"])),
+        ).fetchone()
+        return team_member_row is not None
 
-def _should_compute_bucket_code(status_code: str | None) -> bool:
-	return _is_excluded_status_code(status_code, _DASHBOARD_ALERT_INSPECTION_STATUS_CODES)
+    # zwykly uzytkownik: inspekcje utworzone przez siebie lub takie, w ktorych jest czlonkiem
+    if created_by_user_id is not None and int(created_by_user_id) == operator["id"]:
+        return True
 
-
-def _parse_csv_values(raw_value: str | list[str] | None) -> list[str]:
-	if raw_value is None:
-		return []
-	items = raw_value if isinstance(raw_value, list) else [raw_value]
-	parts: list[str] = []
-	for item in items:
-		for part in re.split(r"[,;\n]", str(item)):
-			cleaned = part.strip()
-			if cleaned:
-				parts.append(cleaned)
-	# Keep insertion order while removing duplicates.
-	return list(dict.fromkeys(parts))
-
-
-def _load_excluded_status_codes(env_key: str) -> set[str]:
-	raw_value = os.getenv(env_key)
-	if raw_value is None:
-		return set()
-	return {
-		normalized
-		for normalized in (_normalize_code_key(v) for v in _parse_csv_values(raw_value))
-		if normalized
-	}
+    member_row = conn.execute(
+        "SELECT 1 FROM inspection_members WHERE inspection_id = ? AND user_id = ? LIMIT 1",
+        (inspection_id, operator["id"]),
+    ).fetchone()
+    return member_row is not None
 
 
-_DASHBOARD_EXCLUDED_INSPECTION_STATUS_CODES = _load_excluded_status_codes("DASHBOARD_EXCLUDED_INSPECTION_STATUS_CODES")
-_DASHBOARD_EXCLUDED_RECOMMENDATION_STATUS_CODES = _load_excluded_status_codes("DASHBOARD_EXCLUDED_RECOMMENDATION_STATUS_CODES")
-_DASHBOARD_ALERT_INSPECTION_STATUS_CODES = (
-	_load_excluded_status_codes("DASHBOARD_ALERT_INSPECTION_STATUS_CODES")
-	or {_normalize_code_key("I_SI_4")}
+def _base_select_sql() -> str:
+    return """
+        SELECT
+            r.id,
+            r.inspection_id,
+            i.lp AS inspection_lp,
+            i.kod_inspekcji AS inspection_kod,
+            r.kod_zalecenia,
+            r.created_by_user_id,
+            r.pozycja,
+            np.nazwa_pozycji AS nazwa_podmiotu_nazwa,
+            np.skrot_pozycji AS nazwa_podmiotu_skrot,
+            r.data_zalecen,
+            r.brak_terminow_wykonania_zalecen,
+            r.brak_dat_akceptacji_noty_weryfikacji,
+            st.nazwa_pozycji AS status_nazwa,
+            st.skrot_pozycji AS status_skrot,
+            r.komentarz,
+            r.utworzono_o,
+            r.zaktualizowano_o,
+            (
+                SELECT group_concat(x.dv, ',')
+                FROM (
+                    SELECT rmd.date_value AS dv
+                    FROM recommendation_multi_dates rmd
+                    WHERE rmd.recommendation_id = r.id
+                                            AND rmd.date_type = 'TERMIN_WYKONANIA_ZALECEN'
+                    ORDER BY rmd.date_value ASC
+                ) x
+            ) AS data_zalecen_list_csv,
+            (
+                SELECT group_concat(x.dv, ',')
+                FROM (
+                    SELECT rmd.date_value AS dv
+                    FROM recommendation_multi_dates rmd
+                    WHERE rmd.recommendation_id = r.id
+                      AND rmd.date_type = 'AKCEPTACJA_NOTY_WERYFIKACJI'
+                    ORDER BY rmd.date_value ASC
+                ) x
+            ) AS data_akceptacji_weryfikacji_list_csv
+        FROM recommendations r
+        LEFT JOIN inspections i ON i.id = r.inspection_id
+        LEFT JOIN slownik_pozycje np ON np.id = r.nazwa_podmiotu_id
+        LEFT JOIN slownik_pozycje st ON st.id = r.status_zalecenia_id
+    """
+
+
+def _row_to_payload(row: dict[str, Any], lp: int, can_edit: bool) -> dict[str, Any]:
+    terminy_wykonania_list = _parse_dates_csv(row.get("data_zalecen_list_csv"))
+    data_zalecen_single = row.get("data_zalecen")
+    termin_wykonania_single = _first_date_or_none(terminy_wykonania_list)
+    brak_terminow = int(row.get("brak_terminow_wykonania_zalecen") or 0) == 1
+    brak_akceptacji = int(row.get("brak_dat_akceptacji_noty_weryfikacji") or 0) == 1
+    return {
+        "id": int(row["id"]),
+        "lp": lp,
+        "kodZalecenia": row.get("kod_zalecenia"),
+        "canEdit": can_edit,
+        "inspectionId": int(row["inspection_id"]) if row.get("inspection_id") is not None else None,
+        "inspectionLp": int(row["inspection_lp"]) if row.get("inspection_lp") is not None else None,
+        "inspectionKod": row.get("inspection_kod"),
+        "pozycja": int(row["pozycja"]),
+        "nazwaPodmiotu": row.get("nazwa_podmiotu_nazwa") or "brak",
+        "nazwaPodmiotuSkrocona": row.get("nazwa_podmiotu_skrot"),
+        "nazwaPodmiotuSkrot": row.get("nazwa_podmiotu_skrot"),
+        "dataZalecen": data_zalecen_single,
+        "terminyWykonaniaZalecenList": terminy_wykonania_list,
+        # Legacy aliases.
+        "terminWykonaniaZalecen": termin_wykonania_single,
+        "status": row.get("status_nazwa") or "brak",
+        "statusSkrocona": row.get("status_skrot"),
+        "statusSkrot": row.get("status_skrot"),
+        "komentarz": row.get("komentarz"),
+        "dataZalecenList": terminy_wykonania_list,
+        "dataAkceptacjiNotyWeryfikacjiList": _parse_dates_csv(row.get("data_akceptacji_weryfikacji_list_csv")),
+        "brakTerminowWykonaniaZalecen": brak_terminow,
+        "brakDatAkceptacjiNotyWeryfikacji": brak_akceptacji,
+        "utworzonoO": row.get("utworzono_o"),
+        "zaktualizowanoO": row.get("zaktualizowano_o"),
+    }
+
+
+@router.get(
+    "/api/recommendations/available-inspections",
+    response_model=list[RecommendationInspectionOption],
 )
-_REPORTS_EXCLUDED_INSPECTION_STATUS_CODES = _load_excluded_status_codes("REPORTS_EXCLUDED_INSPECTION_STATUS_CODES")
-_REPORTS_EXCLUDED_RECOMMENDATION_STATUS_CODES = _load_excluded_status_codes("REPORTS_EXCLUDED_RECOMMENDATION_STATUS_CODES")
+def list_available_inspections_for_recommendations(
+    x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
+) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        operator = _resolve_operator(conn, x_operator_login)
+        require_write_access(conn, operator)
+        require_permission(conn, operator, PERMISSION_RECOMMENDATIONS_READ)
+        rows = conn.execute(
+            """
+            SELECT
+                i.id,
+                i.lp,
+                i.kod_inspekcji,
+                np.nazwa_pozycji AS nazwa_podmiotu_nazwa,
+                np.skrot_pozycji AS nazwa_podmiotu_skrot,
+                i.poczatek_inspekcji,
+                i.koniec_inspekcji,
+                i.osoba_kierujaca_user_id,
+                trim(ulead.imie || ' ' || ulead.nazwisko) AS osoba_kierujaca_full,
+                ulead.login AS osoba_kierujaca_login
+            FROM inspections i
+            LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
+            LEFT JOIN users ulead ON ulead.id = i.osoba_kierujaca_user_id
+            ORDER BY i.lp ASC, i.id ASC
+            """
+        ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            row_dict = dict(row)
+            inspection_id = int(row_dict["id"])
+            if not _can_edit_recommendation(conn, inspection_id, operator, None):
+                continue
+            blocked, _, _ = _inspection_status_is_forbidden(conn, inspection_id, operator)
+            if blocked:
+                continue
+
+            leader_name = _norm(row_dict.get("osoba_kierujaca_full")) or row_dict.get("osoba_kierujaca_login")
+            items.append(
+                {
+                    "id": inspection_id,
+                    "lp": int(row_dict["lp"]),
+                    "kodInspekcji": row_dict.get("kod_inspekcji"),
+                    "nazwaPodmiotu": row_dict.get("nazwa_podmiotu_nazwa") or "brak",
+                    "nazwaPodmiotuSkrocona": row_dict.get("nazwa_podmiotu_skrot"),
+                    "nazwaPodmiotuSkrot": row_dict.get("nazwa_podmiotu_skrot"),
+                    "poczatekInspekcji": row_dict.get("poczatek_inspekcji"),
+                    "koniecInspekcji": row_dict.get("koniec_inspekcji"),
+                    "osobaKierujacaUserId": row_dict.get("osoba_kierujaca_user_id"),
+                    "osobaKierujaca": leader_name,
+                }
+            )
+
+    return items
 
 
-def _is_excluded_status_code(status_code: str | None, excluded_codes: set[str]) -> bool:
-	return _normalize_code_key(status_code) in excluded_codes
-
-
-def _is_dashboard_hidden_status_code(status_code: str | None) -> bool:
-	return _is_excluded_status_code(status_code, _DASHBOARD_EXCLUDED_INSPECTION_STATUS_CODES)
-
-
-def _is_dashboard_hidden_recommendation_status_code(status_code: str | None) -> bool:
-	return _is_excluded_status_code(status_code, _DASHBOARD_EXCLUDED_RECOMMENDATION_STATUS_CODES)
-
-
-def _is_reports_hidden_status_code(status_code: str | None) -> bool:
-	return _is_excluded_status_code(status_code, _REPORTS_EXCLUDED_INSPECTION_STATUS_CODES)
-
-
-def _is_reports_hidden_recommendation_status_code(status_code: str | None) -> bool:
-	return _is_excluded_status_code(status_code, _REPORTS_EXCLUDED_RECOMMENDATION_STATUS_CODES)
-
-
-def _can_access_inspection_for_reports(conn: Any, inspection_row: dict[str, Any], operator: dict[str, Any]) -> bool:
-	if int(operator["rola_id"]) == 3:
-		return True
-	if int(operator["rola_id"]) == 4:
-		return True
-
-	inspection_id = int(inspection_row["id"])
-
-	if int(operator["rola_id"]) == 2:
-		operator_team_id = operator.get("zespol_id")
-		has_team = operator_team_id is not None
-
-		if has_team:
-			leader_row = conn.execute(
-				"""
-				SELECT 1
-				FROM inspections i
-				JOIN users u ON u.id = i.osoba_kierujaca_user_id
-				WHERE i.id = ?
-				  AND (
-				      u.zespol_id = ?
-				      OR u.created_by_user_id = ?
-				  )
-				LIMIT 1
-				""",
-				(inspection_id, int(operator_team_id), int(operator["id"])),
-			).fetchone()
-		else:
-			leader_row = conn.execute(
-				"""
-				SELECT 1
-				FROM inspections i
-				JOIN users u ON u.id = i.osoba_kierujaca_user_id
-				WHERE i.id = ?
-				  AND u.created_by_user_id = ?
-				LIMIT 1
-				""",
-				(inspection_id, int(operator["id"])),
-			).fetchone()
-		if leader_row is not None:
-			return True
-
-		if has_team:
-			member_team_row = conn.execute(
-				"""
-				SELECT 1
-				FROM inspection_members im
-				JOIN users u ON u.id = im.user_id
-				WHERE im.inspection_id = ?
-				  AND (
-				      u.zespol_id = ?
-				      OR u.created_by_user_id = ?
-				  )
-				LIMIT 1
-				""",
-				(inspection_id, int(operator_team_id), int(operator["id"])),
-			).fetchone()
-		else:
-			member_team_row = conn.execute(
-				"""
-				SELECT 1
-				FROM inspection_members im
-				JOIN users u ON u.id = im.user_id
-				WHERE im.inspection_id = ?
-				  AND u.created_by_user_id = ?
-				LIMIT 1
-				""",
-				(inspection_id, int(operator["id"])),
-			).fetchone()
-		return member_team_row is not None
-
-	created_by_user_id = inspection_row.get("created_by_user_id")
-	if created_by_user_id is not None and int(created_by_user_id) == int(operator["id"]):
-		return True
-
-	member_row = conn.execute(
-		"SELECT 1 FROM inspection_members WHERE inspection_id = ? AND user_id = ? LIMIT 1",
-		(inspection_id, int(operator["id"])),
-	).fetchone()
-	if member_row is not None:
-		return True
-
-	leader_row = conn.execute(
-		"SELECT 1 FROM inspections WHERE id = ? AND osoba_kierujaca_user_id = ? LIMIT 1",
-		(inspection_id, int(operator["id"])),
-	).fetchone()
-	return leader_row is not None
-
-
-def _can_access_recommendation_for_reports(conn: Any, recommendation_row: dict[str, Any], operator: dict[str, Any]) -> bool:
-	if int(operator["rola_id"]) == 3:
-		return True
-
-	inspection_id_raw = recommendation_row.get("inspection_id")
-	if inspection_id_raw is not None:
-		inspection_row = {
-			"id": int(inspection_id_raw),
-			"created_by_user_id": recommendation_row.get("inspection_created_by_user_id"),
-		}
-		return _can_access_inspection_for_reports(conn, inspection_row, operator)
-
-	author_id_raw = recommendation_row.get("recommendation_created_by_user_id")
-	if author_id_raw is None:
-		return False
-	author_id = int(author_id_raw)
-
-	if author_id == int(operator["id"]):
-		return True
-
-	if int(operator["rola_id"]) == 2:
-		author_team_id = recommendation_row.get("recommendation_author_team_id")
-		author_created_by = recommendation_row.get("recommendation_author_created_by_user_id")
-		if author_created_by is not None and int(author_created_by) == int(operator["id"]):
-			return True
-		operator_team_id = operator.get("zespol_id")
-		if operator_team_id is None or author_team_id is None:
-			return False
-		return int(author_team_id) == int(operator_team_id)
-
-	return False
-
-
-def _safe_average(values: list[int]) -> float | None:
-	if not values:
-		return None
-	return float(sum(values)) / float(len(values))
-
-
-def _metric_from_values(values: list[int], trend_mode: str) -> float | None:
-	if not values:
-		return None
-	if trend_mode == "average":
-		return _safe_average(values)
-	return float(median(values))
-
-
-def _is_member_current_user(conn: Any, inspection_id: int, operator_id: int) -> bool:
-	row = conn.execute(
-		"SELECT 1 FROM inspection_members WHERE inspection_id = ? AND user_id = ? LIMIT 1",
-		(int(inspection_id), int(operator_id)),
-	).fetchone()
-	return row is not None
-
-
-def _is_leader_in_manager_scope(conn: Any, leader_user_id: int | None, operator: dict[str, Any]) -> bool:
-	if int(operator.get("rola_id", 0)) != 2:
-		return False
-	if leader_user_id is None:
-		return False
-	operator_team_id = operator.get("zespol_id")
-	if operator_team_id is None:
-		return False
-	row = conn.execute(
-		"""
-		SELECT 1
-		FROM users u
-		WHERE u.id = ?
-		  AND (
-		      u.zespol_id = ?
-		      OR u.created_by_user_id = ?
-		  )
-		LIMIT 1
-		""",
-		(int(leader_user_id), int(operator_team_id), int(operator["id"])),
-	).fetchone()
-	return row is not None
-
-
-def _is_member_in_manager_scope(conn: Any, inspection_id: int, operator: dict[str, Any]) -> bool:
-	if int(operator.get("rola_id", 0)) != 2:
-		return False
-	operator_team_id = operator.get("zespol_id")
-	if operator_team_id is None:
-		return False
-	row = conn.execute(
-		"""
-		SELECT 1
-		FROM inspection_members im
-		JOIN users u ON u.id = im.user_id
-		WHERE im.inspection_id = ?
-		  AND (
-		      u.zespol_id = ?
-		      OR u.created_by_user_id = ?
-		  )
-		LIMIT 1
-		""",
-		(int(inspection_id), int(operator_team_id), int(operator["id"])),
-	).fetchone()
-	return row is not None
-
-
-@router.get("/api/reports/inspections-time-analytics", response_model=InspectionsTimeAnalyticsResponse)
-def get_inspections_time_analytics(
-	x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
-	inspectionType: str = Query(...),
-	trendMode: str = Query("median"),
-	teams: str | None = Query(default=None),
-	years: list[str] | None = Query(default=None),
+@router.get("/api/recommendations", response_model=RecommendationListResponse)
+def list_recommendations(
+    inspectionId: int | None = Query(default=None),
+    status: str | None = Query(default=None),
+    nazwaPodmiotu: str | None = Query(default=None),
+    sortBy: str = Query(default="id"),
+    sortOrder: str = Query(default="desc"),
+    x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
-	inspection_type = inspectionType.strip().upper()
-	if inspection_type not in {"K", "W"}:
-		raise HTTPException(status_code=400, detail="inspectionType musi byc K albo W")
-
-	trend_mode = trendMode.strip().lower()
-	if trend_mode not in {"average", "median"}:
-		raise HTTPException(status_code=400, detail="trendMode musi byc average albo median")
-	metric_label = "Srednia" if trend_mode == "average" else "Mediana"
-
-	team_filter = set(_parse_csv_values(teams))
-	year_filter = set(_parse_csv_values(years))
-
-	with get_connection() as conn:
-		operator = _resolve_operator(conn, x_operator_login)
-		require_permission(conn, operator, PERMISSION_REPORTS_REPORT_TIME_READ)
-		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
-			raise HTTPException(status_code=403, detail="Brak uprawnien")
-
-		operator_team_id = int(operator["zespol_id"]) if operator.get("zespol_id") is not None else None
-		operator_team_code = "-"
-		if operator_team_id is not None:
-			team_row = conn.execute("SELECT kod FROM teams WHERE id = ? LIMIT 1", (operator_team_id,)).fetchone()
-			if team_row is not None:
-				operator_team_code = str(team_row["kod"] or "-").strip() or "-"
-
-		operator_member_inspections: set[int] = set()
-		operator_member_rows = conn.execute(
-			"""
-			SELECT DISTINCT inspection_id
-			FROM inspection_members
-			WHERE user_id = ?
-			""",
-			(int(operator["id"]),),
-		).fetchall()
-		operator_member_inspections = {int(item["inspection_id"]) for item in operator_member_rows}
-
-		rows = conn.execute(
-			"""
-			SELECT
-				i.id,
-				i.kod_inspekcji,
-				i.created_by_user_id,
-				i.osoba_kierujaca_user_id,
-				i.poczatek_inspekcji,
-				i.koniec_inspekcji,
-				i.data_protokolu_sprawozdania,
-				i.status_inspekcji_id,
-				COALESCE(si.kod_pozycji, '') AS status_inspekcji_kod,
-				ti.nazwa_pozycji AS typ_inspekcji,
-				COALESCE(si.nazwa_pozycji, '-') AS status_inspekcji,
-				COALESCE(NULLIF(trim(si.skrot_pozycji), ''), si.nazwa_pozycji, '-') AS status_inspekcji_skrot,
-				COALESCE(NULLIF(trim(np.skrot_pozycji), ''), np.nazwa_pozycji, '-') AS nazwa_podmiotu,
-				COALESCE(u.login, '-') AS osoba_kierujaca,
-				COALESCE(t.kod, '-') AS zespol_osoby_kierujacej_kod,
-				u.zespol_id AS lead_team_id
-			FROM inspections i
-			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
-			LEFT JOIN slownik_pozycje si ON si.id = i.status_inspekcji_id
-			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
-			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
-			LEFT JOIN teams t ON t.id = u.zespol_id
-			ORDER BY i.id ASC
-			"""
-		).fetchall()
-
-	typed_rows: list[dict[str, Any]] = []
-	all_type_base_rows: list[dict[str, Any]] = []
-	base_rows: list[dict[str, Any]] = []
-	for raw_row in rows:
-		row = dict(raw_row)
-		if _is_reports_hidden_status_code(row.get("status_inspekcji_kod")):
-			continue
-		row_type = _inspekcja_code(row.get("typ_inspekcji"))
-		if row_type not in {"K", "W"}:
-			continue
-
-		diff = _days_difference(row.get("data_protokolu_sprawozdania"), row.get("koniec_inspekcji"))
-		year = _year_from_date(row.get("poczatek_inspekcji"))
-		team_code = str(row.get("zespol_osoby_kierujacej_kod") or "-").strip() or "-"
-		status_label = _public_status_label(row.get("status_inspekcji"))
-		stage_payload = _stage_payload_from_status_code(row.get("status_inspekcji_kod"))
-		inspection_id = int(row["id"])
-		leader_user_id = row.get("osoba_kierujaca_user_id")
-		is_leader_current_user = leader_user_id is not None and int(leader_user_id) == int(operator["id"])
-		is_member_current_user = inspection_id in operator_member_inspections
-		normalized_row = {
-			"inspectionId": inspection_id,
-			"kodInspekcji": str(row.get("kod_inspekcji") or "-").strip() or "-",
-			"inspekcja": row_type,
-			"statusInspekcjiId": int(row["status_inspekcji_id"]) if row.get("status_inspekcji_id") is not None else None,
-			"statusInspekcji": status_label,
-				"statusInspekcjiSkrot": str(row.get("status_inspekcji_skrot") or status_label or "-").strip() or "-",
-			"nazwaPodmiotu": str(row.get("nazwa_podmiotu") or "-").strip() or "-",
-			"osobaKierujaca": str(row.get("osoba_kierujaca") or "-").strip() or "-",
-			"rokPoczatku": year,
-			"poczatekInspekcji": row.get("poczatek_inspekcji"),
-			"koniecInspekcji": row.get("koniec_inspekcji"),
-			"data": row.get("data_protokolu_sprawozdania"),
-			"zespol": team_code,
-			"czas": diff,
-			"isLeaderCurrentUser": is_leader_current_user,
-			"isMemberCurrentUser": is_member_current_user,
-			"leadTeamId": row.get("lead_team_id"),
-			"stageGroupCode": stage_payload["stage_group_code"],
-			"stageGroupLabel": stage_payload["stage_group_label"],
-			"stageGroupOrder": stage_payload["stage_group_order"],
-			"stageSubgroupCode": stage_payload["stage_subgroup_code"],
-			"stageSubgroupLabel": stage_payload["stage_subgroup_label"],
-			"stageSubgroupOrder": stage_payload["stage_subgroup_order"],
-		}
-
-		if _can_access_inspection_for_reports(conn, row, operator):
-			all_type_base_rows.append(normalized_row)
-
-		if row_type != inspection_type:
-			continue
-
-		typed_rows.append(normalized_row)
-
-		if _can_access_inspection_for_reports(conn, row, operator):
-			base_rows.append(normalized_row)
-
-	if year_filter:
-		rows_after_year = [row for row in base_rows if str(row.get("rokPoczatku") or "") in year_filter]
-	else:
-		rows_after_year = list(base_rows)
-
-	if team_filter:
-		filtered_rows = [row for row in rows_after_year if str(row.get("zespol") or "") in team_filter]
-	else:
-		filtered_rows = list(rows_after_year)
-
-	# Year-count section is intentionally based on all inspection types (K + W)
-	# and mirrors permission + team filtering used by this report.
-	# Keep it aligned with time-based sections: count only rows with computable time.
-	rows_for_counts = [
-		row
-		for row in all_type_base_rows
-		if row.get("rokPoczatku") is not None and isinstance(row.get("czas"), (int, float))
-	]
-	if year_filter:
-		rows_for_counts = [row for row in rows_for_counts if str(row.get("rokPoczatku") or "") in year_filter]
-	if team_filter:
-		rows_for_counts = [row for row in rows_for_counts if str(row.get("zespol") or "") in team_filter]
-
-	(
-		year_count_columns,
-		year_count_rows,
-		year_count_by_team_columns,
-		year_count_by_team_rows,
-	) = build_year_count_sections(rows_for_counts, inspection_type)
-
-	team_options = sorted({str(row["zespol"]) for row in base_rows if str(row.get("zespol") or "") not in {"", "-"}})
-	year_options = sorted({str(row["rokPoczatku"]) for row in base_rows if row.get("rokPoczatku") is not None}, reverse=True)
-
-	def _is_valid_for_aggregations(row: dict[str, Any]) -> bool:
-		if row.get("rokPoczatku") is None:
-			return False
-		czas_value = row.get("czas")
-		return isinstance(czas_value, (int, float))
-
-	if int(operator["rola_id"]) == 1:
-		if year_filter:
-			department_min_max_source = [
-				row
-				for row in typed_rows
-				if str(row.get("rokPoczatku") or "") in year_filter and _is_valid_for_aggregations(row)
-			]
-		else:
-			department_min_max_source = [row for row in typed_rows if _is_valid_for_aggregations(row)]
-	else:
-		department_min_max_source = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
-
-	department_times_for_bounds = [int(row["czas"]) for row in department_min_max_source]
-	department_min_time = min(department_times_for_bounds) if department_times_for_bounds else None
-	department_max_time = max(department_times_for_bounds) if department_times_for_bounds else None
-
-	department_time_by_year_groups: dict[str, list[int]] = defaultdict(list)
-	for row in department_min_max_source:
-		year_key = str(row.get("rokPoczatku") or "").strip()
-		if not year_key:
-			continue
-		department_time_by_year_groups[year_key].append(int(row["czas"]))
-
-	department_min_time_by_year = {
-		year: int(min(values))
-		for year, values in sorted(department_time_by_year_groups.items(), key=lambda item: item[0])
-		if values
-	}
-	department_max_time_by_year = {
-		year: int(max(values))
-		for year, values in sorted(department_time_by_year_groups.items(), key=lambda item: item[0])
-		if values
-	}
-
-	agg_filtered_rows = [row for row in filtered_rows if _is_valid_for_aggregations(row)]
-	department_scope_rows = [row for row in rows_after_year if _is_valid_for_aggregations(row)]
-
-	summary_rows: list[dict[str, Any]] = []
-	overall_rows: list[dict[str, Any]] = []
-	all_year_metric_by_team: dict[str, float | None] = {}
-	overall_metric_key = "average" if trend_mode == "average" else "median"
-	overall_metric_label = "Srednia" if trend_mode == "average" else "Mediana"
-
-	if int(operator["rola_id"]) == 1:
-		if year_filter:
-			typed_rows_after_year = [row for row in typed_rows if str(row.get("rokPoczatku") or "") in year_filter]
-		else:
-			typed_rows_after_year = list(typed_rows)
-		typed_rows_all_year = list(typed_rows_after_year)
-
-		department_user_scope_all_year = [row for row in typed_rows_all_year if _is_valid_for_aggregations(row)]
-
-		department_user_scope = [row for row in typed_rows_after_year if _is_valid_for_aggregations(row)]
-
-		team_user_scope: list[dict[str, Any]] = []
-		team_user_scope_all_year: list[dict[str, Any]] = []
-		if operator_team_id is not None:
-			for row in typed_rows_all_year:
-				if not _is_valid_for_aggregations(row):
-					continue
-				lead_team_id = row.get("leadTeamId")
-				is_team_row = lead_team_id is not None and int(lead_team_id) == int(operator_team_id)
-				if is_team_row:
-					team_user_scope_all_year.append(row)
-
-			for row in typed_rows_after_year:
-				if not _is_valid_for_aggregations(row):
-					continue
-				lead_team_id = row.get("leadTeamId")
-				is_team_row = lead_team_id is not None and int(lead_team_id) == int(operator_team_id)
-				if is_team_row:
-					team_user_scope.append(row)
-
-		my_user_scope_all_year = [
-			row
-			for row in base_rows
-			if _is_valid_for_aggregations(row) and bool(row.get("isLeaderCurrentUser"))
-		]
-		my_user_scope = [
-			row
-			for row in rows_after_year
-			if _is_valid_for_aggregations(row) and bool(row.get("isLeaderCurrentUser"))
-		]
-
-		dept_groups: dict[str, list[int]] = defaultdict(list)
-		for row in department_user_scope:
-			dept_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
-
-		team_groups: dict[str, list[int]] = defaultdict(list)
-		for row in team_user_scope:
-			team_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
-
-		my_groups: dict[str, list[int]] = defaultdict(list)
-		for row in my_user_scope:
-			my_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
-
-		all_years = sorted(set(dept_groups.keys()) | set(team_groups.keys()) | set(my_groups.keys()))
-		for year in all_years:
-			for scope_name, values in (
-				("Departament", dept_groups.get(year, [])),
-				(operator_team_code, team_groups.get(year, [])),
-				("Moj czas", my_groups.get(year, [])),
-			):
-				if not values:
-					continue
-				avg_value = _safe_average(values)
-				med_value = float(median(values)) if values else None
-				metric_value = avg_value if trend_mode == "average" else med_value
-				summary_rows.append(
-					{
-						"rok": year,
-						"zespol": scope_name,
-						"year": year,
-						"team": scope_name,
-						"count": len(values),
-						"average": avg_value,
-						"median": med_value,
-						"min": min(values),
-						"max": max(values),
-						"metric": metric_value,
-					}
-				)
-
-		for scope_name, rows_scope in (
-			("Departament", department_user_scope),
-			(operator_team_code, team_user_scope),
-			("Moj czas", my_user_scope),
-		):
-			values = [int(item["czas"]) for item in rows_scope]
-			if not values:
-				continue
-			avg_value = _safe_average(values)
-			med_value = float(median(values)) if values else None
-			metric_value = avg_value if trend_mode == "average" else med_value
-			overall_rows.append(
-				{
-					"zespol": scope_name,
-					"count": len(values),
-					"average": avg_value,
-					"median": med_value,
-					"min": min(values),
-					"max": max(values),
-					"metric": metric_value,
-				}
-			)
-
-		for scope_name, rows_scope in (
-			("Departament", department_user_scope_all_year),
-			(operator_team_code, team_user_scope_all_year),
-			("Moj czas", my_user_scope_all_year),
-		):
-			values = [int(item["czas"]) for item in rows_scope]
-			if not values:
-				continue
-			all_year_metric_by_team[scope_name] = _metric_from_values(values, trend_mode)
-	else:
-		summary_groups: dict[tuple[str, str], list[int]] = defaultdict(list)
-		for row in agg_filtered_rows:
-			summary_groups[(str(row["rokPoczatku"]), str(row["zespol"]))].append(int(row["czas"]))
-
-		for (year, team), values in sorted(summary_groups.items(), key=lambda item: (item[0][0], item[0][1])):
-			avg_value = _safe_average(values)
-			med_value = float(median(values)) if values else None
-			metric_value = avg_value if trend_mode == "average" else med_value
-			summary_rows.append(
-				{
-					"rok": year,
-					"zespol": team,
-					"year": year,
-					"team": team,
-					"count": len(values),
-					"average": avg_value,
-					"median": med_value,
-					"min": min(values) if values else None,
-					"max": max(values) if values else None,
-					"metric": metric_value,
-				}
-			)
-
-		department_groups: dict[str, list[int]] = defaultdict(list)
-		for row in department_scope_rows:
-			department_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
-
-		for year, values in sorted(department_groups.items(), key=lambda item: item[0]):
-			avg_value = _safe_average(values)
-			med_value = float(median(values)) if values else None
-			metric_value = avg_value if trend_mode == "average" else med_value
-			summary_rows.append(
-				{
-					"rok": year,
-					"zespol": "Departament",
-					"year": year,
-					"team": "Departament",
-					"count": len(values),
-					"average": avg_value,
-					"median": med_value,
-					"min": min(values) if values else None,
-					"max": max(values) if values else None,
-					"metric": metric_value,
-				}
-			)
-
-		team_all_year_groups: dict[str, list[int]] = defaultdict(list)
-		for row in rows_after_year:
-			if not _is_valid_for_aggregations(row):
-				continue
-			if team_filter and str(row.get("zespol") or "") not in team_filter:
-				continue
-			team_all_year_groups[str(row["zespol"])].append(int(row["czas"]))
-
-		for team_name, values in team_all_year_groups.items():
-			all_year_metric_by_team[team_name] = _metric_from_values(values, trend_mode)
-
-		department_all_year_values = [int(row["czas"]) for row in rows_after_year if _is_valid_for_aggregations(row)]
-		if department_all_year_values:
-			all_year_metric_by_team["Departament"] = _metric_from_values(department_all_year_values, trend_mode)
-
-		# Overall rows for general summary table (all years, same dataset for count/metric).
-		for team_name, values in sorted(team_all_year_groups.items(), key=lambda item: item[0]):
-			if not values:
-				continue
-			avg_value = _safe_average(values)
-			med_value = float(median(values)) if values else None
-			overall_rows.append(
-				{
-					"zespol": team_name,
-					"count": len(values),
-					"average": avg_value,
-					"median": med_value,
-					overall_metric_key: avg_value if trend_mode == "average" else med_value,
-					"metric": avg_value if trend_mode == "average" else med_value,
-				}
-			)
-
-		if department_all_year_values:
-			dept_avg = _safe_average(department_all_year_values)
-			dept_median = float(median(department_all_year_values)) if department_all_year_values else None
-			overall_rows.append(
-				{
-					"zespol": "Departament",
-					"count": len(department_all_year_values),
-					"average": dept_avg,
-					"median": dept_median,
-					overall_metric_key: dept_avg if trend_mode == "average" else dept_median,
-					"metric": dept_avg if trend_mode == "average" else dept_median,
-				}
-			)
-
-	trend_groups: dict[str, list[int]] = defaultdict(list)
-	for row in agg_filtered_rows:
-		trend_groups[str(row["rokPoczatku"])].append(int(row["czas"]))
-
-	trend_rows: list[dict[str, Any]] = []
-	for year, values in sorted(trend_groups.items(), key=lambda item: item[0]):
-		if not str(year).isdigit():
-			continue
-		avg_value = _safe_average(values)
-		med_value = float(median(values)) if values else None
-		trend_rows.append(
-			{
-				"year": int(year),
-				"count": len(values),
-				"average": avg_value,
-				"median": med_value,
-				"min": min(values) if values else None,
-				"max": max(values) if values else None,
-				"trend": avg_value if trend_mode == "average" else med_value,
-			}
-		)
-
-	summary_pivot_years = sorted({str(row.get("rok")) for row in summary_rows if row.get("rok") not in {None, ""}})
-	pivot_team_order: list[str] = []
-	pivot_team_values: dict[str, dict[str, float]] = {}
-	for row in summary_rows:
-		team_name = str(row.get("zespol") or "").strip()
-		year_value = str(row.get("rok") or "").strip()
-		metric_value = row.get("metric")
-		if not team_name or not year_value or not isinstance(metric_value, (int, float)):
-			continue
-		if team_name not in pivot_team_values:
-			pivot_team_values[team_name] = {}
-			pivot_team_order.append(team_name)
-		pivot_team_values[team_name][year_value] = float(metric_value)
-
-	summary_pivot_rows: list[dict[str, Any]] = []
-	for team_name in all_year_metric_by_team.keys():
-		if team_name not in pivot_team_order:
-			pivot_team_order.append(team_name)
-	if "allYears" not in summary_pivot_years:
-		summary_pivot_years.append("allYears")
-	for team_name in pivot_team_order:
-		values = {year: float(pivot_team_values[team_name].get(year) or 0) for year in summary_pivot_years if year != "allYears"}
-		values["allYears"] = float(all_year_metric_by_team.get(team_name) or 0)
-		summary_pivot_rows.append(
-			{
-				"zespol": team_name,
-				"values": values,
-			}
-		)
-
-	detail_source_rows = list(agg_filtered_rows)
-	if int(operator["rola_id"]) == 1:
-		detail_source_rows = [
-			row
-			for row in detail_source_rows
-			if bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))
-		]
-
-	detail_rows = [
-		{
-			"inspectionId": row["inspectionId"],
-			"inspekcja": row["inspekcja"],
-			"kontrola": row["kodInspekcji"],
-			"kodInspekcji": row["kodInspekcji"],
-			"kod_inspekcji": row["kodInspekcji"],
-			"year": row.get("rokPoczatku") or "-",
-			"rokPoczatku": row.get("rokPoczatku") or "-",
-			"statusInspekcjiId": row.get("statusInspekcjiId"),
-			"statusInspekcji": row.get("statusInspekcji") or "-",
-			"status": row.get("statusInspekcji") or "-",
-			"stage_group_code": row.get("stageGroupCode"),
-			"stage_group_label": row.get("stageGroupLabel"),
-			"stage_group_order": row.get("stageGroupOrder"),
-			"stage_subgroup_code": row.get("stageSubgroupCode"),
-			"stage_subgroup_label": row.get("stageSubgroupLabel"),
-			"stage_subgroup_order": row.get("stageSubgroupOrder"),
-			"nazwaPodmiotu": row["nazwaPodmiotu"],
-			"poczatekInspekcji": row.get("poczatekInspekcji") or "-",
-			"koniecInspekcji": row.get("koniecInspekcji") or "-",
-			"osobaKierujaca": row.get("osobaKierujaca", "-"),
-			"isLeaderCurrentUser": bool(row.get("isLeaderCurrentUser")),
-			"isMemberCurrentUser": bool(row.get("isMemberCurrentUser")),
-			"zespol": row["zespol"],
-			"data": row.get("data") or "-",
-			"czas": int(row["czas"]),
-		}
-		for row in detail_source_rows
-	]
-
-	my_count_by_year_groups: dict[str, int] = defaultdict(int)
-	for row in rows_after_year:
-		if not (bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))):
-			continue
-		year_key = str(row.get("rokPoczatku") or "").strip()
-		if not year_key:
-			continue
-		my_count_by_year_groups[year_key] += 1
-	my_count_by_year = {
-		year: int(my_count_by_year_groups[year])
-		for year in sorted(my_count_by_year_groups.keys())
-	}
-
-	my_count_by_year_breakdown_groups: dict[str, dict[str, int]] = defaultdict(
-		lambda: {"leader": 0, "member": 0, "combined": 0}
-	)
-	for row in rows_after_year:
-		year_key = str(row.get("rokPoczatku") or "").strip()
-		if not year_key:
-			continue
-		is_leader = bool(row.get("isLeaderCurrentUser"))
-		is_member = bool(row.get("isMemberCurrentUser"))
-		if not (is_leader or is_member):
-			continue
-		if is_leader:
-			my_count_by_year_breakdown_groups[year_key]["leader"] += 1
-		if is_member:
-			my_count_by_year_breakdown_groups[year_key]["member"] += 1
-		my_count_by_year_breakdown_groups[year_key]["combined"] += 1
-
-	my_count_by_year_breakdown = {
-		year: {
-			"leader": int(values["leader"]),
-			"member": int(values["member"]),
-			"combined": int(values["combined"]),
-		}
-		for year, values in sorted(my_count_by_year_breakdown_groups.items(), key=lambda item: item[0])
-	}
-
-	my_metric_by_year_leader_groups: dict[str, list[int]] = defaultdict(list)
-	my_metric_by_year_member_groups: dict[str, list[int]] = defaultdict(list)
-	my_metric_by_year_combined_groups: dict[str, list[int]] = defaultdict(list)
-	for row in rows_after_year:
-		if not _is_valid_for_aggregations(row):
-			continue
-		year_key = str(row.get("rokPoczatku") or "").strip()
-		if not year_key:
-			continue
-		czas_value = int(row["czas"])
-		is_leader = bool(row.get("isLeaderCurrentUser"))
-		is_member = bool(row.get("isMemberCurrentUser"))
-		if not (is_leader or is_member):
-			continue
-		if is_leader:
-			my_metric_by_year_leader_groups[year_key].append(czas_value)
-		if is_member:
-			my_metric_by_year_member_groups[year_key].append(czas_value)
-		my_metric_by_year_combined_groups[year_key].append(czas_value)
-
-	all_metric_years = sorted(
-		set(my_metric_by_year_leader_groups.keys())
-		| set(my_metric_by_year_member_groups.keys())
-		| set(my_metric_by_year_combined_groups.keys())
-	)
-	my_metric_by_year_breakdown: dict[str, dict[str, float]] = {}
-	for year in all_metric_years:
-		leader_metric = _metric_from_values(my_metric_by_year_leader_groups.get(year, []), trend_mode)
-		member_metric = _metric_from_values(my_metric_by_year_member_groups.get(year, []), trend_mode)
-		combined_metric = _metric_from_values(my_metric_by_year_combined_groups.get(year, []), trend_mode)
-		my_metric_by_year_breakdown[year] = {
-			"leader": float(leader_metric or 0),
-			"member": float(member_metric or 0),
-			"combined": float(combined_metric or 0),
-		}
-
-	my_count_all_years_breakdown = {
-		"leader": int(sum(values["leader"] for values in my_count_by_year_breakdown.values())),
-		"member": int(sum(values["member"] for values in my_count_by_year_breakdown.values())),
-		"combined": int(sum(values["combined"] for values in my_count_by_year_breakdown.values())),
-	}
-
-	my_metric_all_years_breakdown = {
-		"leader": float(
-			_metric_from_values([v for values in my_metric_by_year_leader_groups.values() for v in values], trend_mode) or 0
-		),
-		"member": float(
-			_metric_from_values([v for values in my_metric_by_year_member_groups.values() for v in values], trend_mode) or 0
-		),
-		"combined": float(
-			_metric_from_values([v for values in my_metric_by_year_combined_groups.values() for v in values], trend_mode) or 0
-		),
-	}
-
-	scatter_source_rows = list(agg_filtered_rows)
-	if int(operator["rola_id"]) == 1:
-		scatter_source_rows = [
-			row
-			for row in scatter_source_rows
-			if bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))
-		]
-
-	scatter_rows = [
-		{
-			"inspectionId": row["inspectionId"],
-			"year": int(row["rokPoczatku"]),
-			"time": float(row["czas"]),
-			"nazwaPodmiotu": row["nazwaPodmiotu"],
-			"kontrola": row["kodInspekcji"],
-			"osobaKierujaca": row.get("osobaKierujaca", "-"),
-			"zespol": row["zespol"],
-		}
-		for row in scatter_source_rows
-	]
-
-	status_counter: dict[tuple[int | None, str], int] = defaultdict(int)
-	piszemy_protokol_count = 0
-	piszemy_key = "piszemy protokol"
-	for row in all_type_base_rows:
-		status_id = row.get("statusInspekcjiId")
-		status_label_raw = str(row.get("statusInspekcji") or "-").strip()
-		status_label = status_label_raw if status_label_raw else "-"
-		status_counter[(status_id if isinstance(status_id, int) else None, status_label)] += 1
-		if _normalize_text_key(status_label) == piszemy_key:
-			piszemy_protokol_count += 1
-
-	alert_status_counts = [
-		{
-			"statusInspekcjiId": status_id,
-			"statusInspekcji": status_label,
-			"count": count,
-		}
-		for (status_id, status_label), count in sorted(
-			status_counter.items(),
-			key=lambda item: (-item[1], str(item[0][1]).lower()),
-		)
-	]
-
-	return {
-		"inspectionType": inspection_type,
-		"trendMode": trend_mode,
-		"selectedMetric": trend_mode,
-		"selectedMetricLabel": metric_label,
-		"baseCount": len(base_rows),
-		"filteredCount": len(filtered_rows),
-		"departmentMinTime": department_min_time,
-		"departmentMaxTime": department_max_time,
-		"departmentMinTimeByYear": department_min_time_by_year,
-		"departmentMaxTimeByYear": department_max_time_by_year,
-		"myCountByYear": my_count_by_year,
-		"myCountByYearBreakdown": my_count_by_year_breakdown,
-		"myMetricByYearBreakdown": my_metric_by_year_breakdown,
-		"myCountAllYearsBreakdown": my_count_all_years_breakdown,
-		"myMetricAllYearsBreakdown": my_metric_all_years_breakdown,
-		"teamOptions": team_options,
-		"yearOptions": year_options,
-		"detailRows": detail_rows,
-		"summaryColumns": [
-			{"key": "zespol", "label": "Zespol"},
-			{"key": "rok", "label": "Rok"},
-			{"key": "metric", "label": f"{metric_label} czasu"},
-			{"key": "average", "label": "Srednia"},
-			{"key": "median", "label": "Mediana"},
-			{"key": "count", "label": "Liczba"},
-		],
-		"summaryRows": summary_rows,
-		"summaryPivotYears": summary_pivot_years,
-		"summaryPivotRows": summary_pivot_rows,
-		"trendRows": trend_rows,
-		"scatterRows": scatter_rows,
-		"overallColumns": [
-			{"key": "zespol", "label": "Zespol"},
-			{"key": overall_metric_key, "label": f"{overall_metric_label}"},
-			{"key": "count", "label": "Liczba"},
-		],
-		"overallRows": overall_rows,
-		"yearCountColumns": year_count_columns,
-		"yearCountRows": year_count_rows,
-		"yearCountByTeamColumns": year_count_by_team_columns,
-		"yearCountByTeamRows": year_count_by_team_rows,
-		"alertStatusCounts": alert_status_counts,
-		"alertPiszemyProtokolCount": piszemy_protokol_count,
-	}
-
-
-@router.get("/api/reports/inspections-matrix", response_model=InspectionsMatrixResponse)
-def get_inspections_matrix(
-	x_operator_login: str = Header(..., alias="X-Operator-Login"),
-	rodzaj_podmiotu: str | list[str] | None = Query(default=None, alias="rodzaj_podmiotu"),
-	rodzajPodmiotu: str | list[str] | None = Query(default=None),
+    allowed_sort_columns = {
+        "id": "r.id",
+        "pozycja": "r.pozycja",
+        "dataZalecen": "r.data_zalecen",
+        "terminWykonaniaZalecen": "(SELECT MIN(rmd.date_value) FROM recommendation_multi_dates rmd WHERE rmd.recommendation_id = r.id AND rmd.date_type = 'TERMIN_WYKONANIA_ZALECEN')",
+        "utworzonoO": "r.utworzono_o",
+        "zaktualizowanoO": "r.zaktualizowano_o",
+    }
+    if sortBy not in allowed_sort_columns:
+        raise HTTPException(status_code=400, detail="Niepoprawny sortBy")
+
+    direction = sortOrder.lower()
+    if direction not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="Niepoprawny sortOrder")
+
+    where_parts: list[str] = []
+    params: list[Any] = []
+
+    if inspectionId is not None:
+        where_parts.append("r.inspection_id = ?")
+        params.append(int(inspectionId))
+
+    status_norm = _norm(status)
+    if status_norm is not None:
+        where_parts.append("lower(st.nazwa_pozycji) LIKE lower(?)")
+        params.append(f"%{status_norm}%")
+
+    podmiot_norm = _norm(nazwaPodmiotu)
+    if podmiot_norm is not None:
+        where_parts.append("lower(np.nazwa_pozycji) LIKE lower(?)")
+        params.append(f"%{podmiot_norm}%")
+
+    where_sql = ""
+    if where_parts:
+        where_sql = " WHERE " + " AND ".join(where_parts)
+
+    order_sql = f" ORDER BY {allowed_sort_columns[sortBy]} {direction.upper()}, r.id DESC"
+
+    with get_connection() as conn:
+        operator = _resolve_operator(conn, x_operator_login)
+        require_permission(conn, operator, PERMISSION_RECOMMENDATIONS_READ)
+        rows = conn.execute(_base_select_sql() + where_sql + order_sql, tuple(params)).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for index, row in enumerate(rows, start=1):
+            row_dict = dict(row)
+            inspection_id = int(row_dict["inspection_id"]) if row_dict.get("inspection_id") is not None else None
+            created_by = int(row_dict["created_by_user_id"]) if row_dict.get("created_by_user_id") is not None else None
+            can_edit = _can_edit_recommendation(conn, inspection_id, operator, created_by)
+            items.append(_row_to_payload(row_dict, lp=index, can_edit=can_edit))
+
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/api/recommendations/{recommendation_id}", response_model=RecommendationRead)
+def get_recommendation(
+    recommendation_id: int,
+    x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
-	raw_entity_type_filters = _parse_csv_values(rodzaj_podmiotu) + _parse_csv_values(rodzajPodmiotu)
-	entity_type_filter_keys = {_normalize_text_key(item) for item in raw_entity_type_filters if _normalize_text_key(item)}
+    with get_connection() as conn:
+        operator = _resolve_operator(conn, x_operator_login)
+        require_permission(conn, operator, PERMISSION_RECOMMENDATIONS_READ)
+        row = conn.execute(
+            _base_select_sql() + " WHERE r.id = ? LIMIT 1",
+            (recommendation_id,),
+        ).fetchone()
 
-	with get_connection() as conn:
-		operator = _resolve_operator(conn, x_operator_login)
-		require_permission(conn, operator, PERMISSION_REPORTS_EXECUTED_INSPECTIONS_READ)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Recommendation not found")
 
-		rows = conn.execute(
-			"""
-			SELECT
-				i.id,
-				i.kod_inspekcji,
-				i.created_by_user_id,
-				COALESCE(ss.kod_pozycji, '') AS status_inspekcji_kod,
-				COALESCE(ss.nazwa_pozycji, '-') AS status_inspekcji,
-				COALESCE(NULLIF(trim(np.skrot_pozycji), ''), np.nazwa_pozycji, '-') AS nazwa_podmiotu,
-				COALESCE(NULLIF(trim(rp.nazwa_pozycji), ''), '-') AS rodzaj_podmiotu,
-				ti.nazwa_pozycji AS typ_inspekcji,
-				(
-					SELECT group_concat(x.scope_name, '; ')
-					FROM (
-						SELECT COALESCE(NULLIF(trim(sp.skrot_pozycji), ''), sp.nazwa_pozycji, '-') AS scope_name
-						FROM inspection_scopes isc
-						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
-						WHERE isc.inspection_id = i.id
-						ORDER BY lower(COALESCE(NULLIF(trim(sp.skrot_pozycji), ''), sp.nazwa_pozycji, '-')), sp.id
-					) x
-				) AS zakres_inspekcji,
-				i.poczatek_inspekcji AS poczatek_inspekcji,
-				u.zespol_id AS lead_team_id
-			FROM inspections i
-			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
-			LEFT JOIN slownik_pozycje rp ON rp.id = i.rodzaj_podmiotu_id
-			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
-			LEFT JOIN slownik_pozycje ss ON ss.id = i.status_inspekcji_id
-			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
-			ORDER BY lower(np.nazwa_pozycji) ASC, i.poczatek_inspekcji ASC, i.id ASC
-			"""
-		).fetchall()
+        row_dict = dict(row)
+        inspection_id = int(row_dict["inspection_id"]) if row_dict.get("inspection_id") is not None else None
+        created_by = int(row_dict["created_by_user_id"]) if row_dict.get("created_by_user_id") is not None else None
+        can_edit = _can_edit_recommendation(conn, inspection_id, operator, created_by)
 
-	values_map: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
-	entries_map: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
-	entity_type_map: dict[str, list[str]] = defaultdict(list)
-	years_set: set[str] = set()
-
-	for row in rows:
-		row_data = dict(row)
-		nazwa_podmiotu = str(row["nazwa_podmiotu"] or "-").strip() or "-"
-		resolved_entity_type = str(row["rodzaj_podmiotu"] or "-").strip() or "-"
-		if entity_type_filter_keys and _normalize_text_key(resolved_entity_type) not in entity_type_filter_keys:
-			continue
-		year = _year_from_date(row["poczatek_inspekcji"])
-		if year is None:
-			continue
-
-		years_set.add(year)
-		cell_value = _matrix_cell_value(row["typ_inspekcji"], row["zakres_inspekcji"])
-		values_map[nazwa_podmiotu][year].append(cell_value)
-		entries_map[nazwa_podmiotu][year].append(
-			{
-				"type": _matrix_type_code(row["typ_inspekcji"]),
-				"scopes": _normalize_matrix_scopes(row["zakres_inspekcji"]),
-				"inspectionId": int(row["id"]),
-				"kodInspekcji": str(row_data.get("kod_inspekcji") or "-").strip() or "-",
-				"date": str(row_data.get("poczatek_inspekcji") or "-").strip() or "-",
-			}
-		)
-		entity_type_map[nazwa_podmiotu].append(resolved_entity_type)
-
-	lata = sorted(years_set)
-	result_rows: list[dict[str, Any]] = []
-
-	for nazwa_podmiotu in sorted(values_map.keys(), key=lambda value: value.lower()):
-		wartosci: dict[str, str] = {}
-		cells: dict[str, list[dict[str, Any]]] = {}
-		for year in lata:
-			cell_values = values_map[nazwa_podmiotu].get(year, [])
-			entries = entries_map[nazwa_podmiotu].get(year, [])
-			cells[year] = sorted(
-				entries,
-				key=lambda item: (
-					str(item.get("date") or "9999-99-99"),
-					0 if str(item.get("type") or "") == "K" else 1,
-					int(item.get("inspectionId") or 0),
-				),
-			)
-			if not cell_values:
-				wartosci[year] = "-"
-				continue
-
-			# Keep insertion order while removing duplicates.
-			deduplicated = list(dict.fromkeys(cell_values))
-			if len(deduplicated) > 1:
-				deduplicated = [value for value in deduplicated if value != "-"]
-			wartosci[year] = ", ".join(deduplicated)
-
-		entity_types = list(dict.fromkeys(entity_type_map.get(nazwa_podmiotu, ["-"])))
-		if len(entity_types) > 1:
-			entity_types = [value for value in entity_types if value != "-"]
-		resolved_entity_types = ", ".join(entity_types) if entity_types else "-"
-
-		result_rows.append(
-			{
-				"nazwa_podmiotu": nazwa_podmiotu,
-				"rodzaj_podmiotu": resolved_entity_types,
-				"wartosci": wartosci,
-				"cells": cells,
-			}
-		)
-
-	return {
-		"formatVersion": "2.0",
-		"lata": lata,
-		"rows": result_rows,
-	}
+    return _row_to_payload(row_dict, lp=1, can_edit=can_edit)
 
 
-@router.get("/api/reports/inspections-detailed", response_model=InspectionsDetailedResponse)
-def get_inspections_detailed(
-	manager_user_id: int | None = Query(default=None, alias="managerUserId"),
-	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+@router.post(
+    "/api/recommendations",
+    response_model=RecommendationRead,
+    status_code=201,
+    responses={
+        400: {"content": {"application/json": {"example": {"detail": "Bledne dane"}}}},
+        401: {"content": {"application/json": {"example": {"detail": "Operator nie istnieje"}}}},
+        403: {"content": {"application/json": {"example": {"detail": "Brak uprawnien"}}}},
+        404: {"content": {"application/json": {"example": {"detail": "Inspection not found"}}}},
+    },
+)
+def create_recommendation(
+    payload: RecommendationCreate,
+    x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
-	with get_connection() as conn:
-		operator = _resolve_operator(conn, x_operator_login)
-		require_permission(conn, operator, PERMISSION_REPORTS_EXECUTED_INSPECTIONS_READ)
-		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
-			raise HTTPException(status_code=403, detail="Brak uprawnien")
+    if payload.pozycja < 1:
+        raise HTTPException(status_code=400, detail="pozycja musi byc >= 1")
 
-		manager_context: dict[str, Any] | None = None
-		if int(operator["rola_id"]) == 2:
-			manager_context = operator
-		elif int(operator["rola_id"]) == 3 and manager_user_id is not None:
-			manager_row = conn.execute(
-				"""
-				SELECT id, login, rola_id, zespol_id, aktywny
-				FROM users
-				WHERE id = ?
-				LIMIT 1
-				""",
-				(int(manager_user_id),),
-			).fetchone()
-			if manager_row is None:
-				raise HTTPException(status_code=404, detail="Kierownik nie istnieje")
-			manager_data = dict(manager_row)
-			if int(manager_data.get("aktywny") or 0) != 1:
-				raise HTTPException(status_code=400, detail="Kierownik jest nieaktywny")
-			if int(manager_data.get("rola_id") or 0) != 2:
-				raise HTTPException(status_code=400, detail="managerUserId musi wskazywac kierownika")
-			manager_context = {
-				"id": int(manager_data["id"]),
-				"login": manager_data["login"],
-				"rola_id": int(manager_data["rola_id"]),
-				"zespol_id": manager_data["zespol_id"],
-			}
-		elif manager_user_id is not None:
-			raise HTTPException(status_code=400, detail="managerUserId jest dozwolone tylko dla dyrektora")
+    terminy_wykonania_list = _resolve_terminy_wykonania_list(
+        terminy_wykonania_list=payload.terminyWykonaniaZalecenList,
+        legacy_data_zalecen_list=payload.dataZalecenList,
+    )
+    data_akceptacji_list = _normalize_date_list(
+        payload.dataAkceptacjiNotyWeryfikacjiList,
+        "dataAkceptacjiNotyWeryfikacjiList",
+    )
+    data_zalecen_single = _resolve_single_data_zalecen(
+        data_zalecen=payload.dataZalecen,
+        legacy_termin_wykonania=payload.terminWykonaniaZalecen,
+    )
+    terminy_wykonania_list, brak_terminow = _normalize_date_absence_state(
+        dates=terminy_wykonania_list,
+        brak=bool(payload.brakTerminowWykonaniaZalecen),
+        list_field_name="terminyWykonaniaZalecenList",
+        bool_field_name="brakTerminowWykonaniaZalecen",
+    )
+    data_akceptacji_list, brak_akceptacji = _normalize_date_absence_state(
+        dates=data_akceptacji_list,
+        brak=bool(payload.brakDatAkceptacjiNotyWeryfikacji),
+        list_field_name="dataAkceptacjiNotyWeryfikacjiList",
+        bool_field_name="brakDatAkceptacjiNotyWeryfikacji",
+    )
+    with get_connection() as conn:
+        operator = _resolve_operator(conn, x_operator_login)
+        require_write_access(conn, operator)
 
-		rows = conn.execute(
-			"""
-			SELECT
-				i.id AS id,
-				i.created_by_user_id AS created_by_user_id,
-				i.osoba_kierujaca_user_id AS osoba_kierujaca_user_id,
-				i.kod_inspekcji AS kod_inspekcji,
-				i.status_inspekcji_id AS status_inspekcji_id,
-				COALESCE(si.kod_pozycji, '') AS status_inspekcji_kod,
-				COALESCE(si.nazwa_pozycji, '-') AS status_inspekcji,
-				COALESCE(NULLIF(trim(si.skrot_pozycji), ''), si.nazwa_pozycji, '-') AS status_inspekcji_skrot,
-				COALESCE(NULLIF(trim(np.skrot_pozycji), ''), np.nazwa_pozycji, '-') AS nazwa_podmiotu,
-				COALESCE(rp.nazwa_pozycji, '-') AS rodzaj_podmiotu,
-				ti.nazwa_pozycji AS typ_inspekcji,
-				(
-					SELECT group_concat(x.scope_name, '; ')
-					FROM (
-						SELECT COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-') AS scope_name
-						FROM inspection_scopes isc
-						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
-						WHERE isc.inspection_id = i.id
-						ORDER BY lower(COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-')), sp.id
-					) x
-				) AS zakres_inspekcji,
-				i.poczatek_inspekcji AS poczatek_inspekcji,
-				i.koniec_inspekcji AS koniec_inspekcji,
-				i.data_protokolu_sprawozdania AS data_protokolu_sprawozdania,
-				COALESCE(
-					nullif(trim(u.imie || ' ' || u.nazwisko), ''),
-					'-'
-				) AS osoba_kierujaca,
-				COALESCE(t.kod, '-') AS zespol_osoby_kierujacej_kod,
-				u.zespol_id AS lead_team_id
-			FROM inspections i
-			LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
-			LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
-			LEFT JOIN slownik_pozycje rp ON rp.id = i.rodzaj_podmiotu_id
-			LEFT JOIN slownik_pozycje si ON si.id = i.status_inspekcji_id
-			LEFT JOIN users u ON u.id = i.osoba_kierujaca_user_id
-			LEFT JOIN teams t ON t.id = u.zespol_id
-			ORDER BY lower(np.nazwa_pozycji) ASC, i.poczatek_inspekcji ASC, i.id ASC
-			"""
-		).fetchall()
+        resolved_inspection_id: int | None = None
+        resolved_nazwa_podmiotu_id: int | None = None
 
-	result_rows: list[dict[str, Any]] = []
-	for row in rows:
-		if _is_dashboard_hidden_status_code(row["status_inspekcji_kod"]):
-			continue
-		if manager_context is not None:
-			in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, int(row["id"]), manager_context)
-			if not (in_team_scope or in_added_scope):
-				continue
-		else:
-			if int(operator["rola_id"]) != 3 and not _can_access_inspection_for_reports(conn, dict(row), operator):
-				continue
-		poczatek_inspekcji = str(row["poczatek_inspekcji"] or "-")
-		koniec_inspekcji = str(row["koniec_inspekcji"] or "-")
-		data_protokolu = row["data_protokolu_sprawozdania"]
-		end_to_today_days = _days_from_end_to_today(row["koniec_inspekcji"])
-		status_label = _public_status_label(row["status_inspekcji"])
-		bucket_value = _end_to_today_bucket(end_to_today_days) if _should_compute_bucket_code(row["status_inspekcji_kod"]) else None
-		bucket_value_alt = _end_to_today_bucket_alt(end_to_today_days) if _should_compute_bucket_code(row["status_inspekcji_kod"]) else None
-		inspection_id = int(row["id"])
-		leader_user_id = int(row["osoba_kierujaca_user_id"]) if row["osoba_kierujaca_user_id"] is not None else None
-		is_leader_current_user = leader_user_id is not None and int(operator["id"]) == leader_user_id
-		is_member_current_user = _is_member_current_user(conn, inspection_id, int(operator["id"]))
-		scope_operator = manager_context if manager_context is not None else operator
-		is_leader_in_manager_team = _is_leader_in_manager_scope(conn, leader_user_id, scope_operator)
-		is_member_in_manager_team = _is_member_in_manager_scope(conn, inspection_id, scope_operator)
+        if payload.inspectionId is not None:
+            inspection_row = conn.execute(
+                "SELECT id, nazwa_podmiotu_id, created_by_user_id, poczatek_inspekcji FROM inspections WHERE id = ? LIMIT 1",
+                (payload.inspectionId,),
+            ).fetchone()
+            if inspection_row is None:
+                raise HTTPException(status_code=404, detail="Inspection not found")
 
-		result_rows.append(
-			{
-				"kod_inspekcji": str(row["kod_inspekcji"] or "-").strip() or "-",
-				"nazwa_podmiotu": str(row["nazwa_podmiotu"] or "-").strip() or "-",
-				"nazwa_podmiotu_skrocona": str(row["nazwa_podmiotu"] or "-").strip() or "-",
-				"nazwa_podmiotu_skrot": str(row["nazwa_podmiotu"] or "-").strip() or "-",
-				"nazwaPodmiotuSkrocona": str(row["nazwa_podmiotu"] or "-").strip() or "-",
-				"nazwaPodmiotuSkrot": str(row["nazwa_podmiotu"] or "-").strip() or "-",
-				"rodzaj_podmiotu": str(row["rodzaj_podmiotu"] or "-").strip() or "-",
-				"inspekcja": _inspekcja_code(row["typ_inspekcji"]),
-				"typ_inspekcji": str(row["typ_inspekcji"] or "-").strip() or "-",
-				"status": status_label,
-				"status_inspekcji_skrot": str(row["status_inspekcji_skrot"] or status_label or "-").strip() or "-",
-				"status_inspekcji_id": int(row["status_inspekcji_id"]) if row["status_inspekcji_id"] is not None else None,
-				"status_inspekcji": status_label,
-				"zakres_inspekcji": str(row["zakres_inspekcji"] or "-").strip() or "-",
-				"typ_zakres_inspekcji": _matrix_cell_value(row["typ_inspekcji"], row["zakres_inspekcji"]),
-				"rok_poczatku": _year_from_date(row["poczatek_inspekcji"]) or "-",
-				"poczatek_inspekcji": poczatek_inspekcji,
-				"koniec_inspekcji": koniec_inspekcji,
-				"inspektor_kierujacy": str(row["osoba_kierujaca"] or "-").strip() or "-",
-				"is_leader_current_user": bool(is_leader_current_user),
-				"is_leader_in_manager_team": bool(is_leader_in_manager_team),
-				"is_member_current_user": bool(is_member_current_user),
-				"is_member_in_manager_team": bool(is_member_in_manager_team),
-				"liczba_dni_od_konca_inspekcji_do_dzis": end_to_today_days,
-				"wartosc_liczbowa_przedzialu": bucket_value,
-				"wartosc_liczbowa_przedzialu_alt": bucket_value_alt,
-				"osoba_kierujaca": str(row["osoba_kierujaca"] or "-").strip() or "-",
-				"zespol_osoby_kierujacej_kod": str(row["zespol_osoby_kierujacej_kod"] or "-").strip() or "-",
-				"data_protokolu_sprawozdania": data_protokolu,
-				"roznica_dni_miedzy_data_protokolu_a_koncem": _days_difference(data_protokolu, row["koniec_inspekcji"]),
-			}
-		)
+            resolved_inspection_id = int(inspection_row["id"])
+            if not _can_edit_recommendation(
+                conn,
+                resolved_inspection_id,
+                operator,
+                int(inspection_row["created_by_user_id"]) if inspection_row["created_by_user_id"] is not None else None,
+            ):
+                raise HTTPException(status_code=403, detail="Brak uprawnien do tej inspekcji")
 
-	return {
-		"rows": result_rows,
-	}
+            blocked, status_code, status_label = _inspection_status_is_forbidden(conn, resolved_inspection_id, operator)
+            if blocked:
+                _raise_inspection_status_block(resolved_inspection_id, status_code, status_label)
+
+            if inspection_row["nazwa_podmiotu_id"] is not None:
+                resolved_nazwa_podmiotu_id = int(inspection_row["nazwa_podmiotu_id"])
+            else:
+                resolved_nazwa_podmiotu_id = _resolve_slownik_item_id(conn, "nazwy_podmiotow", payload.nazwaPodmiotu)
+        else:
+            if _norm(payload.nazwaPodmiotu) is None:
+                raise HTTPException(status_code=400, detail="nazwaPodmiotu jest wymagane gdy inspectionId jest null")
+            resolved_nazwa_podmiotu_id = _resolve_slownik_item_id(conn, "nazwy_podmiotow", payload.nazwaPodmiotu)
+
+        status_id = _resolve_slownik_item_id(conn, "statusy_zalecen", payload.status)
+        inspection_start = str(inspection_row["poczatek_inspekcji"]) if payload.inspectionId is not None and inspection_row is not None else None
+        recommendation_year = _recommendation_code_year(data_zalecen_single, inspection_start, terminy_wykonania_list)
+
+        cursor = conn.execute(
+            """
+            INSERT INTO recommendations (
+                inspection_id,
+                pozycja,
+                kod_zalecenia,
+                nazwa_podmiotu_id,
+                data_zalecen,
+                brak_terminow_wykonania_zalecen,
+                brak_dat_akceptacji_noty_weryfikacji,
+                status_zalecenia_id,
+                komentarz,
+                created_by_user_id,
+                updated_by_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_inspection_id,
+                payload.pozycja,
+                _next_recommendation_code(conn, recommendation_year),
+                resolved_nazwa_podmiotu_id,
+                data_zalecen_single,
+                1 if brak_terminow else 0,
+                1 if brak_akceptacji else 0,
+                status_id,
+                payload.komentarz,
+                operator["id"],
+                operator["id"],
+            ),
+        )
+        recommendation_id = int(cursor.lastrowid)
+
+        _sync_multi_dates(conn, recommendation_id, "TERMIN_WYKONANIA_ZALECEN", terminy_wykonania_list, operator["id"])
+        _sync_multi_dates(
+            conn,
+            recommendation_id,
+            "AKCEPTACJA_NOTY_WERYFIKACJI",
+            data_akceptacji_list,
+            operator["id"],
+        )
+        _sync_inspection_recommendation_dates(conn, resolved_inspection_id, operator["id"])
+        kod_row = conn.execute(
+            "SELECT kod_zalecenia FROM recommendations WHERE id = ? LIMIT 1",
+            (recommendation_id,),
+        ).fetchone()
+        rekord_kod_cr = str(kod_row["kod_zalecenia"]) if kod_row and kod_row["kod_zalecenia"] else str(recommendation_id)
+        row = conn.execute(
+            _base_select_sql() + " WHERE r.id = ? LIMIT 1",
+            (recommendation_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=500, detail="Failed to fetch created recommendation")
+
+        created_payload = _row_to_payload(dict(row), lp=1, can_edit=True)
+        changes = build_create_changes(
+            [
+                ("Kod zalecenia", created_payload.get("kodZalecenia")),
+                ("Kod inspekcji", created_payload.get("inspectionKod")),
+                ("Pozycja", created_payload.get("pozycja")),
+                ("Nazwa podmiotu", created_payload.get("nazwaPodmiotu")),
+                ("Data zaleceń", created_payload.get("dataZalecen")),
+                ("Terminy wykonania zaleceń", created_payload.get("terminyWykonaniaZalecenList")),
+                ("Daty akceptacji noty weryfikacji", created_payload.get("dataAkceptacjiNotyWeryfikacjiList")),
+                ("Status", created_payload.get("status")),
+                ("Komentarz", created_payload.get("komentarz")),
+            ]
+        )
+
+        write_audit_log(conn, new_session_id(), operator["login"], AKCJA_CREATE,
+                        REJESTR_ZALECENIA, rekord_kod_cr, changes)
+        conn.commit()
+
+    if row is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch created recommendation")
+
+    return _row_to_payload(dict(row), lp=1, can_edit=True)
 
 
-@router.get("/api/reports/inspections-stage-summary", response_model=InspectionsStageSummaryResponse)
-def get_inspections_stage_summary(
-	manager_user_id: int | None = Query(default=None, alias="managerUserId"),
-	x_operator_login: str = Header(..., alias="X-Operator-Login"),
+@router.put("/api/recommendations/{recommendation_id}", response_model=RecommendationRead)
+def update_recommendation(
+    recommendation_id: int,
+    payload: RecommendationUpdate,
+    x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
-	with get_connection() as conn:
-		operator = _resolve_operator(conn, x_operator_login)
-		require_permission(conn, operator, PERMISSION_REPORTS_EXECUTED_INSPECTIONS_READ)
-		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
-			raise HTTPException(status_code=403, detail="Brak uprawnien")
+    fields = payload.model_dump(exclude_unset=True)
+    lock_token = str(fields.pop("lockToken", "") or "")
+    expected_updated_at = fields.pop("expectedUpdatedAt", None)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
 
-		manager_context: dict[str, Any] | None = None
-		if int(operator["rola_id"]) == 2:
-			manager_context = operator
-		elif int(operator["rola_id"]) == 3 and manager_user_id is not None:
-			manager_row = conn.execute(
-				"""
-				SELECT id, login, rola_id, zespol_id, aktywny
-				FROM users
-				WHERE id = ?
-				LIMIT 1
-				""",
-				(int(manager_user_id),),
-			).fetchone()
-			if manager_row is None:
-				raise HTTPException(status_code=404, detail="Kierownik nie istnieje")
-			manager_data = dict(manager_row)
-			if int(manager_data.get("aktywny") or 0) != 1:
-				raise HTTPException(status_code=400, detail="Kierownik jest nieaktywny")
-			if int(manager_data.get("rola_id") or 0) != 2:
-				raise HTTPException(status_code=400, detail="managerUserId musi wskazywac kierownika")
-			manager_context = {
-				"id": int(manager_data["id"]),
-				"login": manager_data["login"],
-				"rola_id": int(manager_data["rola_id"]),
-				"zespol_id": manager_data["zespol_id"],
-			}
-		elif manager_user_id is not None:
-			raise HTTPException(status_code=400, detail="managerUserId jest dozwolone tylko dla dyrektora")
+    with get_connection() as conn:
+        operator = _resolve_operator(conn, x_operator_login)
+        require_write_access(conn, operator)
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT id, inspection_id, created_by_user_id, nazwa_podmiotu_id, status_zalecenia_id, data_zalecen, pozycja, komentarz, kod_zalecenia, brak_terminow_wykonania_zalecen, brak_dat_akceptacji_noty_weryfikacji, zaktualizowano_o FROM recommendations WHERE id = ? LIMIT 1",
+            (recommendation_id,),
+        ).fetchone()
+        if current is None:
+            raise HTTPException(status_code=404, detail="Recommendation not found")
 
-		status_rows = conn.execute(
-			"""
-			SELECT
-				id,
-				COALESCE(nazwa_pozycji, 'brak') AS nazwa_pozycji,
-				COALESCE(kolejnosc, 999999) AS kolejnosc
-			FROM slownik_pozycje
-			WHERE lower(kod_typu) = 'statusy_inspekcji'
-			ORDER BY COALESCE(kolejnosc, 999999) ASC, id ASC
-			"""
-		).fetchall()
+        current_dict = dict(current)
+        inspection_id = int(current_dict["inspection_id"]) if current_dict.get("inspection_id") is not None else None
+        created_by = int(current_dict["created_by_user_id"]) if current_dict.get("created_by_user_id") is not None else None
+        if not _can_edit_recommendation(conn, inspection_id, operator, created_by):
+            raise HTTPException(status_code=403, detail="Brak uprawnien do tej inspekcji")
 
-		status_stats: dict[str, dict[str, Any]] = {}
-		status_id_index: dict[int, str] = {}
-		for status_row in status_rows:
-			status_id = int(status_row["id"])
-			status_name = str(status_row["nazwa_pozycji"] or "").strip() or f"status_{status_id}"
-			status_code = _normalize_code_key(status_name) or f"status_{status_id}"
-			status_stats[status_code] = {
-				"statusId": status_id,
-				"stageGroupCode": status_code,
-				"stageGroupLabel": status_name,
-				"stageGroupShortLabel": status_name,
-				"stageGroupOrder": int(status_row["kolejnosc"]),
-				"count": 0,
-				"countTeam": 0,
-				"countManagerAdded": 0,
-				"countTeamAndManagerAdded": 0,
-			}
-			status_id_index[status_id] = status_code
+        assert_lock_for_save(conn, "recommendations", recommendation_id, operator, lock_token)
+        assert_expected_updated_at(expected_updated_at, str(current_dict.get("zaktualizowano_o") or ""))
 
-		unknown_code = "unknown_unmapped"
-		if unknown_code not in status_stats:
-			status_stats[unknown_code] = {
-				"statusId": None,
-				"stageGroupCode": unknown_code,
-				"stageGroupLabel": "Nieprzypisany status",
-				"stageGroupShortLabel": "Nieprzypisany status",
-				"stageGroupOrder": 999999,
-				"count": 0,
-				"countTeam": 0,
-				"countManagerAdded": 0,
-				"countTeamAndManagerAdded": 0,
-			}
+        # Pobierz daty przed zmianą (dla audit log)
+        _dz_before = conn.execute(
+            "SELECT date_value FROM recommendation_multi_dates WHERE recommendation_id=? AND date_type='TERMIN_WYKONANIA_ZALECEN' ORDER BY date_value",
+            (recommendation_id,),
+        ).fetchall()
+        _da_before = conn.execute(
+            "SELECT date_value FROM recommendation_multi_dates WHERE recommendation_id=? AND date_type='AKCEPTACJA_NOTY_WERYFIKACJI' ORDER BY date_value",
+            (recommendation_id,),
+        ).fetchall()
+        dates_z_before = ", ".join(r["date_value"] for r in _dz_before) or None
+        dates_a_before = ", ".join(r["date_value"] for r in _da_before) or None
 
-		rows = conn.execute(
-			"""
-			SELECT
-				i.id,
-				i.created_by_user_id,
-				i.status_inspekcji_id,
-				COALESCE(si.kod_pozycji, '') AS status_inspekcji_kod
-			FROM inspections i
-			LEFT JOIN slownik_pozycje si ON si.id = i.status_inspekcji_id
-			ORDER BY i.id ASC
-			"""
-		).fetchall()
+        previous_inspection_id = inspection_id
+        next_inspection_id = inspection_id
+        next_nazwa_podmiotu_id = current_dict.get("nazwa_podmiotu_id")
+        inspection_id_changed = False
 
-		total_inspections = 0
-		quality_error_count = 0
+        set_parts: list[str] = []
+        values: list[Any] = []
+        row_touched = False
 
-		for row in rows:
-			row_dict = dict(row)
-			inspection_id = int(row_dict["id"])
-			in_team_scope = False
-			in_added_scope = False
+        if "inspectionId" in fields:
+            if fields["inspectionId"] is None:
+                next_inspection_id = None
+            else:
+                target_inspection = conn.execute(
+                    "SELECT id, nazwa_podmiotu_id, created_by_user_id FROM inspections WHERE id = ? LIMIT 1",
+                    (int(fields["inspectionId"]),),
+                ).fetchone()
+                if target_inspection is None:
+                    raise HTTPException(status_code=404, detail="Inspection not found")
+                target_inspection_id = int(target_inspection["id"])
+                target_created_by = (
+                    int(target_inspection["created_by_user_id"])
+                    if target_inspection["created_by_user_id"] is not None
+                    else None
+                )
+                if not _can_edit_recommendation(conn, target_inspection_id, operator, target_created_by):
+                    raise HTTPException(status_code=403, detail="Brak uprawnien do tej inspekcji")
 
-			if _is_dashboard_hidden_status_code(row_dict.get("status_inspekcji_kod")):
-				continue
+                next_inspection_id = target_inspection_id
+                if target_inspection["nazwa_podmiotu_id"] is not None:
+                    next_nazwa_podmiotu_id = int(target_inspection["nazwa_podmiotu_id"])
 
-			if manager_context is not None:
-				in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, inspection_id, manager_context)
-				if not (in_team_scope or in_added_scope):
-					continue
-			else:
-				if int(operator["rola_id"]) != 3 and not _can_access_inspection_for_reports(conn, row_dict, operator):
-					continue
+            set_parts.append("inspection_id = ?")
+            values.append(next_inspection_id)
+            inspection_id_changed = next_inspection_id != previous_inspection_id
 
-			status_id = row_dict.get("status_inspekcji_id")
-			group_code = unknown_code
-			if status_id is not None:
-				group_code = status_id_index.get(int(status_id), unknown_code)
+        # Closed-inspection guard applies only when switching target inspection.
+        if inspection_id_changed and next_inspection_id is not None:
+            blocked, status_code, status_label = _inspection_status_is_forbidden(conn, next_inspection_id, operator)
+            if blocked:
+                _raise_inspection_status_block(next_inspection_id, status_code, status_label)
 
-			if group_code == unknown_code:
-				quality_error_count += 1
+        if "pozycja" in fields:
+            if fields["pozycja"] is None or int(fields["pozycja"]) < 1:
+                raise HTTPException(status_code=400, detail="pozycja musi byc >= 1")
+            set_parts.append("pozycja = ?")
+            values.append(int(fields["pozycja"]))
 
-			total_inspections += 1
-			group_item = status_stats[group_code]
+        if "nazwaPodmiotu" in fields:
+            nazwa_id = _resolve_slownik_item_id(conn, "nazwy_podmiotow", fields["nazwaPodmiotu"])
+            next_nazwa_podmiotu_id = nazwa_id
+            set_parts.append("nazwa_podmiotu_id = ?")
+            values.append(nazwa_id)
 
-			group_item["count"] += 1
+        if next_inspection_id is None and next_nazwa_podmiotu_id is None:
+            raise HTTPException(status_code=400, detail="nazwaPodmiotu jest wymagane gdy inspectionId jest null")
 
-			if manager_context is not None:
-				if in_team_scope:
-					group_item["countTeam"] += 1
-				if in_added_scope:
-					group_item["countManagerAdded"] += 1
-				if in_team_scope and in_added_scope:
-					group_item["countTeamAndManagerAdded"] += 1
+        single_date_payload_present = "dataZalecen" in fields or "terminWykonaniaZalecen" in fields
+        if single_date_payload_present:
+            resolved_data_zalecen = _resolve_single_data_zalecen(
+                data_zalecen=fields.get("dataZalecen"),
+                legacy_termin_wykonania=fields.get("terminWykonaniaZalecen"),
+            )
+            set_parts.append("data_zalecen = ?")
+            values.append(resolved_data_zalecen)
 
-		statuses_payload = [
-			{
-				"stageGroupCode": item["stageGroupCode"],
-				"stageGroupLabel": item["stageGroupLabel"],
-				"stageGroupShortLabel": item.get("stageGroupShortLabel"),
-				"stageGroupOrder": item["stageGroupOrder"],
-				"count": item["count"],
-				"countTeam": item["countTeam"],
-				"countManagerAdded": item["countManagerAdded"],
-				"countTeamAndManagerAdded": item["countTeamAndManagerAdded"],
-			}
-			for item in sorted(status_stats.values(), key=lambda x: (int(x["stageGroupOrder"]), str(x["stageGroupLabel"]).lower()))
-		]
+        if "status" in fields:
+            incoming_status_norm = _norm(fields.get("status"))
+            current_status_id = (
+                int(current_dict["status_zalecenia_id"])
+                if current_dict.get("status_zalecenia_id") is not None
+                else None
+            )
 
-	return {
-		"generatedAt": datetime.now().isoformat(timespec="seconds"),
-		"stageDictionaryVersion": "2.0.0",
-		"totalInspections": int(total_inspections),
-		"qualityErrorCount": int(quality_error_count),
-		"statuses": statuses_payload,
-	}
+            # Some frontend flows send a synthetic placeholder "brak" even when
+            # no status is persisted. Treat this as a no-op to avoid fake updates.
+            if current_status_id is None and (
+                incoming_status_norm is None or incoming_status_norm.casefold() == "brak"
+            ):
+                fields.pop("status", None)
+            else:
+                status_id = _resolve_slownik_item_id(conn, "statusy_zalecen", fields["status"])
+                if current_status_id != int(status_id):
+                    set_parts.append("status_zalecenia_id = ?")
+                    values.append(status_id)
+                else:
+                    fields.pop("status", None)
 
+        if "komentarz" in fields:
+            set_parts.append("komentarz = ?")
+            values.append(fields["komentarz"])
 
-@router.get("/api/reports/recommendations-stage-summary", response_model=RecommendationsStageSummaryResponse)
-def get_recommendations_stage_summary(
-	manager_user_id: int | None = Query(default=None, alias="managerUserId"),
-	x_operator_login: str = Header(..., alias="X-Operator-Login"),
-) -> dict[str, Any]:
-	with get_connection() as conn:
-		operator = _resolve_operator(conn, x_operator_login)
-		require_permission(conn, operator, PERMISSION_RECOMMENDATIONS_READ)
-		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
-			raise HTTPException(status_code=403, detail="Brak uprawnien")
+        current_brak_terminow = int(current_dict.get("brak_terminow_wykonania_zalecen") or 0) == 1
+        current_brak_akceptacji = int(current_dict.get("brak_dat_akceptacji_noty_weryfikacji") or 0) == 1
 
-		manager_context: dict[str, Any] | None = None
-		if int(operator["rola_id"]) == 2:
-			manager_context = operator
-		elif int(operator["rola_id"]) == 3 and manager_user_id is not None:
-			manager_row = conn.execute(
-				"""
-				SELECT id, login, rola_id, zespol_id, aktywny
-				FROM users
-				WHERE id = ?
-				LIMIT 1
-				""",
-				(int(manager_user_id),),
-			).fetchone()
-			if manager_row is None:
-				raise HTTPException(status_code=404, detail="Kierownik nie istnieje")
-			manager_data = dict(manager_row)
-			if int(manager_data.get("aktywny") or 0) != 1:
-				raise HTTPException(status_code=400, detail="Kierownik jest nieaktywny")
-			if int(manager_data.get("rola_id") or 0) != 2:
-				raise HTTPException(status_code=400, detail="managerUserId musi wskazywac kierownika")
-			manager_context = {
-				"id": int(manager_data["id"]),
-				"login": manager_data["login"],
-				"rola_id": int(manager_data["rola_id"]),
-				"zespol_id": manager_data["zespol_id"],
-			}
-		elif manager_user_id is not None:
-			raise HTTPException(status_code=400, detail="managerUserId jest dozwolone tylko dla dyrektora")
+        if set_parts:
+            set_parts.append("updated_by_user_id = ?")
+            values.append(operator["id"])
+            set_parts.append("zaktualizowano_o = ?")
+            values.append(now_rfc3339_utc_ms())
+            values.append(recommendation_id)
+            conn.execute(
+                f"UPDATE recommendations SET {', '.join(set_parts)} WHERE id = ?",
+                tuple(values),
+            )
+            row_touched = True
 
-		status_rows = conn.execute(
-			"""
-			SELECT
-				id,
-				COALESCE(kod_pozycji, '') AS kod_pozycji,
-				COALESCE(nazwa_pozycji, 'brak') AS nazwa_pozycji,
-				COALESCE(kolejnosc, 999999) AS kolejnosc
-			FROM slownik_pozycje
-			WHERE lower(kod_typu) = 'statusy_zalecen'
-			ORDER BY COALESCE(kolejnosc, 999999) ASC, id ASC
-			"""
-		).fetchall()
+        multi_dates_payload_present = "terminyWykonaniaZalecenList" in fields or "dataZalecenList" in fields
+        bool_columns_update: dict[str, int] = {}
+        if multi_dates_payload_present:
+            terminy_wykonania = _resolve_terminy_wykonania_list(
+                terminy_wykonania_list=fields.get("terminyWykonaniaZalecenList"),
+                legacy_data_zalecen_list=fields.get("dataZalecenList"),
+            )
+            terminy_wykonania, brak_terminow_after = _normalize_date_absence_state(
+                dates=terminy_wykonania,
+                brak=bool(fields.get("brakTerminowWykonaniaZalecen", current_brak_terminow)),
+                list_field_name="terminyWykonaniaZalecenList",
+                bool_field_name="brakTerminowWykonaniaZalecen",
+            )
+            _sync_multi_dates(conn, recommendation_id, "TERMIN_WYKONANIA_ZALECEN", terminy_wykonania, operator["id"])
+            bool_columns_update["brak_terminow_wykonania_zalecen"] = 1 if brak_terminow_after else 0
+        elif "brakTerminowWykonaniaZalecen" in fields:
+            brak_terminow_after = bool(fields["brakTerminowWykonaniaZalecen"])
+            if brak_terminow_after:
+                _sync_multi_dates(conn, recommendation_id, "TERMIN_WYKONANIA_ZALECEN", [], operator["id"])
+            bool_columns_update["brak_terminow_wykonania_zalecen"] = 1 if brak_terminow_after else 0
 
-		group_stats: dict[str, dict[str, Any]] = {}
-		status_id_to_code: dict[int, str] = {}
-		for status_row in status_rows:
-			status_id = int(status_row["id"])
-			status_code = str(status_row["kod_pozycji"] or "").strip() or f"status_{status_id}"
-			group_stats[status_code] = {
-				"statusId": status_id,
-				"stageGroupCode": status_code,
-				"stageGroupLabel": str(status_row["nazwa_pozycji"]),
-				"stageGroupShortLabel": status_row["nazwa_pozycji"],
-				"stageGroupOrder": int(status_row["kolejnosc"]),
-				"count": 0,
-				"countTeam": 0,
-				"countManagerAdded": 0,
-				"countTeamAndManagerAdded": 0,
-			}
-			status_id_to_code[status_id] = status_code
+        if "dataAkceptacjiNotyWeryfikacjiList" in fields:
+            data_akceptacji = _normalize_date_list(
+                fields["dataAkceptacjiNotyWeryfikacjiList"],
+                "dataAkceptacjiNotyWeryfikacjiList",
+            )
+            data_akceptacji, brak_akceptacji_after = _normalize_date_absence_state(
+                dates=data_akceptacji,
+                brak=bool(fields.get("brakDatAkceptacjiNotyWeryfikacji", current_brak_akceptacji)),
+                list_field_name="dataAkceptacjiNotyWeryfikacjiList",
+                bool_field_name="brakDatAkceptacjiNotyWeryfikacji",
+            )
+            _sync_multi_dates(
+                conn,
+                recommendation_id,
+                "AKCEPTACJA_NOTY_WERYFIKACJI",
+                data_akceptacji,
+                operator["id"],
+            )
+            bool_columns_update["brak_dat_akceptacji_noty_weryfikacji"] = 1 if brak_akceptacji_after else 0
+        elif "brakDatAkceptacjiNotyWeryfikacji" in fields:
+            brak_akceptacji_after = bool(fields["brakDatAkceptacjiNotyWeryfikacji"])
+            if brak_akceptacji_after:
+                _sync_multi_dates(conn, recommendation_id, "AKCEPTACJA_NOTY_WERYFIKACJI", [], operator["id"])
+            bool_columns_update["brak_dat_akceptacji_noty_weryfikacji"] = 1 if brak_akceptacji_after else 0
 
-		unknown_code = "unknown_unmapped"
-		if unknown_code not in group_stats:
-			group_stats[unknown_code] = {
-				"statusId": None,
-				"stageGroupCode": unknown_code,
-				"stageGroupLabel": "Nieprzypisany status",
-				"stageGroupShortLabel": "Nieprzypisany status",
-				"stageGroupOrder": 999999,
-				"count": 0,
-				"countTeam": 0,
-				"countManagerAdded": 0,
-				"countTeamAndManagerAdded": 0,
-			}
+        if bool_columns_update:
+            set_sql = ", ".join(f"{column} = ?" for column in bool_columns_update.keys())
+            conn.execute(
+                f"UPDATE recommendations SET {set_sql}, updated_by_user_id = ?, zaktualizowano_o = ? WHERE id = ?",
+                (*bool_columns_update.values(), operator["id"], now_rfc3339_utc_ms(), recommendation_id),
+            )
+            row_touched = True
 
-		recommendation_rows = conn.execute(
-			"""
-			SELECT
-				r.id,
-				r.inspection_id,
-				r.created_by_user_id AS recommendation_created_by_user_id,
-				r.status_zalecenia_id,
-				i.created_by_user_id AS inspection_created_by_user_id,
-				ru.zespol_id AS recommendation_author_team_id,
-				ru.created_by_user_id AS recommendation_author_created_by_user_id
-			FROM recommendations r
-			LEFT JOIN inspections i ON i.id = r.inspection_id
-			LEFT JOIN users ru ON ru.id = r.created_by_user_id
-			ORDER BY r.id ASC
-			"""
-		).fetchall()
+        for affected_inspection_id in {previous_inspection_id, next_inspection_id}:
+            _sync_inspection_recommendation_dates(conn, affected_inspection_id, operator["id"])
 
-		total_recommendations = 0
-		quality_error_count = 0
+        if not row_touched and (
+            multi_dates_payload_present or "dataAkceptacjiNotyWeryfikacjiList" in fields
+        ):
+            conn.execute(
+                "UPDATE recommendations SET updated_by_user_id = ?, zaktualizowano_o = ? WHERE id = ?",
+                (operator["id"], now_rfc3339_utc_ms(), recommendation_id),
+            )
 
-		for row in recommendation_rows:
-			row_dict = dict(row)
+        # --- Audit log ---
+        rekord_kod_u = str(current_dict.get("kod_zalecenia") or recommendation_id)
+        audit_fields = dict(fields)
+        if single_date_payload_present:
+            audit_fields["dataZalecen"] = resolved_data_zalecen
+        if multi_dates_payload_present:
+            audit_fields["terminyWykonaniaZalecenList"] = terminy_wykonania
+        changes_r = build_recommendation_changes(conn, current_dict, audit_fields, dates_z_before, dates_a_before)
+        write_audit_log(conn, new_session_id(), operator["login"], AKCJA_UPDATE,
+                        REJESTR_ZALECENIA, rekord_kod_u, changes_r)
+        # --- koniec audit log ---
 
-			status_id = row_dict.get("status_zalecenia_id")
-			if status_id is not None:
-				status_code = status_id_to_code.get(int(status_id))
-				if _is_dashboard_hidden_recommendation_status_code(status_code):
-					continue
+        conn.commit()
 
-			in_team_scope = False
-			in_added_scope = False
-			inspection_id_raw = row_dict.get("inspection_id")
+        row = conn.execute(
+            _base_select_sql() + " WHERE r.id = ? LIMIT 1",
+            (recommendation_id,),
+        ).fetchone()
 
-			if manager_context is not None:
-				if inspection_id_raw is not None:
-					in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, int(inspection_id_raw), manager_context)
-				else:
-					author_team_id = row_dict.get("recommendation_author_team_id")
-					author_created_by = row_dict.get("recommendation_author_created_by_user_id")
-					team_id = manager_context.get("zespol_id")
-					if team_id is not None and author_team_id is not None and int(author_team_id) == int(team_id):
-						in_team_scope = True
-					if author_created_by is not None and int(author_created_by) == int(manager_context["id"]):
-						in_added_scope = True
-				if not (in_team_scope or in_added_scope):
-					continue
-			else:
-				if not _can_access_recommendation_for_reports(conn, row_dict, operator):
-					continue
+    if row is None:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
 
-			group_code = unknown_code
-			if status_id is not None:
-				for code, payload in group_stats.items():
-					if payload.get("statusId") is not None and int(payload["statusId"]) == int(status_id):
-						group_code = code
-						break
-
-			if group_code == unknown_code:
-				quality_error_count += 1
-
-			total_recommendations += 1
-			group_item = group_stats[group_code]
-			group_item["count"] += 1
-
-			if manager_context is not None:
-				if in_team_scope:
-					group_item["countTeam"] += 1
-				if in_added_scope:
-					group_item["countManagerAdded"] += 1
-				if in_team_scope and in_added_scope:
-					group_item["countTeamAndManagerAdded"] += 1
-
-		groups_payload = [
-			{
-				"stageGroupCode": item["stageGroupCode"],
-				"stageGroupLabel": item["stageGroupLabel"],
-				"stageGroupShortLabel": item.get("stageGroupShortLabel"),
-				"stageGroupOrder": item["stageGroupOrder"],
-				"count": item["count"],
-				"countTeam": item["countTeam"],
-				"countManagerAdded": item["countManagerAdded"],
-				"countTeamAndManagerAdded": item["countTeamAndManagerAdded"],
-			}
-			for item in sorted(group_stats.values(), key=lambda x: (int(x["stageGroupOrder"]), str(x["stageGroupCode"])))
-		]
-
-	return {
-		"generatedAt": datetime.now().isoformat(timespec="seconds"),
-		"stageDictionaryVersion": RECOMMENDATIONS_STAGE_DICTIONARY_VERSION,
-		"totalRecommendations": int(total_recommendations),
-		"qualityErrorCount": int(quality_error_count),
-		"groups": groups_payload,
-	}
+    return _row_to_payload(dict(row), lp=1, can_edit=True)
 
 
-@router.get("/api/reports/recommendations-detailed", response_model=RecommendationsDetailedResponse)
-def get_recommendations_detailed(
-	manager_user_id: int | None = Query(default=None, alias="managerUserId"),
-	x_operator_login: str = Header(..., alias="X-Operator-Login"),
-) -> dict[str, Any]:
-	with get_connection() as conn:
-		operator = _resolve_operator(conn, x_operator_login)
-		require_permission(conn, operator, PERMISSION_RECOMMENDATIONS_READ)
-		if int(operator["rola_id"]) not in {1, 2, 3, 4}:
-			raise HTTPException(status_code=403, detail="Brak uprawnien")
+@router.delete("/api/recommendations/{recommendation_id}")
+def delete_recommendation(
+    recommendation_id: int,
+    x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
+) -> dict[str, bool]:
+    with get_connection() as conn:
+        operator = _resolve_operator(conn, x_operator_login)
+        require_write_access(conn, operator)
+        _ensure_director(operator)
+        row = conn.execute(
+            "SELECT id, inspection_id, created_by_user_id, kod_zalecenia FROM recommendations WHERE id = ? LIMIT 1",
+            (recommendation_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Recommendation not found")
 
-		manager_context: dict[str, Any] | None = None
-		if int(operator["rola_id"]) == 2:
-			manager_context = operator
-		elif int(operator["rola_id"]) == 3 and manager_user_id is not None:
-			manager_row = conn.execute(
-				"""
-				SELECT id, login, rola_id, zespol_id, aktywny
-				FROM users
-				WHERE id = ?
-				LIMIT 1
-				""",
-				(int(manager_user_id),),
-			).fetchone()
-			if manager_row is None:
-				raise HTTPException(status_code=404, detail="Kierownik nie istnieje")
-			manager_data = dict(manager_row)
-			if int(manager_data.get("aktywny") or 0) != 1:
-				raise HTTPException(status_code=400, detail="Kierownik jest nieaktywny")
-			if int(manager_data.get("rola_id") or 0) != 2:
-				raise HTTPException(status_code=400, detail="managerUserId musi wskazywac kierownika")
-			manager_context = {
-				"id": int(manager_data["id"]),
-				"login": manager_data["login"],
-				"rola_id": int(manager_data["rola_id"]),
-				"zespol_id": manager_data["zespol_id"],
-			}
-		elif manager_user_id is not None:
-			raise HTTPException(status_code=400, detail="managerUserId jest dozwolone tylko dla dyrektora")
+        inspection_id = int(row["inspection_id"]) if row["inspection_id"] is not None else None
 
-		rows = conn.execute(
-			"""
-			SELECT
-				r.kod_zalecenia,
-				r.inspection_id,
-				i.kod_inspekcji,
-				r.created_by_user_id AS recommendation_created_by_user_id,
-				r.status_zalecenia_id,
-				COALESCE(st.kod_pozycji, '') AS status_kod,
-				r.data_zalecen,
-				COALESCE(st.nazwa_pozycji, 'brak') AS status_nazwa,
-				COALESCE(NULLIF(trim(st.skrot_pozycji), ''), st.nazwa_pozycji, 'brak') AS status_skrot,
-				COALESCE(
-					NULLIF(trim(np_rec.skrot_pozycji), ''),
-					np_rec.nazwa_pozycji,
-					NULLIF(trim(np_ins.skrot_pozycji), ''),
-					np_ins.nazwa_pozycji,
-					'brak'
-				) AS nazwa_podmiotu,
-				i.created_by_user_id AS inspection_created_by_user_id,
-				ru.zespol_id AS recommendation_author_team_id,
-				ru.created_by_user_id AS recommendation_author_created_by_user_id,
-				(
-					SELECT group_concat(x.dv, ',')
-					FROM (
-						SELECT rmd.date_value AS dv
-						FROM recommendation_multi_dates rmd
-						WHERE rmd.recommendation_id = r.id
-							AND rmd.date_type = 'TERMIN_WYKONANIA_ZALECEN'
-						ORDER BY rmd.date_value ASC
-					) x
-				) AS terminy_wykonania_csv,
-				COALESCE(r.pozycja, 0) AS liczba_zalecen
-			FROM recommendations r
-			LEFT JOIN inspections i ON i.id = r.inspection_id
-			LEFT JOIN users ru ON ru.id = r.created_by_user_id
-			LEFT JOIN slownik_pozycje st ON st.id = r.status_zalecenia_id
-			LEFT JOIN slownik_pozycje np_rec ON np_rec.id = r.nazwa_podmiotu_id
-			LEFT JOIN slownik_pozycje np_ins ON np_ins.id = i.nazwa_podmiotu_id
-			ORDER BY r.id DESC
-			"""
-		).fetchall()
+        conn.execute("DELETE FROM recommendations WHERE id = ?", (recommendation_id,))
+        _sync_inspection_recommendation_dates(conn, inspection_id, operator["id"])
+        write_audit_log(conn, new_session_id(), operator["login"], AKCJA_DELETE,
+                        REJESTR_ZALECENIA, str(row["kod_zalecenia"] or recommendation_id), [])
+        conn.commit()
 
-		def _first_deadline(csv_value: str | None) -> str | None:
-			if csv_value is None:
-				return None
-			parts = [p.strip() for p in str(csv_value).split(",") if p.strip()]
-			if not parts:
-				return None
-			return parts[0]
-
-		payload_rows: list[dict[str, Any]] = []
-		for row in rows:
-			row_dict = dict(row)
-			if _is_dashboard_hidden_recommendation_status_code(row_dict.get("status_kod")):
-				continue
-
-			in_team_scope = False
-			in_added_scope = False
-			inspection_id_raw = row_dict.get("inspection_id")
-
-			if manager_context is not None:
-				if inspection_id_raw is not None:
-					in_team_scope, in_added_scope = _manager_scope_flags_for_inspection(conn, int(inspection_id_raw), manager_context)
-				else:
-					author_team_id = row_dict.get("recommendation_author_team_id")
-					author_created_by = row_dict.get("recommendation_author_created_by_user_id")
-					team_id = manager_context.get("zespol_id")
-					if team_id is not None and author_team_id is not None and int(author_team_id) == int(team_id):
-						in_team_scope = True
-					if author_created_by is not None and int(author_created_by) == int(manager_context["id"]):
-						in_added_scope = True
-				if not (in_team_scope or in_added_scope):
-					continue
-			else:
-				if not _can_access_recommendation_for_reports(conn, row_dict, operator):
-					continue
-
-			terminy_csv = row_dict.get("terminy_wykonania_csv")
-			payload_rows.append(
-				{
-					"status": str(row_dict.get("status_nazwa") or "brak"),
-					"status_skrot": str(row_dict.get("status_skrot") or row_dict.get("status_nazwa") or "brak"),
-					"statusSkrot": str(row_dict.get("status_skrot") or row_dict.get("status_nazwa") or "brak"),
-					"kod_zalecenia": row_dict.get("kod_zalecenia"),
-					"kod_inspekcji": row_dict.get("kod_inspekcji"),
-					"kodZalecenia": row_dict.get("kod_zalecenia"),
-					"kodInspekcji": row_dict.get("kod_inspekcji"),
-					"nazwa_podmiotu": str(row_dict.get("nazwa_podmiotu") or "brak"),
-					"nazwa_podmiotu_skrocona": str(row_dict.get("nazwa_podmiotu") or "brak"),
-					"nazwa_podmiotu_skrot": str(row_dict.get("nazwa_podmiotu") or "brak"),
-					"nazwaPodmiotuSkrocona": str(row_dict.get("nazwa_podmiotu") or "brak"),
-					"nazwaPodmiotuSkrot": str(row_dict.get("nazwa_podmiotu") or "brak"),
-					"data_zalecen": row_dict.get("data_zalecen"),
-					"termin_zalecen": _first_deadline(terminy_csv),
-					"termin_wykonania_zalecen": terminy_csv,
-					"liczba_zalecen": int(row_dict.get("liczba_zalecen") or 0),
-				}
-			)
-
-	return {"rows": payload_rows}
+    return {"ok": True}
