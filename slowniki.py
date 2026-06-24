@@ -42,6 +42,10 @@ _STATUS_STYLE_ALLOWED_KOLORY = {
 }
 
 _STATUS_STYLE_ALLOWED_ODCIEN = {50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950}
+_STATUS_STYLE_ALLOWED_KOD_TYPY = {
+    "statusy_inspekcji",
+    "statusy_zalecen",
+}
 
 
 class SlownikTypRead(BaseModel):
@@ -229,7 +233,7 @@ def _map_slownik_pozycja_row(row: dict[str, Any]) -> dict[str, Any]:
         kolor = kolor.strip().lower() or None
     odcien = row.get("odcien")
     intensywnosc = row.get("intensywnosc")
-    if kod_typu != "statusy_inspekcji":
+    if kod_typu not in _STATUS_STYLE_ALLOWED_KOD_TYPY:
         kolor = None
         odcien = None
         intensywnosc = None
@@ -264,6 +268,135 @@ def _validate_status_style_payload(kolor: str, odcien: int, intensywnosc: int) -
     if int(intensywnosc) < 0 or int(intensywnosc) > 100:
         raise HTTPException(status_code=400, detail="Nieprawidlowa intensywnosc")
     return normalized_kolor, int(odcien), int(intensywnosc)
+
+
+def _resolve_status_style_target(conn: Any, slownik_pozycja_id: int) -> str | None:
+    row = conn.execute(
+        """
+        SELECT kod_typu
+        FROM slownik_pozycje
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (int(slownik_pozycja_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["kod_typu"] or "").strip().lower()
+
+
+def _upsert_status_style(
+    payload: StatusInspekcjiStylUpsert,
+    x_operator_login: str,
+    expected_kod_typu: str,
+) -> dict[str, Any] | Response:
+    clear_requested = payload.kolor is None and payload.odcien is None and payload.intensywnosc is None
+    if not clear_requested and (payload.kolor is None or payload.odcien is None or payload.intensywnosc is None):
+        raise HTTPException(status_code=400, detail="Dla czyszczenia ustaw kolor, odcien i intensywnosc na null")
+
+    kolor: str
+    odcien: int
+    intensywnosc: int
+    if not clear_requested:
+        kolor, odcien, intensywnosc = _validate_status_style_payload(
+            payload.kolor,
+            payload.odcien,
+            payload.intensywnosc,
+        )
+
+    with get_connection() as conn:
+        operator = _get_operator(conn, x_operator_login)
+        actual_kod_typu = _resolve_status_style_target(conn, int(payload.slownikPozycjaId))
+        if actual_kod_typu is None:
+            raise HTTPException(status_code=404, detail="Pozycja slownika nie istnieje")
+        if actual_kod_typu != expected_kod_typu:
+            raise HTTPException(status_code=400, detail=f"Pozycja nie nalezy do {expected_kod_typu}")
+
+        if clear_requested:
+            conn.execute(
+                """
+                DELETE FROM slownik_status_inspekcji_styl
+                WHERE slownik_pozycja_id = ?
+                """,
+                (int(payload.slownikPozycjaId),),
+            )
+            conn.commit()
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+        conn.execute(
+            """
+            INSERT INTO slownik_status_inspekcji_styl
+                (slownik_pozycja_id, kolor, odcien, intensywnosc, utworzono_przez, zaktualizowano_przez)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(slownik_pozycja_id)
+            DO UPDATE SET
+                kolor = excluded.kolor,
+                odcien = excluded.odcien,
+                intensywnosc = excluded.intensywnosc,
+                zaktualizowano_o = CURRENT_TIMESTAMP,
+                zaktualizowano_przez = excluded.zaktualizowano_przez
+            """,
+            (
+                int(payload.slownikPozycjaId),
+                kolor,
+                odcien,
+                intensywnosc,
+                str(operator["login"]),
+                str(operator["login"]),
+            ),
+        )
+        conn.commit()
+
+        style_row = conn.execute(
+            """
+            SELECT id, slownik_pozycja_id, kolor, odcien, intensywnosc
+            FROM slownik_status_inspekcji_styl
+            WHERE slownik_pozycja_id = ?
+            LIMIT 1
+            """,
+            (int(payload.slownikPozycjaId),),
+        ).fetchone()
+
+    if style_row is None:
+        raise HTTPException(status_code=500, detail="Nie udalo sie zapisac stylu statusu")
+
+    return {
+        "id": int(style_row["id"]),
+        "slownikPozycjaId": int(style_row["slownik_pozycja_id"]),
+        "kolor": str(style_row["kolor"]),
+        "odcien": int(style_row["odcien"]),
+        "intensywnosc": int(style_row["intensywnosc"]),
+    }
+
+
+def _delete_status_style(
+    slownik_pozycja_id: int,
+    x_operator_login: str,
+    expected_kod_typu: str,
+    *,
+    idempotent_not_found: bool = False,
+) -> Response:
+    with get_connection() as conn:
+        _get_operator(conn, x_operator_login)
+
+        actual_kod_typu = _resolve_status_style_target(conn, int(slownik_pozycja_id))
+        if actual_kod_typu is None:
+            if idempotent_not_found:
+                return Response(status_code=status.HTTP_204_NO_CONTENT)
+            raise HTTPException(status_code=404, detail="Pozycja slownika nie istnieje")
+        if actual_kod_typu != expected_kod_typu:
+            raise HTTPException(status_code=400, detail=f"Pozycja nie nalezy do {expected_kod_typu}")
+
+        conn.execute(
+            """
+            DELETE FROM slownik_status_inspekcji_styl
+            WHERE slownik_pozycja_id = ?
+            """,
+            (int(slownik_pozycja_id),),
+        )
+        conn.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _validate_inspection_type_name(raw_name: str) -> None:
@@ -592,93 +725,7 @@ def upsert_status_inspekcji_style(
     payload: StatusInspekcjiStylUpsert,
     x_operator_login: str = Header(..., alias="X-Operator-Login"),
 ) -> dict[str, Any] | Response:
-    clear_requested = payload.kolor is None and payload.odcien is None and payload.intensywnosc is None
-    if not clear_requested and (payload.kolor is None or payload.odcien is None or payload.intensywnosc is None):
-        raise HTTPException(status_code=400, detail="Dla czyszczenia ustaw kolor, odcien i intensywnosc na null")
-
-    kolor: str
-    odcien: int
-    intensywnosc: int
-    if not clear_requested:
-        kolor, odcien, intensywnosc = _validate_status_style_payload(
-            payload.kolor,
-            payload.odcien,
-            payload.intensywnosc,
-        )
-
-    with get_connection() as conn:
-        operator = _get_operator(conn, x_operator_login)
-
-        status_row = conn.execute(
-            """
-            SELECT id, kod_typu
-            FROM slownik_pozycje
-            WHERE id = ?
-            LIMIT 1
-            """,
-            (int(payload.slownikPozycjaId),),
-        ).fetchone()
-
-        if status_row is None:
-            raise HTTPException(status_code=404, detail="Pozycja slownika nie istnieje")
-        if str(status_row["kod_typu"] or "").strip().lower() != "statusy_inspekcji":
-            raise HTTPException(status_code=400, detail="Pozycja nie nalezy do statusy_inspekcji")
-
-        if clear_requested:
-            conn.execute(
-                """
-                DELETE FROM slownik_status_inspekcji_styl
-                WHERE slownik_pozycja_id = ?
-                """,
-                (int(payload.slownikPozycjaId),),
-            )
-            conn.commit()
-            return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-        conn.execute(
-            """
-            INSERT INTO slownik_status_inspekcji_styl
-                (slownik_pozycja_id, kolor, odcien, intensywnosc, utworzono_przez, zaktualizowano_przez)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(slownik_pozycja_id)
-            DO UPDATE SET
-                kolor = excluded.kolor,
-                odcien = excluded.odcien,
-                intensywnosc = excluded.intensywnosc,
-                zaktualizowano_o = CURRENT_TIMESTAMP,
-                zaktualizowano_przez = excluded.zaktualizowano_przez
-            """,
-            (
-                int(payload.slownikPozycjaId),
-                kolor,
-                odcien,
-                intensywnosc,
-                str(operator["login"]),
-                str(operator["login"]),
-            ),
-        )
-        conn.commit()
-
-        style_row = conn.execute(
-            """
-            SELECT id, slownik_pozycja_id, kolor, odcien, intensywnosc
-            FROM slownik_status_inspekcji_styl
-            WHERE slownik_pozycja_id = ?
-            LIMIT 1
-            """,
-            (int(payload.slownikPozycjaId),),
-        ).fetchone()
-
-    if style_row is None:
-        raise HTTPException(status_code=500, detail="Nie udalo sie zapisac stylu statusu")
-
-    return {
-        "id": int(style_row["id"]),
-        "slownikPozycjaId": int(style_row["slownik_pozycja_id"]),
-        "kolor": str(style_row["kolor"]),
-        "odcien": int(style_row["odcien"]),
-        "intensywnosc": int(style_row["intensywnosc"]),
-    }
+    return _upsert_status_style(payload, x_operator_login, "statusy_inspekcji")
 
 
 @router.delete("/api/slowniki/statusy-inspekcji/styl/{slownik_pozycja_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -686,34 +733,28 @@ def delete_status_inspekcji_style(
     slownik_pozycja_id: int,
     x_operator_login: str = Header(..., alias="X-Operator-Login"),
 ) -> Response:
-    with get_connection() as conn:
-        _get_operator(conn, x_operator_login)
+    return _delete_status_style(slownik_pozycja_id, x_operator_login, "statusy_inspekcji")
 
-        status_row = conn.execute(
-            """
-            SELECT id, kod_typu
-            FROM slownik_pozycje
-            WHERE id = ?
-            LIMIT 1
-            """,
-            (int(slownik_pozycja_id),),
-        ).fetchone()
 
-        if status_row is None:
-            raise HTTPException(status_code=404, detail="Pozycja slownika nie istnieje")
-        if str(status_row["kod_typu"] or "").strip().lower() != "statusy_inspekcji":
-            raise HTTPException(status_code=400, detail="Pozycja nie nalezy do statusy_inspekcji")
+@router.put("/api/slowniki/statusy-zalecen/styl", response_model=StatusInspekcjiStylRead)
+def upsert_status_zalecen_style(
+    payload: StatusInspekcjiStylUpsert,
+    x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> dict[str, Any] | Response:
+    return _upsert_status_style(payload, x_operator_login, "statusy_zalecen")
 
-        conn.execute(
-            """
-            DELETE FROM slownik_status_inspekcji_styl
-            WHERE slownik_pozycja_id = ?
-            """,
-            (int(slownik_pozycja_id),),
-        )
-        conn.commit()
 
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/api/slowniki/statusy-zalecen/styl/{slownik_pozycja_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_status_zalecen_style(
+    slownik_pozycja_id: int,
+    x_operator_login: str = Header(..., alias="X-Operator-Login"),
+) -> Response:
+    return _delete_status_style(
+        slownik_pozycja_id,
+        x_operator_login,
+        "statusy_zalecen",
+        idempotent_not_found=True,
+    )
 
 
 @router.put("/api/slowniki/pozycje", response_model=SlownikPozycjaRead)
