@@ -37,18 +37,19 @@ INSPECTION_STATUS_BLOCK_ERROR_CODE = "INSPECTION_STATUS_BLOCKS_OPERATION"
 
 class RiskExposureCreate(BaseModel):
     model_config = ConfigDict(
+        extra="forbid",
         json_schema_extra={
             "example": {
                 "inspectionId": 1,
-                "nazwaPodmiotuObjetegoInspekcja": "Podmiot X",
-                "nazwaPodmiotuObjetegoSankcjaList": ["Podmiot Y", "Podmiot Z"],
+                "nazwaPodmiotuObjetegoInspekcjaId": 10,
+                "nazwaPodmiotuObjetegoSankcjaIds": [11, 12],
                 "dataWniosku": "2026-12-01",
-                "wniosekDo": "Departament A",
-                "sankcjaList": ["Kara pieniezna"],
-                "podstawaPrawnaSankcjiList": ["Art. 12"],
-                "naruszeniaSkutkujaceSankcjaList": ["Brak raportu"],
-                "czyMamyInformacjeOWszczeciuPostepowania": "Tak",
-                "rozstrzygniecie": "W toku",
+                "wniosekDoId": 21,
+                "sankcjaIds": [31],
+                "podstawaPrawnaSankcjiIds": [41],
+                "naruszeniaSkutkujaceSankcjaIds": [51],
+                "czyMamyInformacjeOWszczeciuPostepowaniaId": 61,
+                "rozstrzygniecieId": 71,
                 "komentarz": "Komentarz",
             }
         }
@@ -56,46 +57,32 @@ class RiskExposureCreate(BaseModel):
 
     inspectionId: int | None = None
     nazwaPodmiotuObjetegoInspekcjaId: int | None = None
-    nazwaPodmiotuObjetegoInspekcja: str | None = None
     nazwaPodmiotuObjetegoSankcjaIds: list[int] | None = None
-    nazwaPodmiotuObjetegoSankcjaList: list[str] | None = None
     dataWniosku: str | None = None
     wniosekDoId: int | None = None
-    wniosekDo: str | None = None
     sankcjaIds: list[int] | None = None
-    sankcjaList: list[str] | None = None
     podstawaPrawnaSankcjiIds: list[int] | None = None
-    podstawaPrawnaSankcjiList: list[str] | None = None
     naruszeniaSkutkujaceSankcjaIds: list[int] | None = None
-    naruszeniaSkutkujaceSankcjaList: list[str] | None = None
     czyMamyInformacjeOWszczeciuPostepowaniaId: int | None = None
-    czyMamyInformacjeOWszczeciuPostepowania: str | None = None
     rozstrzygniecieId: int | None = None
-    rozstrzygniecie: str | None = None
     komentarz: str | None = None
 
 
 class RiskExposureUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     lockToken: str | None = None
     expectedUpdatedAt: str | None = None
     inspectionId: int | None = None
     nazwaPodmiotuObjetegoInspekcjaId: int | None = None
-    nazwaPodmiotuObjetegoInspekcja: str | None = None
     nazwaPodmiotuObjetegoSankcjaIds: list[int] | None = None
-    nazwaPodmiotuObjetegoSankcjaList: list[str] | None = None
     dataWniosku: str | None = None
     wniosekDoId: int | None = None
-    wniosekDo: str | None = None
     sankcjaIds: list[int] | None = None
-    sankcjaList: list[str] | None = None
     podstawaPrawnaSankcjiIds: list[int] | None = None
-    podstawaPrawnaSankcjiList: list[str] | None = None
     naruszeniaSkutkujaceSankcjaIds: list[int] | None = None
-    naruszeniaSkutkujaceSankcjaList: list[str] | None = None
     czyMamyInformacjeOWszczeciuPostepowaniaId: int | None = None
-    czyMamyInformacjeOWszczeciuPostepowania: str | None = None
     rozstrzygniecieId: int | None = None
-    rozstrzygniecie: str | None = None
     komentarz: str | None = None
 
 
@@ -168,11 +155,55 @@ class SanctionEntityOption(BaseModel):
     active: bool
 
 
+class RiskExposureLegacyTranslationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    nazwaPodmiotuObjetegoInspekcja: str | None = None
+    nazwaPodmiotuObjetegoSankcjaList: list[str] | None = None
+    wniosekDo: str | None = None
+    sankcjaList: list[str] | None = None
+    podstawaPrawnaSankcjiList: list[str] | None = None
+    naruszeniaSkutkujaceSankcjaList: list[str] | None = None
+    czyMamyInformacjeOWszczeciuPostepowania: str | None = None
+    rozstrzygniecie: str | None = None
+
+
+class RiskExposureLegacyTranslationResponse(BaseModel):
+    nazwaPodmiotuObjetegoInspekcjaId: int | None = None
+    nazwaPodmiotuObjetegoSankcjaIds: list[int] = Field(default_factory=list)
+    wniosekDoId: int | None = None
+    sankcjaIds: list[int] = Field(default_factory=list)
+    podstawaPrawnaSankcjiIds: list[int] = Field(default_factory=list)
+    naruszeniaSkutkujaceSankcjaIds: list[int] = Field(default_factory=list)
+    czyMamyInformacjeOWszczeciuPostepowaniaId: int | None = None
+    rozstrzygniecieId: int | None = None
+    unresolved: dict[str, list[str]] = Field(default_factory=dict)
+
+
 def _norm(value: str | None) -> str | None:
     if value is None:
         return None
     cleaned = value.strip()
     return cleaned if cleaned else None
+
+
+def _raise_contract_422(
+    code: str,
+    message: str,
+    *,
+    field: str,
+    value: Any = None,
+    kod_typu: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "field": field,
+        "value": value,
+    }
+    if kod_typu is not None:
+        payload["kodTypu"] = kod_typu
+    raise HTTPException(status_code=422, detail=payload)
 
 
 def _normalize_entity_text(value: str | None) -> str | None:
@@ -337,7 +368,12 @@ def _validate_optional_iso_date(value: str | None, field_name: str) -> str | Non
     try:
         parsed = date.fromisoformat(str(value))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"{field_name} ma niepoprawny format daty") from exc
+        _raise_contract_422(
+            "INVALID_DATE_VALUE",
+            f"{field_name} ma niepoprawny format daty.",
+            field=field_name,
+            value=value,
+        )
     return parsed.isoformat()
 
 
@@ -372,9 +408,19 @@ def _normalize_int_list(raw_values: list[int] | None, field_name: str) -> list[i
         try:
             value = int(raw)
         except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"{field_name} zawiera niepoprawny typ") from exc
+            _raise_contract_422(
+                "INVALID_VALUE",
+                f"{field_name} zawiera niepoprawny typ.",
+                field=field_name,
+                value=raw,
+            )
         if value <= 0:
-            raise HTTPException(status_code=400, detail=f"{field_name} zawiera niepoprawne id")
+            _raise_contract_422(
+                "INVALID_VALUE",
+                f"{field_name} zawiera niepoprawne id.",
+                field=field_name,
+                value=raw,
+            )
         if value not in seen:
             seen.add(value)
             values.append(value)
@@ -383,13 +429,44 @@ def _normalize_int_list(raw_values: list[int] | None, field_name: str) -> list[i
     return values
 
 
+def _normalize_text_input_list(raw_values: list[str] | None, field_name: str) -> list[str]:
+    if raw_values is None:
+        return []
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not isinstance(raw, str):
+            _raise_contract_422(
+                "INVALID_VALUE",
+                f"{field_name} zawiera niepoprawny typ.",
+                field=field_name,
+                value=raw,
+            )
+        cleaned = _normalize_entity_text(raw)
+        if cleaned is None:
+            _raise_contract_422(
+                "INVALID_VALUE",
+                f"{field_name} nie moze zawierac pustych wartosci.",
+                field=field_name,
+                value=raw,
+            )
+        dedupe_key = cleaned.casefold()
+        if dedupe_key not in seen:
+            seen.add(dedupe_key)
+            values.append(cleaned)
+    return values
+
+
 def _parse_csv(csv_value: str | None) -> list[str]:
     if not csv_value:
         return []
     values: list[str] = []
+    seen: set[str] = set()
     for part in str(csv_value).split(";"):
         cleaned = part.strip()
-        if cleaned:
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
             values.append(cleaned)
     return values
 
@@ -398,6 +475,7 @@ def _parse_int_csv(csv_value: str | None) -> list[int]:
     if not csv_value:
         return []
     values: list[int] = []
+    seen: set[int] = set()
     for part in str(csv_value).split(";"):
         if not part:
             continue
@@ -405,8 +483,73 @@ def _parse_int_csv(csv_value: str | None) -> list[int]:
             value = int(part)
         except ValueError:
             continue
-        values.append(value)
+        if value > 0 and value not in seen:
+            seen.add(value)
+            values.append(value)
     return values
+
+
+def _lookup_slownik_id_by_name(
+    conn: Any,
+    kod_typu: str | Sequence[str],
+    raw_name: str | None,
+) -> tuple[int | None, str | None]:
+    normalized_name = _normalize_entity_text(raw_name)
+    if normalized_name is None:
+        return None, None
+
+    if isinstance(kod_typu, str):
+        rows = conn.execute(
+            """
+            SELECT id, nazwa_pozycji
+            FROM slownik_pozycje
+            WHERE lower(kod_typu) = lower(?)
+              AND aktywny = 1
+            ORDER BY id ASC
+            """,
+            (kod_typu,),
+        ).fetchall()
+    else:
+        normalized_types = [str(item).strip().lower() for item in kod_typu if str(item).strip()]
+        if not normalized_types:
+            return None, normalized_name
+        placeholders = ",".join("?" for _ in normalized_types)
+        rows = conn.execute(
+            f"""
+            SELECT id, nazwa_pozycji
+            FROM slownik_pozycje
+            WHERE lower(kod_typu) IN ({placeholders})
+              AND aktywny = 1
+            ORDER BY id ASC
+            """,
+            tuple(normalized_types),
+        ).fetchall()
+
+    target_key = normalized_name.casefold()
+    for row in rows:
+        candidate_name = _normalize_entity_text(row["nazwa_pozycji"]) or ""
+        if candidate_name.casefold() == target_key:
+            return int(row["id"]), None
+    return None, normalized_name
+
+
+def _lookup_slownik_ids_by_names(
+    conn: Any,
+    kod_typu: str | Sequence[str],
+    raw_values: list[str] | None,
+    field_name: str,
+) -> tuple[list[int], list[str]]:
+    normalized_values = _normalize_text_input_list(raw_values, field_name)
+    ids: list[int] = []
+    unresolved: list[str] = []
+    for value in normalized_values:
+        resolved_id, unresolved_name = _lookup_slownik_id_by_name(conn, kod_typu, value)
+        if resolved_id is None:
+            if unresolved_name is not None:
+                unresolved.append(unresolved_name)
+            continue
+        ids.append(resolved_id)
+    return ids, unresolved
 
 
 def _next_lp(conn: Any) -> int:
@@ -445,64 +588,6 @@ def _next_sanction_code(conn: Any, data_wniosku: str | None) -> str:
     return f"{prefix}/{year}/{max_seq + 1}"
 
 
-def _resolve_or_create_slownik_item_id(conn: Any, kod_typu: str, raw_value: str | None) -> int | None:
-    value = _norm(raw_value)
-    if value is None:
-        return None
-
-    row = conn.execute(
-        """
-        SELECT id
-        FROM slownik_pozycje
-        WHERE lower(kod_typu) = lower(?)
-          AND lower(nazwa_pozycji) = lower(?)
-        LIMIT 1
-        """,
-        (kod_typu, value),
-    ).fetchone()
-    if row is not None:
-        return int(row["id"])
-
-    base_code = _slug_code(value)
-    candidate = base_code
-    suffix = 2
-    while True:
-        exists = conn.execute(
-            """
-            SELECT id
-            FROM slownik_pozycje
-            WHERE lower(kod_typu) = lower(?)
-              AND lower(kod_pozycji) = lower(?)
-            LIMIT 1
-            """,
-            (kod_typu, candidate),
-        ).fetchone()
-        if exists is None:
-            break
-        candidate = f"{base_code}_{suffix}"
-        suffix += 1
-
-    max_row = conn.execute(
-        """
-        SELECT COALESCE(MAX(kolejnosc), 0) AS max_kolejnosc
-        FROM slownik_pozycje
-        WHERE lower(kod_typu) = lower(?)
-        """,
-        (kod_typu,),
-    ).fetchone()
-    next_order = int(max_row["max_kolejnosc"]) + 1
-
-    cursor = conn.execute(
-        """
-        INSERT INTO slownik_pozycje
-        (kod_typu, kod_pozycji, nazwa_pozycji, kolejnosc, aktywny)
-        VALUES (?, ?, ?, ?, 1)
-        """,
-        (kod_typu, candidate, value, next_order),
-    )
-    return int(cursor.lastrowid)
-
-
 def _validate_slownik_item_id(
     conn: Any,
     kod_typu: str | Sequence[str],
@@ -516,6 +601,7 @@ def _validate_slownik_item_id(
             FROM slownik_pozycje
             WHERE id = ?
               AND lower(kod_typu) = lower(?)
+              AND aktywny = 1
             LIMIT 1
             """,
             (slownik_id, kod_typu),
@@ -532,13 +618,21 @@ def _validate_slownik_item_id(
                 FROM slownik_pozycje
                 WHERE id = ?
                   AND lower(kod_typu) IN ({placeholders})
+                  AND aktywny = 1
                 LIMIT 1
                 """,
                 (slownik_id, *normalized),
             ).fetchone()
 
     if row is None:
-        raise HTTPException(status_code=400, detail=f"{field_name} zawiera niepoprawne id")
+        resolved_kod_typu = kod_typu if isinstance(kod_typu, str) else ",".join(str(item) for item in kod_typu)
+        _raise_contract_422(
+            "UNKNOWN_DICTIONARY_ID",
+            f"{field_name} nie wskazuje aktywnej pozycji slownika.",
+            field=field_name,
+            value=slownik_id,
+            kod_typu=str(resolved_kod_typu),
+        )
     return int(row["id"])
 
 
@@ -546,61 +640,49 @@ def _resolve_single_slownik_id(
     conn: Any,
     kod_typu: str | Sequence[str],
     raw_id: int | None,
-    raw_name: str | None,
     id_field_name: str,
+    required: bool,
 ) -> int | None:
     if raw_id is not None:
-        return _validate_slownik_item_id(conn, kod_typu, int(raw_id), id_field_name)
+        try:
+            raw_id = int(raw_id)
+        except (TypeError, ValueError):
+            _raise_contract_422(
+                "INVALID_VALUE",
+                f"{id_field_name} zawiera niepoprawny typ.",
+                field=id_field_name,
+                value=raw_id,
+            )
+        if raw_id <= 0:
+            _raise_contract_422(
+                "INVALID_VALUE",
+                f"{id_field_name} zawiera niepoprawne id.",
+                field=id_field_name,
+                value=raw_id,
+            )
 
-    if isinstance(kod_typu, str):
-        return _resolve_or_create_slownik_item_id(conn, kod_typu, raw_name)
-
-    value = _norm(raw_name)
-    if value is None:
+    if raw_id is None:
+        if required:
+            resolved_kod_typu = kod_typu if isinstance(kod_typu, str) else ",".join(str(item) for item in kod_typu)
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                f"Pole {id_field_name} jest wymagane.",
+                field=id_field_name,
+                value=raw_id,
+                kod_typu=str(resolved_kod_typu),
+            )
         return None
-
-    original = [str(item).strip() for item in kod_typu if str(item).strip()]
-    if not original:
-        return None
-    normalized = [item.lower() for item in original]
-
-    placeholders = ",".join("?" for _ in normalized)
-    existing = conn.execute(
-        f"""
-        SELECT id
-        FROM slownik_pozycje
-        WHERE lower(kod_typu) IN ({placeholders})
-          AND lower(nazwa_pozycji) = lower(?)
-        LIMIT 1
-        """,
-        (*normalized, value),
-    ).fetchone()
-    if existing is not None:
-        return int(existing["id"])
-
-    return _resolve_or_create_slownik_item_id(conn, original[0], raw_name)
+    return _validate_slownik_item_id(conn, kod_typu, int(raw_id), id_field_name)
 
 
 def _resolve_multi_slownik_ids(
     conn: Any,
-    kod_typu: str,
+    kod_typu: str | Sequence[str],
     raw_ids: list[int] | None,
-    raw_names: list[str] | None,
     ids_field_name: str,
-    names_field_name: str,
 ) -> list[int]:
-    if raw_ids is not None:
-        ids = _normalize_int_list(raw_ids, ids_field_name)
-        return [_validate_slownik_item_id(conn, kod_typu, slownik_id, ids_field_name) for slownik_id in ids]
-
-    names = _normalize_text_list(raw_names, names_field_name)
-    resolved: list[int] = []
-    for name in names:
-        slownik_id = _resolve_or_create_slownik_item_id(conn, kod_typu, name)
-        if slownik_id is not None:
-            resolved.append(slownik_id)
-    resolved.sort()
-    return resolved
+    ids = _normalize_int_list(raw_ids, ids_field_name)
+    return [_validate_slownik_item_id(conn, kod_typu, slownik_id, ids_field_name) for slownik_id in ids]
 
 
 def _can_access_inspection_for_risk_exposure(conn: Any, inspection_id: int, operator: dict[str, Any]) -> bool:
@@ -700,8 +782,11 @@ def _sync_multi_values(
     slownik_ids: list[int],
     operator_user_id: int,
 ) -> None:
-    value_type_map: dict[str, tuple[str, str]] = {
-        "NAZWA_PODMIOTU_OBJETEGO_SANKCJA": ("nazwy_podmiotow_sankcje", "risk_exposure_sanction_subjects"),
+    value_type_map: dict[str, tuple[str | Sequence[str], str]] = {
+        "NAZWA_PODMIOTU_OBJETEGO_SANKCJA": (
+            ("nazwy_podmiotow_sankcje", "nazwy_podmiotow"),
+            "risk_exposure_sanction_subjects",
+        ),
         "SANKCJA": ("sankcja", "risk_exposure_sanctions"),
         "PODSTAWA_PRAWNA_SANKCJI": ("podstawa_prawna_sankcji", "risk_exposure_legal_bases"),
         "NARUSZENIA_SKUTKUJACE_SANKCJA": ("naruszenia_skutkujace_sankcja", "risk_exposure_violations"),
@@ -732,15 +817,31 @@ def _sync_multi_values(
 
     if to_insert:
         placeholders = ",".join("?" for _ in to_insert)
-        rows = conn.execute(
-            f"""
-            SELECT id, nazwa_pozycji
-            FROM slownik_pozycje
-            WHERE lower(kod_typu) = lower(?)
-              AND id IN ({placeholders})
-            """,
-            (kod_typu, *to_insert),
-        ).fetchall()
+        if isinstance(kod_typu, str):
+            rows = conn.execute(
+                f"""
+                SELECT id, nazwa_pozycji
+                FROM slownik_pozycje
+                WHERE lower(kod_typu) = lower(?)
+                  AND id IN ({placeholders})
+                """,
+                (kod_typu, *to_insert),
+            ).fetchall()
+        else:
+            normalized = [str(item).strip().lower() for item in kod_typu if str(item).strip()]
+            if not normalized:
+                rows = []
+            else:
+                type_placeholders = ",".join("?" for _ in normalized)
+                rows = conn.execute(
+                    f"""
+                    SELECT id, nazwa_pozycji
+                    FROM slownik_pozycje
+                    WHERE lower(kod_typu) IN ({type_placeholders})
+                      AND id IN ({placeholders})
+                    """,
+                    (*normalized, *to_insert),
+                ).fetchall()
         names_by_id = {int(r["id"]): str(r["nazwa_pozycji"]) for r in rows}
     else:
         names_by_id = {}
@@ -808,7 +909,7 @@ def _base_select_sql() -> str:
                     FROM risk_exposure_sanction_subjects rel
                     JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
                     WHERE rel.risk_exposure_id = r.id
-                    ORDER BY v ASC
+                    ORDER BY rel.slownik_pozycja_id ASC
                 ) x
             ) AS nazwa_podmiotu_objetego_sankcja_list_csv,
             (
@@ -819,7 +920,7 @@ def _base_select_sql() -> str:
                     JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
                     WHERE rel.risk_exposure_id = r.id
                       AND trim(COALESCE(sp.skrot_pozycji, '')) <> ''
-                    ORDER BY v ASC
+                                        ORDER BY rel.slownik_pozycja_id ASC
                 ) x
             ) AS nazwa_podmiotu_objetego_sankcja_list_skrot_csv,
             (
@@ -838,7 +939,7 @@ def _base_select_sql() -> str:
                     FROM risk_exposure_sanctions rel
                     JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
                     WHERE rel.risk_exposure_id = r.id
-                    ORDER BY v ASC
+                    ORDER BY rel.slownik_pozycja_id ASC
                 ) x
             ) AS sankcja_list_csv,
             (
@@ -848,7 +949,7 @@ def _base_select_sql() -> str:
                     FROM risk_exposure_sanctions rel
                     JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
                     WHERE rel.risk_exposure_id = r.id
-                    ORDER BY v ASC
+                    ORDER BY rel.slownik_pozycja_id ASC
                 ) x
             ) AS sankcja_list_skrot_csv,
             (
@@ -867,7 +968,7 @@ def _base_select_sql() -> str:
                     FROM risk_exposure_legal_bases rel
                     JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
                     WHERE rel.risk_exposure_id = r.id
-                    ORDER BY v ASC
+                    ORDER BY rel.slownik_pozycja_id ASC
                 ) x
             ) AS podstawa_prawna_sankcji_list_csv,
             (
@@ -877,7 +978,7 @@ def _base_select_sql() -> str:
                     FROM risk_exposure_legal_bases rel
                     JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
                     WHERE rel.risk_exposure_id = r.id
-                    ORDER BY v ASC
+                    ORDER BY rel.slownik_pozycja_id ASC
                 ) x
             ) AS podstawa_prawna_sankcji_list_skrot_csv,
             (
@@ -896,7 +997,7 @@ def _base_select_sql() -> str:
                     FROM risk_exposure_violations rel
                     JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
                     WHERE rel.risk_exposure_id = r.id
-                    ORDER BY v ASC
+                    ORDER BY rel.slownik_pozycja_id ASC
                 ) x
             ) AS naruszenia_skutkujace_sankcja_list_csv
             ,(
@@ -906,7 +1007,7 @@ def _base_select_sql() -> str:
                     FROM risk_exposure_violations rel
                     JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
                     WHERE rel.risk_exposure_id = r.id
-                    ORDER BY v ASC
+                    ORDER BY rel.slownik_pozycja_id ASC
                 ) x
             ) AS naruszenia_skutkujace_sankcja_list_skrot_csv
         FROM risk_exposure_requests r
@@ -918,7 +1019,69 @@ def _base_select_sql() -> str:
     """
 
 
-def _row_to_payload(row: dict[str, Any], can_edit: bool) -> dict[str, Any]:
+def _load_multi_values_for_payload(conn: Any, risk_exposure_id: int) -> dict[str, list[Any]]:
+    def load_rows(relation_table: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            f"""
+            SELECT rel.slownik_pozycja_id AS slownik_id,
+                   sp.nazwa_pozycji AS nazwa,
+                   sp.skrot_pozycji AS skrot
+            FROM {relation_table} rel
+            JOIN slownik_pozycje sp ON sp.id = rel.slownik_pozycja_id
+            WHERE rel.risk_exposure_id = ?
+            ORDER BY rel.slownik_pozycja_id ASC
+            """,
+            (risk_exposure_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def build_lists(rows: list[dict[str, Any]]) -> tuple[list[int], list[str], list[str]]:
+        ids: list[int] = []
+        names: list[str] = []
+        shorts: list[str] = []
+        seen: set[int] = set()
+        for row in rows:
+            slownik_id = int(row["slownik_id"])
+            if slownik_id in seen:
+                continue
+            seen.add(slownik_id)
+            name = _normalize_entity_text(row.get("nazwa"))
+            short = _normalize_entity_text(row.get("skrot"))
+            if name is None:
+                continue
+            ids.append(slownik_id)
+            names.append(name)
+            shorts.append(short or name)
+        return ids, names, shorts
+
+    sanction_subject_rows = load_rows("risk_exposure_sanction_subjects")
+    sanction_rows = load_rows("risk_exposure_sanctions")
+    legal_base_rows = load_rows("risk_exposure_legal_bases")
+    violation_rows = load_rows("risk_exposure_violations")
+
+    sanction_subject_ids, sanction_subject_names, sanction_subject_shorts = build_lists(sanction_subject_rows)
+    sanction_ids, sanction_names, sanction_shorts = build_lists(sanction_rows)
+    legal_base_ids, legal_base_names, legal_base_shorts = build_lists(legal_base_rows)
+    violation_ids, violation_names, violation_shorts = build_lists(violation_rows)
+
+    return {
+        "nazwaPodmiotuObjetegoSankcjaIds": sanction_subject_ids,
+        "nazwaPodmiotuObjetegoSankcjaList": sanction_subject_names,
+        "nazwaPodmiotuObjetegoSankcjaListSkrot": sanction_subject_shorts,
+        "sankcjaIds": sanction_ids,
+        "sankcjaList": sanction_names,
+        "sankcjaListSkrot": sanction_shorts,
+        "podstawaPrawnaSankcjiIds": legal_base_ids,
+        "podstawaPrawnaSankcjiList": legal_base_names,
+        "podstawaPrawnaSankcjiListSkrot": legal_base_shorts,
+        "naruszeniaSkutkujaceSankcjaIds": violation_ids,
+        "naruszeniaSkutkujaceSankcjaList": violation_names,
+        "naruszeniaSkutkujaceSankcjaListSkrot": violation_shorts,
+    }
+
+
+def _row_to_payload(conn: Any, row: dict[str, Any], can_edit: bool) -> dict[str, Any]:
+    multi = _load_multi_values_for_payload(conn, int(row["id"]))
     return {
         "id": int(row["id"]),
         "lp": int(row["lp"]),
@@ -935,35 +1098,27 @@ def _row_to_payload(row: dict[str, Any], can_edit: bool) -> dict[str, Any]:
         "nazwaPodmiotuObjetegoInspekcja": row.get("nazwa_podmiotu_objetego_inspekcja"),
         "nazwaPodmiotuObjetegoInspekcjaSkrocona": row.get("nazwa_podmiotu_objetego_inspekcja_skrot"),
         "nazwaPodmiotuObjetegoInspekcjaSkrot": row.get("nazwa_podmiotu_objetego_inspekcja_skrot"),
-        "nazwaPodmiotuObjetegoSankcjaIds": _parse_int_csv(row.get("nazwa_podmiotu_objetego_sankcja_ids_csv")),
-        "nazwaPodmiotuObjetegoSankcjaList": _parse_csv(row.get("nazwa_podmiotu_objetego_sankcja_list_csv")),
-        "nazwaPodmiotuObjetegoSankcjaListSkrocona": _parse_csv(
-            row.get("nazwa_podmiotu_objetego_sankcja_list_skrot_csv")
-        ),
-        "nazwaPodmiotuObjetegoSankcjaListSkrot": _parse_csv(
-            row.get("nazwa_podmiotu_objetego_sankcja_list_skrot_csv")
-        ),
+        "nazwaPodmiotuObjetegoSankcjaIds": multi["nazwaPodmiotuObjetegoSankcjaIds"],
+        "nazwaPodmiotuObjetegoSankcjaList": multi["nazwaPodmiotuObjetegoSankcjaList"],
+        "nazwaPodmiotuObjetegoSankcjaListSkrocona": multi["nazwaPodmiotuObjetegoSankcjaListSkrot"],
+        "nazwaPodmiotuObjetegoSankcjaListSkrot": multi["nazwaPodmiotuObjetegoSankcjaListSkrot"],
         "dataWniosku": row.get("data_wniosku"),
         "wniosekDoId": int(row["wniosek_do_id"]) if row.get("wniosek_do_id") is not None else None,
         "wniosekDo": row.get("wniosek_do"),
         "wniosekDoSkrocona": row.get("wniosek_do_skrot"),
         "wniosekDoSkrot": row.get("wniosek_do_skrot"),
-        "sankcjaIds": _parse_int_csv(row.get("sankcja_ids_csv")),
-        "sankcjaList": _parse_csv(row.get("sankcja_list_csv")),
-        "sankcjaListSkrocona": _parse_csv(row.get("sankcja_list_skrot_csv")),
-        "sankcjaListSkrot": _parse_csv(row.get("sankcja_list_skrot_csv")),
-        "podstawaPrawnaSankcjiIds": _parse_int_csv(row.get("podstawa_prawna_sankcji_ids_csv")),
-        "podstawaPrawnaSankcjiList": _parse_csv(row.get("podstawa_prawna_sankcji_list_csv")),
-        "podstawaPrawnaSankcjiListSkrocona": _parse_csv(row.get("podstawa_prawna_sankcji_list_skrot_csv")),
-        "podstawaPrawnaSankcjiListSkrot": _parse_csv(row.get("podstawa_prawna_sankcji_list_skrot_csv")),
-        "naruszeniaSkutkujaceSankcjaIds": _parse_int_csv(row.get("naruszenia_skutkujace_sankcja_ids_csv")),
-        "naruszeniaSkutkujaceSankcjaList": _parse_csv(row.get("naruszenia_skutkujace_sankcja_list_csv")),
-        "naruszeniaSkutkujaceSankcjaListSkrocona": _parse_csv(
-            row.get("naruszenia_skutkujace_sankcja_list_skrot_csv")
-        ),
-        "naruszeniaSkutkujaceSankcjaListSkrot": _parse_csv(
-            row.get("naruszenia_skutkujace_sankcja_list_skrot_csv")
-        ),
+        "sankcjaIds": multi["sankcjaIds"],
+        "sankcjaList": multi["sankcjaList"],
+        "sankcjaListSkrocona": multi["sankcjaListSkrot"],
+        "sankcjaListSkrot": multi["sankcjaListSkrot"],
+        "podstawaPrawnaSankcjiIds": multi["podstawaPrawnaSankcjiIds"],
+        "podstawaPrawnaSankcjiList": multi["podstawaPrawnaSankcjiList"],
+        "podstawaPrawnaSankcjiListSkrocona": multi["podstawaPrawnaSankcjiListSkrot"],
+        "podstawaPrawnaSankcjiListSkrot": multi["podstawaPrawnaSankcjiListSkrot"],
+        "naruszeniaSkutkujaceSankcjaIds": multi["naruszeniaSkutkujaceSankcjaIds"],
+        "naruszeniaSkutkujaceSankcjaList": multi["naruszeniaSkutkujaceSankcjaList"],
+        "naruszeniaSkutkujaceSankcjaListSkrocona": multi["naruszeniaSkutkujaceSankcjaListSkrot"],
+        "naruszeniaSkutkujaceSankcjaListSkrot": multi["naruszeniaSkutkujaceSankcjaListSkrot"],
         "czyMamyInformacjeOWszczeciuPostepowaniaId": (
             int(row["czy_mamy_informacje_o_wszczeciu_postepowania_id"])
             if row.get("czy_mamy_informacje_o_wszczeciu_postepowania_id") is not None
@@ -989,8 +1144,8 @@ def _row_to_payload(row: dict[str, Any], can_edit: bool) -> dict[str, Any]:
 @router.get("/api/sanction-requests", response_model=RiskExposureListResponse)
 @router.get("/api/risk-exposure", response_model=RiskExposureListResponse)
 def list_risk_exposure(
-    sortBy: str = Query(default="lp"),
-    sortOrder: str = Query(default="asc"),
+    sortBy: str = Query(default="dataWniosku"),
+    sortOrder: str = Query(default="desc"),
     x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
     allowed_sort_columns = {
@@ -1024,7 +1179,7 @@ def list_risk_exposure(
                 int(row_dict["utworzono_przez_user_id"]) if row_dict.get("utworzono_przez_user_id") is not None else None
             )
             can_edit = _can_edit_risk_exposure(conn, inspection_id, operator, created_by)
-            items.append(_row_to_payload(row_dict, can_edit=can_edit))
+            items.append(_row_to_payload(conn, row_dict, can_edit=can_edit))
 
     return {"items": items, "total": len(items)}
 
@@ -1208,6 +1363,105 @@ def list_sanction_request_entity_options(
     return items
 
 
+@router.post(
+    "/api/sanction-requests/translate-legacy-values",
+    response_model=RiskExposureLegacyTranslationResponse,
+)
+@router.post(
+    "/api/risk-exposure/translate-legacy-values",
+    response_model=RiskExposureLegacyTranslationResponse,
+)
+def translate_legacy_risk_exposure_values(
+    payload: RiskExposureLegacyTranslationRequest,
+    x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
+) -> dict[str, Any]:
+    with get_connection() as conn:
+        operator = _resolve_operator(conn, x_operator_login)
+        require_permission(conn, operator, PERMISSION_RISK_EXPOSURE_READ)
+
+        unresolved: dict[str, list[str]] = {}
+
+        nazwa_objetego_id, unresolved_nazwa_objetego = _lookup_slownik_id_by_name(
+            conn,
+            "nazwy_podmiotow",
+            payload.nazwaPodmiotuObjetegoInspekcja,
+        )
+        if unresolved_nazwa_objetego is not None:
+            unresolved["nazwaPodmiotuObjetegoInspekcja"] = [unresolved_nazwa_objetego]
+
+        nazwy_sankcja_ids, unresolved_nazwy_sankcja = _lookup_slownik_ids_by_names(
+            conn,
+            ("nazwy_podmiotow_sankcje", "nazwy_podmiotow"),
+            payload.nazwaPodmiotuObjetegoSankcjaList,
+            "nazwaPodmiotuObjetegoSankcjaList",
+        )
+        if unresolved_nazwy_sankcja:
+            unresolved["nazwaPodmiotuObjetegoSankcjaList"] = unresolved_nazwy_sankcja
+
+        wniosek_do_id, unresolved_wniosek_do = _lookup_slownik_id_by_name(
+            conn,
+            "department",
+            payload.wniosekDo,
+        )
+        if unresolved_wniosek_do is not None:
+            unresolved["wniosekDo"] = [unresolved_wniosek_do]
+
+        sankcja_ids, unresolved_sankcje = _lookup_slownik_ids_by_names(
+            conn,
+            "sankcja",
+            payload.sankcjaList,
+            "sankcjaList",
+        )
+        if unresolved_sankcje:
+            unresolved["sankcjaList"] = unresolved_sankcje
+
+        podstawa_ids, unresolved_podstawy = _lookup_slownik_ids_by_names(
+            conn,
+            "podstawa_prawna_sankcji",
+            payload.podstawaPrawnaSankcjiList,
+            "podstawaPrawnaSankcjiList",
+        )
+        if unresolved_podstawy:
+            unresolved["podstawaPrawnaSankcjiList"] = unresolved_podstawy
+
+        naruszenia_ids, unresolved_naruszenia = _lookup_slownik_ids_by_names(
+            conn,
+            "naruszenia_skutkujace_sankcja",
+            payload.naruszeniaSkutkujaceSankcjaList,
+            "naruszeniaSkutkujaceSankcjaList",
+        )
+        if unresolved_naruszenia:
+            unresolved["naruszeniaSkutkujaceSankcjaList"] = unresolved_naruszenia
+
+        wszczecie_id, unresolved_wszczecie = _lookup_slownik_id_by_name(
+            conn,
+            "informacja_o_wszczeciu_postepowania_sankcyjnego",
+            payload.czyMamyInformacjeOWszczeciuPostepowania,
+        )
+        if unresolved_wszczecie is not None:
+            unresolved["czyMamyInformacjeOWszczeciuPostepowania"] = [unresolved_wszczecie]
+
+        rozstrzygniecie_id, unresolved_rozstrzygniecie = _lookup_slownik_id_by_name(
+            conn,
+            ROZSTRZYGNIECIE_WNIOSKU_KOD_TYPU,
+            payload.rozstrzygniecie,
+        )
+        if unresolved_rozstrzygniecie is not None:
+            unresolved["rozstrzygniecie"] = [unresolved_rozstrzygniecie]
+
+        return {
+            "nazwaPodmiotuObjetegoInspekcjaId": nazwa_objetego_id,
+            "nazwaPodmiotuObjetegoSankcjaIds": nazwy_sankcja_ids,
+            "wniosekDoId": wniosek_do_id,
+            "sankcjaIds": sankcja_ids,
+            "podstawaPrawnaSankcjiIds": podstawa_ids,
+            "naruszeniaSkutkujaceSankcjaIds": naruszenia_ids,
+            "czyMamyInformacjeOWszczeciuPostepowaniaId": wszczecie_id,
+            "rozstrzygniecieId": rozstrzygniecie_id,
+            "unresolved": unresolved,
+        }
+
+
 @router.get("/api/sanction-requests/{risk_exposure_id}", response_model=RiskExposureRead)
 @router.get("/api/risk-exposure/{risk_exposure_id}", response_model=RiskExposureRead)
 def get_risk_exposure(
@@ -1226,7 +1480,7 @@ def get_risk_exposure(
         created_by = int(row_dict["utworzono_przez_user_id"]) if row_dict.get("utworzono_przez_user_id") is not None else None
         can_edit = _can_edit_risk_exposure(conn, inspection_id, operator, created_by)
 
-    return _row_to_payload(row_dict, can_edit=can_edit)
+    return _row_to_payload(conn, row_dict, can_edit=can_edit)
 
 
 @router.post("/api/sanction-requests", response_model=RiskExposureRead, status_code=201)
@@ -1243,35 +1497,27 @@ def create_risk_exposure(
 
         nazwa_sankcja_ids = _resolve_multi_slownik_ids(
             conn,
-            "nazwy_podmiotow_sankcje",
+            ("nazwy_podmiotow_sankcje", "nazwy_podmiotow"),
             payload.nazwaPodmiotuObjetegoSankcjaIds,
-            payload.nazwaPodmiotuObjetegoSankcjaList,
             "nazwaPodmiotuObjetegoSankcjaIds",
-            "nazwaPodmiotuObjetegoSankcjaList",
         )
         sankcja_ids = _resolve_multi_slownik_ids(
             conn,
             "sankcja",
             payload.sankcjaIds,
-            payload.sankcjaList,
             "sankcjaIds",
-            "sankcjaList",
         )
         podstawa_ids = _resolve_multi_slownik_ids(
             conn,
             "podstawa_prawna_sankcji",
             payload.podstawaPrawnaSankcjiIds,
-            payload.podstawaPrawnaSankcjiList,
             "podstawaPrawnaSankcjiIds",
-            "podstawaPrawnaSankcjiList",
         )
         naruszenia_ids = _resolve_multi_slownik_ids(
             conn,
             "naruszenia_skutkujace_sankcja",
             payload.naruszeniaSkutkujaceSankcjaIds,
-            payload.naruszeniaSkutkujaceSankcjaList,
             "naruszeniaSkutkujaceSankcjaIds",
-            "naruszeniaSkutkujaceSankcjaList",
         )
 
         resolved_inspection_id: int | None = None
@@ -1291,30 +1537,30 @@ def create_risk_exposure(
                 conn,
                 "nazwy_podmiotow",
                 payload.nazwaPodmiotuObjetegoInspekcjaId,
-                payload.nazwaPodmiotuObjetegoInspekcja,
                 "nazwaPodmiotuObjetegoInspekcjaId",
+                required=True,
             )
 
         wniosek_do_id = _resolve_single_slownik_id(
             conn,
             "department",
             payload.wniosekDoId,
-            payload.wniosekDo,
             "wniosekDoId",
+            required=False,
         )
         wszczecie_id = _resolve_single_slownik_id(
             conn,
             "informacja_o_wszczeciu_postepowania_sankcyjnego",
             payload.czyMamyInformacjeOWszczeciuPostepowaniaId,
-            payload.czyMamyInformacjeOWszczeciuPostepowania,
             "czyMamyInformacjeOWszczeciuPostepowaniaId",
+            required=False,
         )
         rozstrzygniecie_id = _resolve_single_slownik_id(
             conn,
             ROZSTRZYGNIECIE_WNIOSKU_KOD_TYPU,
             payload.rozstrzygniecieId,
-            payload.rozstrzygniecie,
             "rozstrzygniecieId",
+            required=False,
         )
 
         cursor = conn.execute(
@@ -1362,7 +1608,7 @@ def create_risk_exposure(
         if row is None:
             raise HTTPException(status_code=500, detail="Failed to fetch created risk exposure request")
 
-        created_payload = _row_to_payload(dict(row), can_edit=True)
+        created_payload = _row_to_payload(conn, dict(row), can_edit=True)
         changes = build_create_changes(
             [
                 ("Kod sankcji", created_payload.get("kodSankcji")),
@@ -1387,7 +1633,7 @@ def create_risk_exposure(
     if row is None:
         raise HTTPException(status_code=500, detail="Failed to fetch created risk exposure request")
 
-    return _row_to_payload(dict(row), can_edit=True)
+    return _row_to_payload(conn, dict(row), can_edit=True)
 
 
 @router.put("/api/sanction-requests/{risk_exposure_id}", response_model=RiskExposureRead)
@@ -1446,6 +1692,7 @@ def update_risk_exposure(
         violations_before = _fetch_mv_before("risk_exposure_violations")
 
         next_inspection_id = current_inspection_id
+        next_subject_id = int(current_dict["nazwa_podmiotu_objetego_inspekcja_id"]) if current_dict.get("nazwa_podmiotu_objetego_inspekcja_id") is not None else None
         set_parts: list[str] = []
         values: list[Any] = []
         row_touched = False
@@ -1476,53 +1723,62 @@ def update_risk_exposure(
         if next_inspection_id is not None:
             # Pole pochodne z inspekcji.
             set_parts.append("nazwa_podmiotu_objetego_inspekcja_id = ?")
-            values.append(_resolve_inspection_subject_id(conn, next_inspection_id))
-        elif "nazwaPodmiotuObjetegoInspekcjaId" in fields or "nazwaPodmiotuObjetegoInspekcja" in fields:
+            next_subject_id = _resolve_inspection_subject_id(conn, next_inspection_id)
+            values.append(next_subject_id)
+        elif "nazwaPodmiotuObjetegoInspekcjaId" in fields:
             set_parts.append("nazwa_podmiotu_objetego_inspekcja_id = ?")
-            values.append(
-                _resolve_single_slownik_id(
-                    conn,
-                    "nazwy_podmiotow",
-                    fields.get("nazwaPodmiotuObjetegoInspekcjaId"),
-                    fields.get("nazwaPodmiotuObjetegoInspekcja"),
-                    "nazwaPodmiotuObjetegoInspekcjaId",
-                )
+            next_subject_id = _resolve_single_slownik_id(
+                conn,
+                "nazwy_podmiotow",
+                fields.get("nazwaPodmiotuObjetegoInspekcjaId"),
+                "nazwaPodmiotuObjetegoInspekcjaId",
+                required=True,
+            )
+            values.append(next_subject_id)
+
+        if next_inspection_id is None and next_subject_id is None:
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                "Pole nazwaPodmiotuObjetegoInspekcjaId jest wymagane gdy inspectionId jest null.",
+                field="nazwaPodmiotuObjetegoInspekcjaId",
+                value=None,
+                kod_typu="nazwy_podmiotow",
             )
 
         if "dataWniosku" in fields:
             set_parts.append("data_wniosku = ?")
             values.append(_validate_optional_iso_date(fields["dataWniosku"], "dataWniosku"))
-        if "wniosekDoId" in fields or "wniosekDo" in fields:
+        if "wniosekDoId" in fields:
             set_parts.append("wniosek_do_id = ?")
             values.append(
                 _resolve_single_slownik_id(
                     conn,
                     "department",
                     fields.get("wniosekDoId"),
-                    fields.get("wniosekDo"),
                     "wniosekDoId",
+                    required=False,
                 )
             )
-        if "czyMamyInformacjeOWszczeciuPostepowaniaId" in fields or "czyMamyInformacjeOWszczeciuPostepowania" in fields:
+        if "czyMamyInformacjeOWszczeciuPostepowaniaId" in fields:
             set_parts.append("czy_mamy_informacje_o_wszczeciu_postepowania_id = ?")
             values.append(
                 _resolve_single_slownik_id(
                     conn,
                     "informacja_o_wszczeciu_postepowania_sankcyjnego",
                     fields.get("czyMamyInformacjeOWszczeciuPostepowaniaId"),
-                    fields.get("czyMamyInformacjeOWszczeciuPostepowania"),
                     "czyMamyInformacjeOWszczeciuPostepowaniaId",
+                    required=False,
                 )
             )
-        if "rozstrzygniecieId" in fields or "rozstrzygniecie" in fields:
+        if "rozstrzygniecieId" in fields:
             set_parts.append("rozstrzygniecie_id = ?")
             values.append(
                 _resolve_single_slownik_id(
                     conn,
                     ROZSTRZYGNIECIE_WNIOSKU_KOD_TYPU,
                     fields.get("rozstrzygniecieId"),
-                    fields.get("rozstrzygniecie"),
                     "rozstrzygniecieId",
+                    required=False,
                 )
             )
         if "komentarz" in fields:
@@ -1541,22 +1797,20 @@ def update_risk_exposure(
             )
             row_touched = True
 
-        if "nazwaPodmiotuObjetegoSankcjaIds" in fields or "nazwaPodmiotuObjetegoSankcjaList" in fields:
+        if "nazwaPodmiotuObjetegoSankcjaIds" in fields:
             _sync_multi_values(
                 conn,
                 risk_exposure_id,
                 "NAZWA_PODMIOTU_OBJETEGO_SANKCJA",
                 _resolve_multi_slownik_ids(
                     conn,
-                    "nazwy_podmiotow_sankcje",
+                    ("nazwy_podmiotow_sankcje", "nazwy_podmiotow"),
                     fields.get("nazwaPodmiotuObjetegoSankcjaIds"),
-                    fields.get("nazwaPodmiotuObjetegoSankcjaList"),
                     "nazwaPodmiotuObjetegoSankcjaIds",
-                    "nazwaPodmiotuObjetegoSankcjaList",
                 ),
                 operator["id"],
             )
-        if "sankcjaIds" in fields or "sankcjaList" in fields:
+        if "sankcjaIds" in fields:
             _sync_multi_values(
                 conn,
                 risk_exposure_id,
@@ -1565,13 +1819,11 @@ def update_risk_exposure(
                     conn,
                     "sankcja",
                     fields.get("sankcjaIds"),
-                    fields.get("sankcjaList"),
                     "sankcjaIds",
-                    "sankcjaList",
                 ),
                 operator["id"],
             )
-        if "podstawaPrawnaSankcjiIds" in fields or "podstawaPrawnaSankcjiList" in fields:
+        if "podstawaPrawnaSankcjiIds" in fields:
             _sync_multi_values(
                 conn,
                 risk_exposure_id,
@@ -1580,13 +1832,11 @@ def update_risk_exposure(
                     conn,
                     "podstawa_prawna_sankcji",
                     fields.get("podstawaPrawnaSankcjiIds"),
-                    fields.get("podstawaPrawnaSankcjiList"),
                     "podstawaPrawnaSankcjiIds",
-                    "podstawaPrawnaSankcjiList",
                 ),
                 operator["id"],
             )
-        if "naruszeniaSkutkujaceSankcjaIds" in fields or "naruszeniaSkutkujaceSankcjaList" in fields:
+        if "naruszeniaSkutkujaceSankcjaIds" in fields:
             _sync_multi_values(
                 conn,
                 risk_exposure_id,
@@ -1595,22 +1845,16 @@ def update_risk_exposure(
                     conn,
                     "naruszenia_skutkujace_sankcja",
                     fields.get("naruszeniaSkutkujaceSankcjaIds"),
-                    fields.get("naruszeniaSkutkujaceSankcjaList"),
                     "naruszeniaSkutkujaceSankcjaIds",
-                    "naruszeniaSkutkujaceSankcjaList",
                 ),
                 operator["id"],
             )
 
         if not row_touched and (
             "nazwaPodmiotuObjetegoSankcjaIds" in fields
-            or "nazwaPodmiotuObjetegoSankcjaList" in fields
             or "sankcjaIds" in fields
-            or "sankcjaList" in fields
             or "podstawaPrawnaSankcjiIds" in fields
-            or "podstawaPrawnaSankcjiList" in fields
             or "naruszeniaSkutkujaceSankcjaIds" in fields
-            or "naruszeniaSkutkujaceSankcjaList" in fields
         ):
             conn.execute(
                 "UPDATE risk_exposure_requests SET zaktualizowano_przez_user_id = ?, zaktualizowano_o = ? WHERE id = ?",
@@ -1642,7 +1886,11 @@ def update_risk_exposure(
     if row is None:
         raise HTTPException(status_code=404, detail="Risk exposure request not found")
 
-    return _row_to_payload(dict(row), can_edit=True)
+    with get_connection() as conn:
+        fetched_row = conn.execute(_base_select_sql() + " WHERE r.id = ? LIMIT 1", (risk_exposure_id,)).fetchone()
+        if fetched_row is None:
+            raise HTTPException(status_code=404, detail="Risk exposure request not found")
+        return _row_to_payload(conn, dict(fetched_row), can_edit=True)
 
 
 @router.delete("/api/sanction-requests/{risk_exposure_id}")

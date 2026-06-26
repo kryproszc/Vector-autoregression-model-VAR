@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
 import os
 import re
 import unicodedata
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.audit import (
     AKCJA_CREATE, AKCJA_DELETE, AKCJA_UPDATE,
@@ -21,6 +22,7 @@ from app.permissions import PERMISSION_INSPECTIONS_READ, require_permission, req
 from app.record_locks import assert_expected_updated_at, assert_lock_for_save, now_rfc3339_utc_ms
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _ALLOWED_INSPECTION_TYPE_BY_NORMALIZED: dict[str, tuple[str, str, int]] = {
     "kontrola": ("Kontrola", "KONTROLA", 1),
@@ -34,6 +36,36 @@ _VIOLATION_RECOMMENDATIONS_REQUIRED_MISSING_ID = 1001
 _VIOLATION_RECOMMENDATIONS_FORBIDDEN_PRESENT_ID = 1002
 _VIOLATION_SANCTIONS_REQUIRED_MISSING_ID = 1003
 _VIOLATION_SANCTIONS_FORBIDDEN_PRESENT_ID = 1004
+_SCOPE_LIST_SEPARATOR = "\x1f"
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+_INSPECTIONS_LEGACY_SCOPE_TEXT_SPLIT_ENABLED = _env_truthy(
+    "INSPECTIONS_LEGACY_SCOPE_TEXT_SPLIT_ENABLED",
+    "1",
+)
+
+
+def _warn_legacy_scope_text_usage(
+    *,
+    path: str,
+    operator_login: str | None,
+    inspection_id: int | None,
+) -> None:
+    logger.warning(
+        "Deprecated payload field 'zakresInspekcji' used on %s; "
+        "prefer 'zakresInspekcjiIds' or 'zakresInspekcjiList'. "
+        "operator=%r inspection_id=%r",
+        path,
+        operator_login,
+        inspection_id,
+    )
 
 
 def _parse_status_codes_env(name: str) -> set[str]:
@@ -112,18 +144,29 @@ _INSPECTION_STATUS_RELATION_RULES = _parse_status_relation_rules_env(
 
 
 class InspectionStructureCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     nazwaPodmiotu: str
+    typInspekcjiId: int | None = None
+    typInspekcjiKodPozycji: str | None = None
     typInspekcji: str | None = None
     zakresInspekcji: str | None = None
+    zakresInspekcjiList: list[str] | None = None
     zakresInspekcjiIds: list[int] | None = None
     poczatekInspekcji: str
     koniecInspekcji: str
     osobaKierujacaUserId: int | None = None
     teamMemberUserIds: list[int] | None = None
+    inspectionTeamIds: list[int] | None = None
+    inspection_team_ids: list[int] | None = None
     forceOperatorAsLeader: bool = False
     osobaKierujaca: str | None = None
     skladZespolu: str | None = None
+    rynekId: int | None = None
+    rynekKodPozycji: str | None = None
     rynek: str | None = None
+    rodzajPodmiotuId: int | None = None
+    rodzajPodmiotuKodPozycji: str | None = None
     rodzajPodmiotu: str | None = None
     aspektKonsumencki: str | None = None
     dataProtokolu: str | None = None
@@ -146,26 +189,39 @@ class InspectionStructureCreate(BaseModel):
     dataZalecenList: list[str] | None = None
     dataAkceptacjiNoty: str | None = None
     dataZalecen: str | None = None
+    statusId: int | None = None
+    statusKodPozycji: str | None = None
     status: str | None = None
     komentarz: str | None = None
     szczegolyDotyczaceZakresu: str | None = None
 
 
 class InspectionStructureUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     lockToken: str | None = None
     expectedUpdatedAt: str | None = None
     nazwaPodmiotu: str | None = None
+    typInspekcjiId: int | None = None
+    typInspekcjiKodPozycji: str | None = None
     typInspekcji: str | None = None
     zakresInspekcji: str | None = None
+    zakresInspekcjiList: list[str] | None = None
     zakresInspekcjiIds: list[int] | None = None
     poczatekInspekcji: str | None = None
     koniecInspekcji: str | None = None
     osobaKierujacaUserId: int | None = None
     teamMemberUserIds: list[int] | None = None
+    inspectionTeamIds: list[int] | None = None
+    inspection_team_ids: list[int] | None = None
     forceOperatorAsLeader: bool = False
     osobaKierujaca: str | None = None
     skladZespolu: str | None = None
+    rynekId: int | None = None
+    rynekKodPozycji: str | None = None
     rynek: str | None = None
+    rodzajPodmiotuId: int | None = None
+    rodzajPodmiotuKodPozycji: str | None = None
     rodzajPodmiotu: str | None = None
     aspektKonsumencki: str | None = None
     dataProtokolu: str | None = None
@@ -188,6 +244,8 @@ class InspectionStructureUpdate(BaseModel):
     dataZalecenList: list[str] | None = None
     dataAkceptacjiNoty: str | None = None
     dataZalecen: str | None = None
+    statusId: int | None = None
+    statusKodPozycji: str | None = None
     status: str | None = None
     komentarz: str | None = None
     szczegolyDotyczaceZakresu: str | None = None
@@ -199,18 +257,28 @@ class InspectionStructureRead(BaseModel):
     canEdit: bool
     nazwaPodmiotu: str
     nazwaPodmiotuSkrocona: str | None = None
+    typInspekcjiId: int | None = None
+    typInspekcjiKodPozycji: str | None = None
     typInspekcji: str | None = None
     typInspekcjiSkrocona: str | None = None
     zakresInspekcji: str | None = None
+    zakresInspekcjiList: list[str]
     zakresInspekcjiSkrocona: str | None = None
     zakresInspekcjiIds: list[int]
     poczatekInspekcji: str
     koniecInspekcji: str
     osobaKierujacaUserId: int | None = None
     teamMemberUserIds: list[int]
+    inspectionTeamIds: list[int]
+    inspection_team_ids: list[int]
+    inspectionTeamsList: list[str]
     osobaKierujaca: str
     skladZespolu: str
+    rynekId: int | None = None
+    rynekKodPozycji: str | None = None
     rynek: str | None = None
+    rodzajPodmiotuId: int | None = None
+    rodzajPodmiotuKodPozycji: str | None = None
     rodzajPodmiotu: str | None = None
     rodzajPodmiotuSkrocona: str | None = None
     aspektKonsumencki: str | None = None
@@ -234,6 +302,8 @@ class InspectionStructureRead(BaseModel):
     dataZalecenList: list[str]
     dataAkceptacjiNoty: str | None = None
     dataZalecen: str | None = None
+    statusId: int | None = None
+    statusKodPozycji: str | None = None
     status: str | None = None
     statusSkrocona: str | None = None
     komentarz: str | None = None
@@ -259,6 +329,13 @@ class InspectionPeopleOption(BaseModel):
     teamId: int | None = None
     teamName: str | None = None
     accountType: str | None = None
+
+
+class InspectionTeamOption(BaseModel):
+    id: int
+    code: str
+    name: str
+    isActive: bool
 
 
 def _norm(value: str | None) -> str | None:
@@ -341,6 +418,316 @@ def _resolve_slownik_item_id(conn: Any, kod_typu: str, raw_value: str | None) ->
         (kod_typu, code, value, next_order),
     )
     return int(cursor.lastrowid)
+
+
+def _normalize_optional_code(raw_value: str | None) -> str | None:
+    value = _norm(raw_value)
+    if value is None or value.lower() == "brak":
+        return None
+    return value.upper()
+
+
+def _resolve_dictionary_row_by_id(conn: Any, kod_typu: str, item_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, kod_pozycji, nazwa_pozycji, aktywny
+        FROM slownik_pozycje
+        WHERE lower(kod_typu) = lower(?) AND id = ?
+        LIMIT 1
+        """,
+        (kod_typu, int(item_id)),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def _resolve_dictionary_row_by_code(conn: Any, kod_typu: str, code_value: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, kod_pozycji, nazwa_pozycji, aktywny
+        FROM slownik_pozycje
+        WHERE lower(kod_typu) = lower(?) AND lower(kod_pozycji) = lower(?)
+        LIMIT 1
+        """,
+        (kod_typu, code_value),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def _resolve_dictionary_row_by_name(conn: Any, kod_typu: str, name_value: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, kod_pozycji, nazwa_pozycji, aktywny
+        FROM slownik_pozycje
+        WHERE lower(kod_typu) = lower(?) AND lower(nazwa_pozycji) = lower(?)
+        LIMIT 1
+        """,
+        (kod_typu, name_value),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def _raise_dictionary_422(code: str, message: str, *, field_base: str, kod_typu: str) -> None:
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": code,
+            "message": message,
+            "field": field_base,
+            "kodTypu": kod_typu,
+        },
+    )
+
+
+def _raise_contract_422(
+    code: str,
+    message: str,
+    *,
+    field: str,
+    value: Any = None,
+    kod_typu: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "field": field,
+        "value": value,
+    }
+    if kod_typu is not None:
+        payload["kodTypu"] = kod_typu
+    raise HTTPException(status_code=422, detail=payload)
+
+
+def _resolve_dictionary_id_strict(
+    conn: Any,
+    *,
+    kod_typu: str,
+    field_base: str,
+    id_value: int | None,
+    code_value: str | None,
+    name_value: str | None,
+    required: bool,
+) -> int | None:
+    normalized_code = _normalize_optional_code(code_value)
+    normalized_name = _norm(name_value)
+    has_legacy_text = bool(normalized_code) or (normalized_name is not None and normalized_name.lower() != "brak")
+
+    if id_value is None:
+        if has_legacy_text:
+            _raise_contract_422(
+                "LEGACY_TEXT_ONLY_VALUE",
+                f"Pole {field_base}Id jest wymagane. Wartosci tekstowe/kodowe nie sa akceptowane.",
+                field=f"{field_base}Id",
+                value=normalized_code or normalized_name,
+                kod_typu=kod_typu,
+            )
+        if required:
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                f"Pole {field_base}Id jest wymagane.",
+                field=f"{field_base}Id",
+                value=id_value,
+                kod_typu=kod_typu,
+            )
+        return None
+
+    row = _resolve_dictionary_row_by_id(conn, kod_typu, int(id_value))
+    if row is None or int(row.get("aktywny") or 0) != 1:
+        _raise_contract_422(
+            "UNKNOWN_DICTIONARY_ID",
+            f"{field_base}Id nie wskazuje aktywnej pozycji slownika.",
+            field=f"{field_base}Id",
+            value=id_value,
+            kod_typu=kod_typu,
+        )
+    return int(row["id"])
+
+
+def _resolve_scope_ids_strict(
+    conn: Any,
+    *,
+    scope_ids: list[int] | None,
+    scope_list: list[str] | None,
+    scope_text: str | None,
+    required: bool,
+) -> list[int]:
+    if scope_ids is None:
+        if scope_list is not None or _norm(scope_text) is not None:
+            _raise_contract_422(
+                "LEGACY_TEXT_ONLY_VALUE",
+                "Pole zakresInspekcjiIds jest wymagane. Pola tekstowe zakresu nie sa akceptowane.",
+                field="zakresInspekcjiIds",
+                value=scope_list if scope_list is not None else scope_text,
+                kod_typu="zakresy_inspekcji",
+            )
+        if required:
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                "Pole zakresInspekcjiIds jest wymagane.",
+                field="zakresInspekcjiIds",
+                value=scope_ids,
+                kod_typu="zakresy_inspekcji",
+            )
+        return []
+
+    if scope_list is not None or _norm(scope_text) is not None:
+        _raise_contract_422(
+            "LEGACY_TEXT_ONLY_VALUE",
+            "Dozwolone jest tylko pole zakresInspekcjiIds.",
+            field="zakresInspekcjiIds",
+            value=scope_list if scope_list is not None else scope_text,
+            kod_typu="zakresy_inspekcji",
+        )
+    return _validate_scope_ids(conn, scope_ids)
+
+
+def _resolve_dictionary_id_priority(
+    conn: Any,
+    *,
+    kod_typu: str,
+    field_base: str,
+    id_value: int | None,
+    code_value: str | None,
+    name_value: str | None,
+    required: bool = False,
+    allow_name_autocreate: bool = False,
+) -> int | None:
+    candidate_ids: list[int] = []
+
+    if id_value is not None:
+        row = _resolve_dictionary_row_by_id(conn, kod_typu, int(id_value))
+        if row is None:
+            _raise_dictionary_422(
+                "DICTIONARY_VALUE_NOT_FOUND",
+                f"{field_base}Id wskazuje nieistniejaca pozycje slownika.",
+                field_base=field_base,
+                kod_typu=kod_typu,
+            )
+        if int(row.get("aktywny") or 0) != 1:
+            _raise_dictionary_422(
+                "DICTIONARY_VALUE_NOT_ACTIVE",
+                f"{field_base}Id wskazuje nieaktywna pozycje slownika.",
+                field_base=field_base,
+                kod_typu=kod_typu,
+            )
+        candidate_ids.append(int(row["id"]))
+
+    normalized_code = _normalize_optional_code(code_value)
+    if normalized_code is not None:
+        row = _resolve_dictionary_row_by_code(conn, kod_typu, normalized_code)
+        if row is None:
+            _raise_dictionary_422(
+                "DICTIONARY_VALUE_NOT_FOUND",
+                f"{field_base}KodPozycji nie wskazuje pozycji slownika.",
+                field_base=field_base,
+                kod_typu=kod_typu,
+            )
+        if int(row.get("aktywny") or 0) != 1:
+            _raise_dictionary_422(
+                "DICTIONARY_VALUE_NOT_ACTIVE",
+                f"{field_base}KodPozycji wskazuje nieaktywna pozycje slownika.",
+                field_base=field_base,
+                kod_typu=kod_typu,
+            )
+        candidate_ids.append(int(row["id"]))
+
+    normalized_name = _norm(name_value)
+    if normalized_name is not None and normalized_name.lower() != "brak":
+        row = _resolve_dictionary_row_by_name(conn, kod_typu, normalized_name)
+        if row is None and allow_name_autocreate:
+            created_id = _resolve_slownik_item_id(conn, kod_typu, normalized_name)
+            if created_id is not None:
+                row = _resolve_dictionary_row_by_id(conn, kod_typu, created_id)
+        if row is None:
+            _raise_dictionary_422(
+                "DICTIONARY_VALUE_NOT_FOUND",
+                f"{field_base} nie wskazuje pozycji slownika.",
+                field_base=field_base,
+                kod_typu=kod_typu,
+            )
+        if int(row.get("aktywny") or 0) != 1:
+            _raise_dictionary_422(
+                "DICTIONARY_VALUE_NOT_ACTIVE",
+                f"{field_base} wskazuje nieaktywna pozycje slownika.",
+                field_base=field_base,
+                kod_typu=kod_typu,
+            )
+        candidate_ids.append(int(row["id"]))
+
+    if not candidate_ids:
+        if required:
+            _raise_dictionary_422(
+                "DICTIONARY_VALUE_REQUIRED",
+                f"{field_base} jest wymagane (Id, KodPozycji lub Nazwa).",
+                field_base=field_base,
+                kod_typu=kod_typu,
+            )
+        return None
+
+    unique_ids = list(dict.fromkeys(candidate_ids))
+    if len(unique_ids) > 1:
+        _raise_dictionary_422(
+            "DICTIONARY_CONFLICT",
+            f"Sprzeczne wartosci dla {field_base}: Id/KodPozycji/Nazwa wskazuja rozne pozycje.",
+            field_base=field_base,
+            kod_typu=kod_typu,
+        )
+    return unique_ids[0]
+
+
+def _resolve_inspection_type_id_priority(
+    conn: Any,
+    *,
+    field_base: str,
+    id_value: int | None,
+    code_value: str | None,
+    name_value: str | None,
+    required: bool = False,
+) -> int | None:
+    normalized_name: str | None = None
+    if _norm(name_value) is not None and str(name_value).strip().lower() != "brak":
+        normalized_key = _normalize_inspection_type_name(name_value)
+        canonical_name, _, _ = _ALLOWED_INSPECTION_TYPE_BY_NORMALIZED[normalized_key]
+        normalized_name = canonical_name
+
+    resolved_id = _resolve_dictionary_id_priority(
+        conn,
+        kod_typu="typy_inspekcji",
+        field_base=field_base,
+        id_value=id_value,
+        code_value=code_value,
+        name_value=normalized_name,
+        required=required,
+        allow_name_autocreate=True,
+    )
+    if resolved_id is None:
+        return None
+
+    row = _resolve_dictionary_row_by_id(conn, "typy_inspekcji", resolved_id)
+    if row is None:
+        _raise_dictionary_422(
+            "DICTIONARY_VALUE_NOT_FOUND",
+            f"{field_base} wskazuje nieistniejaca pozycje slownika.",
+            field_base=field_base,
+            kod_typu="typy_inspekcji",
+        )
+
+    try:
+        _normalize_inspection_type_name(str(row.get("nazwa_pozycji") or ""))
+    except HTTPException:
+        _raise_dictionary_422(
+            "DICTIONARY_VALUE_NOT_ALLOWED",
+            "Dozwolone typy inspekcji: Kontrola, Wizyta nadzorcza.",
+            field_base=field_base,
+            kod_typu="typy_inspekcji",
+        )
+
+    return resolved_id
 
 
 def _status_code_by_id(conn: Any, status_id: int | None) -> str | None:
@@ -580,6 +967,23 @@ def _get_scope_ids(conn: Any, inspection_id: int) -> list[int]:
     return [int(r["scope_id"]) for r in rows]
 
 
+def _get_inspection_team_ids(conn: Any, inspection_id: int) -> list[int]:
+    rows = conn.execute(
+        "SELECT team_id FROM inspection_teams WHERE inspection_id = ? ORDER BY team_id ASC",
+        (inspection_id,),
+    ).fetchall()
+    return [int(r["team_id"]) for r in rows]
+
+
+def _sync_inspection_teams(conn: Any, inspection_id: int, team_ids: list[int]) -> None:
+    conn.execute("DELETE FROM inspection_teams WHERE inspection_id = ?", (inspection_id,))
+    for team_id in team_ids:
+        conn.execute(
+            "INSERT OR IGNORE INTO inspection_teams (inspection_id, team_id) VALUES (?, ?)",
+            (inspection_id, int(team_id)),
+        )
+
+
 def _validate_scope_ids(conn: Any, scope_ids: list[int]) -> list[int]:
     if not scope_ids:
         return []
@@ -588,23 +992,100 @@ def _validate_scope_ids(conn: Any, scope_ids: list[int]) -> list[int]:
     placeholders = ",".join(["?"] * len(deduped))
     rows = conn.execute(
         f"""
-        SELECT id
+        SELECT id, aktywny
         FROM slownik_pozycje
         WHERE kod_typu = 'zakresy_inspekcji' AND id IN ({placeholders})
         """,
         tuple(deduped),
     ).fetchall()
-    found_ids = {int(r["id"]) for r in rows}
-    missing = [scope_id for scope_id in deduped if scope_id not in found_ids]
+    found_rows = {int(r["id"]): int(r["aktywny"] or 0) for r in rows}
+    missing = [scope_id for scope_id in deduped if scope_id not in found_rows]
+    inactive = [scope_id for scope_id in deduped if scope_id in found_rows and found_rows[scope_id] != 1]
+
     if missing:
-        raise HTTPException(status_code=404, detail=f"Zakresy inspekcji nie istnieja: {missing}")
+        _raise_contract_422(
+            "UNKNOWN_SCOPE_ID",
+            "zakresInspekcjiIds zawiera nieistniejace pozycje slownika.",
+            field="zakresInspekcjiIds",
+            value=missing,
+            kod_typu="zakresy_inspekcji",
+        )
+    if inactive:
+        _raise_contract_422(
+            "INACTIVE_DICTIONARY_ENTRY",
+            "zakresInspekcjiIds zawiera nieaktywne pozycje slownika.",
+            field="zakresInspekcjiIds",
+            value=inactive,
+            kod_typu="zakresy_inspekcji",
+        )
     return deduped
+
+
+def _normalize_and_validate_inspection_team_ids(
+    conn: Any,
+    *,
+    team_ids: list[int] | None,
+    team_ids_legacy: list[int] | None,
+    field_sent: bool,
+) -> list[int]:
+    if team_ids is not None and team_ids_legacy is not None:
+        normalized_primary = sorted(set(int(x) for x in team_ids))
+        normalized_legacy = sorted(set(int(x) for x in team_ids_legacy))
+        if normalized_primary != normalized_legacy:
+            _raise_contract_422(
+                "CONFLICTING_TEAM_IDS",
+                "inspectionTeamIds i inspection_team_ids wskazuja rozne wartosci.",
+                field="inspectionTeamIds",
+                value={"inspectionTeamIds": team_ids, "inspection_team_ids": team_ids_legacy},
+            )
+
+    selected = team_ids if team_ids is not None else team_ids_legacy
+    if field_sent and selected is None:
+        _raise_contract_422(
+            "MISSING_DICTIONARY_ID",
+            "Pole inspectionTeamIds nie moze byc null.",
+            field="inspectionTeamIds",
+            value=selected,
+        )
+    if selected is None:
+        return []
+
+    normalized_ids = sorted(set(int(x) for x in selected))
+    if not normalized_ids:
+        return []
+
+    placeholders = ",".join(["?"] * len(normalized_ids))
+    rows = conn.execute(
+        f"SELECT id FROM teams WHERE id IN ({placeholders})",
+        tuple(normalized_ids),
+    ).fetchall()
+    existing = {int(row["id"]) for row in rows}
+    missing = [team_id for team_id in normalized_ids if team_id not in existing]
+    if missing:
+        _raise_contract_422(
+            "UNKNOWN_TEAM_ID",
+            "inspectionTeamIds zawiera nieistniejace teams.id.",
+            field="inspectionTeamIds",
+            value=missing,
+        )
+
+    return normalized_ids
 
 
 def _resolve_scope_ids_from_text(conn: Any, raw_value: str | None) -> list[int]:
     value = _norm(raw_value)
     if value is None or value.lower() == "brak":
         return []
+
+    if not _INSPECTIONS_LEGACY_SCOPE_TEXT_SPLIT_ENABLED:
+        scope_id = _resolve_slownik_item_id(conn, "zakresy_inspekcji", value)
+        return [scope_id] if scope_id is not None else []
+
+    logger.warning(
+        "Legacy parsing of zakresInspekcji string is used. "
+        "Prefer zakresInspekcjiIds or zakresInspekcjiList. value=%r",
+        value,
+    )
 
     parts = [part.strip() for part in re.split(r"[;,]", value) if part.strip()]
     if not parts:
@@ -613,6 +1094,35 @@ def _resolve_scope_ids_from_text(conn: Any, raw_value: str | None) -> list[int]:
     resolved: list[int] = []
     for part in parts:
         scope_id = _resolve_slownik_item_id(conn, "zakresy_inspekcji", part)
+        if scope_id is not None:
+            resolved.append(scope_id)
+    return list(dict.fromkeys(resolved))
+
+
+def _normalize_scope_text_list(raw_values: list[str] | None, field_name: str) -> list[str]:
+    if raw_values is None:
+        return []
+
+    normalized: list[str] = []
+    for raw in raw_values:
+        if not isinstance(raw, str):
+            raise HTTPException(status_code=422, detail=f"{field_name} zawiera niepoprawny typ")
+        value = raw.strip()
+        if not value:
+            raise HTTPException(status_code=422, detail=f"{field_name} nie moze zawierac pustych wartosci")
+        if value.lower() == "brak":
+            continue
+        normalized.append(value)
+
+    # Preserve order and remove duplicates.
+    return list(dict.fromkeys(normalized))
+
+
+def _resolve_scope_ids_from_list(conn: Any, raw_values: list[str] | None) -> list[int]:
+    names = _normalize_scope_text_list(raw_values, "zakresInspekcjiList")
+    resolved: list[int] = []
+    for name in names:
+        scope_id = _resolve_slownik_item_id(conn, "zakresy_inspekcji", name)
         if scope_id is not None:
             resolved.append(scope_id)
     return list(dict.fromkeys(resolved))
@@ -913,6 +1423,24 @@ def _build_display_name(imie: str | None, nazwisko: str | None, login: str) -> s
     return full_name or login
 
 
+def _resolve_team_names_by_ids(conn: Any, team_ids: list[int]) -> list[str]:
+    if not team_ids:
+        return []
+
+    placeholders = ",".join(["?"] * len(team_ids))
+    rows = conn.execute(
+        f"SELECT id, nazwa FROM teams WHERE id IN ({placeholders})",
+        tuple(int(team_id) for team_id in team_ids),
+    ).fetchall()
+    by_id = {int(row["id"]): str(row["nazwa"] or "").strip() for row in rows}
+    result: list[str] = []
+    for team_id in team_ids:
+        name = by_id.get(int(team_id))
+        if name:
+            result.append(name)
+    return result
+
+
 def _validate_active_user_ids(conn: Any, user_ids: list[int]) -> None:
     for user_id in user_ids:
         row = conn.execute(
@@ -1082,6 +1610,8 @@ def _base_select_sql() -> str:
             i.created_by_user_id,
             np.nazwa_pozycji AS nazwa_podmiotu_nazwa,
             np.skrot_pozycji AS nazwa_podmiotu_skrot,
+            i.typ_inspekcji_id,
+            ti.kod_pozycji AS typ_inspekcji_kod_pozycji,
             ti.nazwa_pozycji AS typ_inspekcji_nazwa,
             ti.skrot_pozycji AS typ_inspekcji_skrot,
             (
@@ -1094,6 +1624,16 @@ def _base_select_sql() -> str:
                     ORDER BY lower(sp.nazwa_pozycji), sp.id
                 ) x
             ) AS zakres_inspekcji_nazwa,
+            (
+                SELECT group_concat(x.scope_name, char(31))
+                FROM (
+                    SELECT sp.nazwa_pozycji AS scope_name
+                    FROM inspection_scopes isc
+                    JOIN slownik_pozycje sp ON sp.id = isc.scope_id
+                    WHERE isc.inspection_id = i.id
+                    ORDER BY lower(sp.nazwa_pozycji), sp.id
+                ) x
+            ) AS zakres_inspekcji_list_raw,
             (
                 SELECT group_concat(x.scope_short, '; ')
                 FROM (
@@ -1108,14 +1648,39 @@ def _base_select_sql() -> str:
             i.poczatek_inspekcji,
             i.koniec_inspekcji,
             i.osoba_kierujaca_user_id,
+            (
+                SELECT group_concat(x.tid, ',')
+                FROM (
+                    SELECT it.team_id AS tid
+                    FROM inspection_teams it
+                    WHERE it.inspection_id = i.id
+                    ORDER BY it.team_id ASC
+                ) x
+            ) AS inspection_team_ids_csv,
+            (
+                SELECT group_concat(x.tname, char(31))
+                FROM (
+                    SELECT t.nazwa AS tname
+                    FROM inspection_teams it
+                    JOIN teams t ON t.id = it.team_id
+                    WHERE it.inspection_id = i.id
+                    ORDER BY it.team_id ASC
+                ) x
+            ) AS inspection_team_names_raw,
             ulead.imie AS lead_imie,
             ulead.nazwisko AS lead_nazwisko,
+            i.rynek_id,
+            r.kod_pozycji AS rynek_kod_pozycji,
             r.nazwa_pozycji AS rynek_nazwa,
+            i.rodzaj_podmiotu_id,
+            rp.kod_pozycji AS rodzaj_podmiotu_kod_pozycji,
             rp.nazwa_pozycji AS rodzaj_podmiotu_nazwa,
             rp.skrot_pozycji AS rodzaj_podmiotu_skrot,
             i.aspekt_konsumencki,
             i.komentarz,
             i.szczegoly_dotyczace_zakresu,
+            i.status_inspekcji_id,
+            si.kod_pozycji AS status_kod_pozycji,
             si.nazwa_pozycji AS status_nazwa,
             si.skrot_pozycji AS status_skrot,
             i.data_protokolu_sprawozdania,
@@ -1240,7 +1805,7 @@ def _can_edit_inspection(conn: Any, inspection_id: int, operator: dict[str, Any]
     return False
 
 
-def _row_to_structure_payload(row: dict[str, Any], can_edit: bool) -> dict[str, Any]:
+def _row_to_structure_payload(conn: Any, row: dict[str, Any], can_edit: bool) -> dict[str, Any]:
     lead_full = _norm(" ".join([row.get("lead_imie") or "", row.get("lead_nazwisko") or ""]).strip())
     sklad_rel = _norm(row.get("sklad_zespolu_z_relacji"))
 
@@ -1253,6 +1818,24 @@ def _row_to_structure_payload(row: dict[str, Any], can_edit: bool) -> dict[str, 
     scope_ids: list[int] = []
     if scope_ids_csv:
         scope_ids = [int(x) for x in str(scope_ids_csv).split(",") if x.strip()]
+
+    inspection_team_ids_csv = row.get("inspection_team_ids_csv")
+    inspection_team_ids: list[int] = []
+    if inspection_team_ids_csv:
+        inspection_team_ids = [int(x) for x in str(inspection_team_ids_csv).split(",") if x.strip()]
+
+    inspection_team_names_raw = row.get("inspection_team_names_raw")
+    inspection_team_names: list[str] = []
+    if inspection_team_names_raw:
+        inspection_team_names = [x for x in str(inspection_team_names_raw).split(_SCOPE_LIST_SEPARATOR) if x]
+
+    if not inspection_team_names and inspection_team_ids:
+        inspection_team_names = _resolve_team_names_by_ids(conn, inspection_team_ids)
+
+    scope_names_raw = row.get("zakres_inspekcji_list_raw")
+    scope_names: list[str] = []
+    if scope_names_raw:
+        scope_names = [x for x in str(scope_names_raw).split(_SCOPE_LIST_SEPARATOR) if x]
 
     data_akceptacji_noty_list = _parse_dates_csv(row.get("data_akceptacji_noty_list_csv"))
     data_zalecen_list = _parse_dates_csv(row.get("data_zalecen_list_csv"))
@@ -1271,18 +1854,28 @@ def _row_to_structure_payload(row: dict[str, Any], can_edit: bool) -> dict[str, 
         "canEdit": can_edit,
         "nazwaPodmiotu": row.get("nazwa_podmiotu_nazwa") or "brak",
         "nazwaPodmiotuSkrocona": row.get("nazwa_podmiotu_skrot"),
+        "typInspekcjiId": row.get("typ_inspekcji_id"),
+        "typInspekcjiKodPozycji": row.get("typ_inspekcji_kod_pozycji"),
         "typInspekcji": row.get("typ_inspekcji_nazwa") or "brak",
         "typInspekcjiSkrocona": row.get("typ_inspekcji_skrot"),
         "zakresInspekcji": row.get("zakres_inspekcji_nazwa") or "brak",
+        "zakresInspekcjiList": scope_names,
         "zakresInspekcjiSkrocona": row.get("zakres_inspekcji_skrot"),
         "zakresInspekcjiIds": scope_ids,
         "poczatekInspekcji": row.get("poczatek_inspekcji"),
         "koniecInspekcji": row.get("koniec_inspekcji"),
         "osobaKierujacaUserId": row.get("osoba_kierujaca_user_id"),
         "teamMemberUserIds": member_ids,
+        "inspectionTeamIds": inspection_team_ids,
+        "inspection_team_ids": inspection_team_ids,
+        "inspectionTeamsList": inspection_team_names,
         "osobaKierujaca": lead_full or "brak",
         "skladZespolu": sklad_rel or "brak",
+        "rynekId": row.get("rynek_id"),
+        "rynekKodPozycji": row.get("rynek_kod_pozycji"),
         "rynek": row.get("rynek_nazwa") or "brak",
+        "rodzajPodmiotuId": row.get("rodzaj_podmiotu_id"),
+        "rodzajPodmiotuKodPozycji": row.get("rodzaj_podmiotu_kod_pozycji"),
         "rodzajPodmiotu": row.get("rodzaj_podmiotu_nazwa") or "brak",
         "rodzajPodmiotuSkrocona": row.get("rodzaj_podmiotu_skrot"),
         "aspektKonsumencki": row.get("aspekt_konsumencki"),
@@ -1307,6 +1900,8 @@ def _row_to_structure_payload(row: dict[str, Any], can_edit: bool) -> dict[str, 
         # Legacy single-date fields are kept for transitional compatibility.
         "dataAkceptacjiNoty": data_akceptacji_noty_list[-1] if data_akceptacji_noty_list else None,
         "dataZalecen": row.get("data_zalecen") or (data_zalecen_list[-1] if data_zalecen_list else None),
+        "statusId": row.get("status_inspekcji_id"),
+        "statusKodPozycji": row.get("status_kod_pozycji"),
         "status": row.get("status_nazwa") or "brak",
         "statusSkrocona": row.get("status_skrot"),
         "komentarz": row.get("komentarz"),
@@ -1482,7 +2077,7 @@ def _can_bypass_operator_team_guard_for_inactive_leader(
 
 @router.get("/api/structure/inspections", response_model=InspectionStructureListResponse)
 def list_structure_inspections(
-    sortBy: str = Query(default="kodInspekcji"),
+    sortBy: str = Query(default="poczatekInspekcji"),
     sortOrder: str = Query(default="asc"),
     x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
@@ -1531,7 +2126,7 @@ def list_structure_inspections(
                 operator=operator,
                 created_by_user_id=row_dict.get("created_by_user_id"),
             )
-            items.append(_row_to_structure_payload(row_dict, can_edit=can_edit))
+            items.append(_row_to_structure_payload(conn, row_dict, can_edit=can_edit))
 
     return {"items": items, "total": len(items)}
 
@@ -1560,7 +2155,9 @@ def get_structure_inspection(
             created_by_user_id=row_dict.get("created_by_user_id"),
         )
 
-    return _row_to_structure_payload(row_dict, can_edit=can_edit)
+        payload = _row_to_structure_payload(conn, row_dict, can_edit=can_edit)
+
+    return payload
 
 
 @router.post("/api/structure/inspections", response_model=InspectionStructureRead, status_code=201)
@@ -1574,15 +2171,70 @@ def create_structure_inspection(
         require_write_access(conn, operator)
         _validate_inspection_date_range(payload.poczatekInspekcji, payload.koniecInspekcji)
         nazwa_podmiotu_id = _resolve_slownik_item_id(conn, "nazwy_podmiotow", payload.nazwaPodmiotu)
-        typ_inspekcji_id = _resolve_inspection_type_id(conn, payload.typInspekcji)
-        if payload.zakresInspekcjiIds is not None:
-            scope_ids = _validate_scope_ids(conn, payload.zakresInspekcjiIds)
-        else:
-            scope_ids = _resolve_scope_ids_from_text(conn, payload.zakresInspekcji)
+        typ_inspekcji_id = _resolve_dictionary_id_strict(
+            conn,
+            kod_typu="typy_inspekcji",
+            field_base="typInspekcji",
+            id_value=payload.typInspekcjiId,
+            code_value=payload.typInspekcjiKodPozycji,
+            name_value=payload.typInspekcji,
+            required=True,
+        )
+        typ_row = _resolve_dictionary_row_by_id(conn, "typy_inspekcji", int(typ_inspekcji_id))
+        if typ_row is None:
+            _raise_contract_422(
+                "UNKNOWN_DICTIONARY_ID",
+                "typInspekcjiId nie wskazuje aktywnej pozycji slownika.",
+                field="typInspekcjiId",
+                value=payload.typInspekcjiId,
+                kod_typu="typy_inspekcji",
+            )
+        try:
+            _normalize_inspection_type_name(str(typ_row.get("nazwa_pozycji") or ""))
+        except HTTPException:
+            _raise_contract_422(
+                "UNKNOWN_DICTIONARY_ID",
+                "Dozwolone typy inspekcji: Kontrola, Wizyta nadzorcza.",
+                field="typInspekcjiId",
+                value=payload.typInspekcjiId,
+                kod_typu="typy_inspekcji",
+            )
+
+        scope_ids = _resolve_scope_ids_strict(
+            conn,
+            scope_ids=payload.zakresInspekcjiIds,
+            scope_list=payload.zakresInspekcjiList,
+            scope_text=payload.zakresInspekcji,
+            required=True,
+        )
         zakres_inspekcji_id = scope_ids[0] if scope_ids else None
-        rynek_id = _resolve_slownik_item_id(conn, "rynki", payload.rynek)
-        rodzaj_podmiotu_id = _resolve_slownik_item_id(conn, "rodzaje_podmiotu", payload.rodzajPodmiotu)
-        status_id = _resolve_slownik_item_id(conn, "statusy_inspekcji", payload.status)
+        rynek_id = _resolve_dictionary_id_strict(
+            conn,
+            kod_typu="rynki",
+            field_base="rynek",
+            id_value=payload.rynekId,
+            code_value=payload.rynekKodPozycji,
+            name_value=payload.rynek,
+            required=False,
+        )
+        rodzaj_podmiotu_id = _resolve_dictionary_id_strict(
+            conn,
+            kod_typu="rodzaje_podmiotu",
+            field_base="rodzajPodmiotu",
+            id_value=payload.rodzajPodmiotuId,
+            code_value=payload.rodzajPodmiotuKodPozycji,
+            name_value=payload.rodzajPodmiotu,
+            required=False,
+        )
+        status_id = _resolve_dictionary_id_strict(
+            conn,
+            kod_typu="statusy_inspekcji",
+            field_base="status",
+            id_value=payload.statusId,
+            code_value=payload.statusKodPozycji,
+            name_value=payload.status,
+            required=True,
+        )
         _validate_status_relations_for_save(conn, inspection_id=None, status_id=status_id)
         szczegoly_dotyczace_zakresu = _normalize_optional_text_with_limit(
             payload.szczegolyDotyczaceZakresu,
@@ -1638,6 +2290,29 @@ def create_structure_inspection(
             bool_field_name="brakDataPismaZOdpowiedzia",
         )
 
+        if payload.teamMemberUserIds is None:
+            if _norm(payload.skladZespolu) is not None:
+                _raise_contract_422(
+                    "LEGACY_TEXT_ONLY_VALUE",
+                    "Pole teamMemberUserIds jest wymagane. Pole skladZespolu nie jest akceptowane przy zapisie.",
+                    field="teamMemberUserIds",
+                    value=payload.skladZespolu,
+                )
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                "Pole teamMemberUserIds jest wymagane.",
+                field="teamMemberUserIds",
+                value=payload.teamMemberUserIds,
+            )
+
+        if payload.osobaKierujacaUserId is None and _norm(payload.osobaKierujaca) is not None and not payload.forceOperatorAsLeader:
+            _raise_contract_422(
+                "LEGACY_TEXT_ONLY_VALUE",
+                "Pole osobaKierujacaUserId jest wymagane. Pole osobaKierujaca nie jest akceptowane przy zapisie.",
+                field="osobaKierujacaUserId",
+                value=payload.osobaKierujaca,
+            )
+
         leader_user_id, member_ids, _ = _resolve_leader_and_members(
             conn,
             payload,
@@ -1646,6 +2321,12 @@ def create_structure_inspection(
             current_leader_user_id=None,
             current_member_ids=None,
             allow_force_operator=True,
+        )
+        inspection_team_ids = _normalize_and_validate_inspection_team_ids(
+            conn,
+            team_ids=payload.inspectionTeamIds,
+            team_ids_legacy=payload.inspection_team_ids,
+            field_sent=(payload.inspectionTeamIds is not None or payload.inspection_team_ids is not None),
         )
 
         cursor = conn.execute(
@@ -1726,6 +2407,7 @@ def create_structure_inspection(
         inspection_id = int(cursor.lastrowid)
         _insert_or_replace_members(conn, inspection_id, member_ids or [])
         _sync_scopes(conn, inspection_id, scope_ids)
+        _sync_inspection_teams(conn, inspection_id, inspection_team_ids)
         _sync_multi_dates(conn, inspection_id, "AKCEPTACJA_NOTY", data_akceptacji_noty_list, operator["id"])
 
         kod_row = conn.execute("SELECT kod_inspekcji FROM inspections WHERE id = ? LIMIT 1", (inspection_id,)).fetchone()
@@ -1737,7 +2419,7 @@ def create_structure_inspection(
         if row is None:
             raise HTTPException(status_code=500, detail="Failed to fetch created inspection")
 
-        created_payload = _row_to_structure_payload(dict(row), can_edit=True)
+        created_payload = _row_to_structure_payload(conn, dict(row), can_edit=True)
         changes = build_create_changes(
             [
                 ("Kod inspekcji", created_payload.get("kodInspekcji")),
@@ -1748,6 +2430,7 @@ def create_structure_inspection(
                 ("Koniec inspekcji", created_payload.get("koniecInspekcji")),
                 ("Osoba kierująca", created_payload.get("osobaKierujaca")),
                 ("Skład zespołu", created_payload.get("skladZespolu")),
+                ("Zespoły inspekcji", created_payload.get("inspectionTeamIds")),
                 ("Rynek", created_payload.get("rynek")),
                 ("Rodzaj podmiotu", created_payload.get("rodzajPodmiotu")),
                 ("Status", created_payload.get("status")),
@@ -1766,7 +2449,7 @@ def create_structure_inspection(
         raise HTTPException(status_code=500, detail="Failed to fetch created inspection")
 
     response.status_code = 201
-    return _row_to_structure_payload(dict(row), can_edit=True)
+    return created_payload
 
 
 @router.get("/api/inspections/people-options", response_model=list[InspectionPeopleOption])
@@ -1863,6 +2546,41 @@ def list_inspection_people_options(
         return items
 
 
+@router.get("/api/inspections/team-options", response_model=list[InspectionTeamOption])
+@router.get("/api/structure/inspections/team-options", response_model=list[InspectionTeamOption])
+def list_inspection_team_options(
+    x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
+) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        operator = _resolve_people_options_operator(conn, x_operator_login)
+        require_permission(conn, operator, PERMISSION_INSPECTIONS_READ)
+
+        rows = conn.execute(
+            """
+            SELECT
+                t.id,
+                t.kod,
+                t.nazwa
+            FROM teams t
+            ORDER BY t.id ASC
+            """
+        ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            items.append(
+                {
+                    "id": int(row["id"]),
+                    "code": str(row["kod"] or "").strip(),
+                    "name": str(row["nazwa"] or "").strip(),
+                    "isActive": True,
+                }
+            )
+
+        items.sort(key=lambda item: item["id"])
+        return items
+
+
 @router.put("/api/structure/inspections/{inspection_id}", response_model=InspectionStructureRead)
 def update_structure_inspection(
     inspection_id: int,
@@ -1954,8 +2672,8 @@ def update_structure_inspection(
         current_row = conn.execute(
             """
             SELECT id, created_by_user_id, osoba_kierujaca_user_id, poczatek_inspekcji, koniec_inspekcji,
-                   zaktualizowano_o, nazwa_podmiotu_id, typ_inspekcji_id, zakres_inspekcji_id,
-                   status_inspekcji_id, rynek_id, rodzaj_podmiotu_id, aspekt_konsumencki,
+                                     zaktualizowano_o, nazwa_podmiotu_id, typ_inspekcji_id, zakres_inspekcji_id,
+                                                                         status_inspekcji_id, rynek_id, rodzaj_podmiotu_id, aspekt_konsumencki,
                      komentarz, szczegoly_dotyczace_zakresu, data_protokolu_sprawozdania, data_doreczenia_protokolu,
                    data_akceptacji_sprawozdania, data_doreczenia_pisma, data_pisma_zastrzezenia,
                      data_wplywu_pisma, data_wyslania_pisma_z_zastrzezeniami,
@@ -1990,6 +2708,45 @@ def update_structure_inspection(
         ):
             raise HTTPException(status_code=403, detail="Brak uprawnien do edycji tej inspekcji")
 
+        if "teamMemberUserIds" in fields and fields.get("teamMemberUserIds") is None:
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                "Pole teamMemberUserIds nie moze byc null.",
+                field="teamMemberUserIds",
+                value=fields.get("teamMemberUserIds"),
+            )
+        if "skladZespolu" in fields and "teamMemberUserIds" not in fields:
+            _raise_contract_422(
+                "LEGACY_TEXT_ONLY_VALUE",
+                "Do aktualizacji skladu zespolu uzyj pola teamMemberUserIds.",
+                field="teamMemberUserIds",
+                value=fields.get("skladZespolu"),
+            )
+        if "osobaKierujacaUserId" in fields and fields.get("osobaKierujacaUserId") is None:
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                "Pole osobaKierujacaUserId nie moze byc null.",
+                field="osobaKierujacaUserId",
+                value=fields.get("osobaKierujacaUserId"),
+            )
+        if "osobaKierujaca" in fields and "osobaKierujacaUserId" not in fields:
+            _raise_contract_422(
+                "LEGACY_TEXT_ONLY_VALUE",
+                "Do aktualizacji osoby kierujacej uzyj pola osobaKierujacaUserId.",
+                field="osobaKierujacaUserId",
+                value=fields.get("osobaKierujaca"),
+            )
+        if (
+            ("inspectionTeamIds" in fields and fields.get("inspectionTeamIds") is None)
+            or ("inspection_team_ids" in fields and fields.get("inspection_team_ids") is None)
+        ):
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                "Pole inspectionTeamIds nie moze byc null.",
+                field="inspectionTeamIds",
+                value=fields.get("inspectionTeamIds") if "inspectionTeamIds" in fields else fields.get("inspection_team_ids"),
+            )
+
         assert_lock_for_save(conn, "inspections", inspection_id, operator, lock_token)
         assert_expected_updated_at(expected_updated_at, str(current.get("zaktualizowano_o") or ""))
 
@@ -2014,20 +2771,62 @@ def update_structure_inspection(
         row_touched = False
         current_status_id = int(current["status_inspekcji_id"]) if current.get("status_inspekcji_id") is not None else None
         next_status_id = current_status_id
+        current_inspection_team_ids = _get_inspection_team_ids(conn, inspection_id)
+        inspection_teams_updated = False
+        next_inspection_team_ids = current_inspection_team_ids
 
         if "nazwaPodmiotu" in fields:
             set_parts.append("nazwa_podmiotu_id = ?")
             values.append(_resolve_slownik_item_id(conn, "nazwy_podmiotow", fields["nazwaPodmiotu"]))
-        if "typInspekcji" in fields:
+        typ_field_present = (
+            "typInspekcjiId" in fields
+            or "typInspekcjiKodPozycji" in fields
+            or "typInspekcji" in fields
+        )
+        if typ_field_present:
+            typ_inspekcji_id = _resolve_dictionary_id_strict(
+                conn,
+                kod_typu="typy_inspekcji",
+                field_base="typInspekcji",
+                id_value=fields.get("typInspekcjiId"),
+                code_value=fields.get("typInspekcjiKodPozycji"),
+                name_value=fields.get("typInspekcji"),
+                required=True,
+            )
+            typ_row = _resolve_dictionary_row_by_id(conn, "typy_inspekcji", int(typ_inspekcji_id))
+            if typ_row is None:
+                _raise_contract_422(
+                    "UNKNOWN_DICTIONARY_ID",
+                    "typInspekcjiId nie wskazuje aktywnej pozycji slownika.",
+                    field="typInspekcjiId",
+                    value=fields.get("typInspekcjiId"),
+                    kod_typu="typy_inspekcji",
+                )
+            try:
+                _normalize_inspection_type_name(str(typ_row.get("nazwa_pozycji") or ""))
+            except HTTPException:
+                _raise_contract_422(
+                    "UNKNOWN_DICTIONARY_ID",
+                    "Dozwolone typy inspekcji: Kontrola, Wizyta nadzorcza.",
+                    field="typInspekcjiId",
+                    value=fields.get("typInspekcjiId"),
+                    kod_typu="typy_inspekcji",
+                )
             set_parts.append("typ_inspekcji_id = ?")
-            values.append(_resolve_inspection_type_id(conn, fields["typInspekcji"]))
-        if "zakresInspekcji" in fields:
-            next_scope_ids = _resolve_scope_ids_from_text(conn, fields["zakresInspekcji"])
-            scopes_updated = True
-            set_parts.append("zakres_inspekcji_id = ?")
-            values.append(next_scope_ids[0] if next_scope_ids else None)
-        if "zakresInspekcjiIds" in fields:
-            next_scope_ids = _validate_scope_ids(conn, fields["zakresInspekcjiIds"] or [])
+            values.append(typ_inspekcji_id)
+        scope_field_present = (
+            "zakresInspekcjiIds" in fields
+            or "zakresInspekcjiList" in fields
+            or "zakresInspekcji" in fields
+        )
+        if scope_field_present:
+            next_scope_ids = _resolve_scope_ids_strict(
+                conn,
+                scope_ids=fields.get("zakresInspekcjiIds"),
+                scope_list=fields.get("zakresInspekcjiList"),
+                scope_text=fields.get("zakresInspekcji"),
+                required=True,
+            )
             scopes_updated = True
             set_parts.append("zakres_inspekcji_id = ?")
             values.append(next_scope_ids[0] if next_scope_ids else None)
@@ -2040,17 +2839,68 @@ def update_structure_inspection(
         if "osobaKierujacaUserId" in fields:
             set_parts.append("osoba_kierujaca_user_id = ?")
             values.append(leader_user_id)
-        if "rynek" in fields:
+        rynek_field_present = (
+            "rynekId" in fields
+            or "rynekKodPozycji" in fields
+            or "rynek" in fields
+        )
+        if rynek_field_present:
+            rynek_id = _resolve_dictionary_id_strict(
+                conn,
+                kod_typu="rynki",
+                field_base="rynek",
+                id_value=fields.get("rynekId"),
+                code_value=fields.get("rynekKodPozycji"),
+                name_value=fields.get("rynek"),
+                required=False,
+            )
             set_parts.append("rynek_id = ?")
-            values.append(_resolve_slownik_item_id(conn, "rynki", fields["rynek"]))
-        if "rodzajPodmiotu" in fields:
+            values.append(rynek_id)
+        rodzaj_field_present = (
+            "rodzajPodmiotuId" in fields
+            or "rodzajPodmiotuKodPozycji" in fields
+            or "rodzajPodmiotu" in fields
+        )
+        if rodzaj_field_present:
+            rodzaj_podmiotu_id = _resolve_dictionary_id_strict(
+                conn,
+                kod_typu="rodzaje_podmiotu",
+                field_base="rodzajPodmiotu",
+                id_value=fields.get("rodzajPodmiotuId"),
+                code_value=fields.get("rodzajPodmiotuKodPozycji"),
+                name_value=fields.get("rodzajPodmiotu"),
+                required=False,
+            )
             set_parts.append("rodzaj_podmiotu_id = ?")
-            values.append(_resolve_slownik_item_id(conn, "rodzaje_podmiotu", fields["rodzajPodmiotu"]))
+            values.append(rodzaj_podmiotu_id)
         if "aspektKonsumencki" in fields:
             set_parts.append("aspekt_konsumencki = ?")
             values.append(fields["aspektKonsumencki"])
-        if "status" in fields:
-            next_status_id = _resolve_slownik_item_id(conn, "statusy_inspekcji", fields["status"])
+        inspection_team_field_present = "inspectionTeamIds" in fields or "inspection_team_ids" in fields
+        if inspection_team_field_present:
+            next_inspection_team_ids = _normalize_and_validate_inspection_team_ids(
+                conn,
+                team_ids=fields.get("inspectionTeamIds"),
+                team_ids_legacy=fields.get("inspection_team_ids"),
+                field_sent=True,
+            )
+            if next_inspection_team_ids != current_inspection_team_ids:
+                inspection_teams_updated = True
+        status_field_present = (
+            "statusId" in fields
+            or "statusKodPozycji" in fields
+            or "status" in fields
+        )
+        if status_field_present:
+            next_status_id = _resolve_dictionary_id_strict(
+                conn,
+                kod_typu="statusy_inspekcji",
+                field_base="status",
+                id_value=fields.get("statusId"),
+                code_value=fields.get("statusKodPozycji"),
+                name_value=fields.get("status"),
+                required=True,
+            )
             set_parts.append("status_inspekcji_id = ?")
             values.append(next_status_id)
             if next_status_id != current_status_id:
@@ -2198,6 +3048,9 @@ def update_structure_inspection(
         if scopes_updated:
             _sync_scopes(conn, inspection_id, next_scope_ids)
 
+        if inspection_teams_updated:
+            _sync_inspection_teams(conn, inspection_id, next_inspection_team_ids)
+
         if date_lists_updated:
             if data_akceptacji_noty_list is not None:
                 _sync_multi_dates(conn, inspection_id, "AKCEPTACJA_NOTY", data_akceptacji_noty_list, operator["id"])
@@ -2212,8 +3065,8 @@ def update_structure_inspection(
         updated_row = conn.execute(
             """
             SELECT id, created_by_user_id, osoba_kierujaca_user_id, poczatek_inspekcji, koniec_inspekcji,
-                   zaktualizowano_o, nazwa_podmiotu_id, typ_inspekcji_id, zakres_inspekcji_id,
-                   status_inspekcji_id, rynek_id, rodzaj_podmiotu_id, aspekt_konsumencki,
+                                     zaktualizowano_o, nazwa_podmiotu_id, typ_inspekcji_id, zakres_inspekcji_id,
+                                                                         status_inspekcji_id, rynek_id, rodzaj_podmiotu_id, aspekt_konsumencki,
                      komentarz, szczegoly_dotyczace_zakresu, data_protokolu_sprawozdania, data_doreczenia_protokolu,
                    data_akceptacji_sprawozdania, data_doreczenia_pisma, data_pisma_zastrzezenia,
                      data_wplywu_pisma, data_wyslania_pisma_z_zastrzezeniami,
@@ -2258,6 +3111,11 @@ def update_structure_inspection(
             "Osoba kierująca",
             _user_display_by_id(current.get("osoba_kierujaca_user_id")),
             _user_display_by_id(updated.get("osoba_kierujaca_user_id")),
+        )
+        _add_change(
+            "Zespoły inspekcji",
+            current_inspection_team_ids,
+            _get_inspection_team_ids(conn, inspection_id),
         )
         _add_change("Skład zespołu", members_before_str, members_after_str)
         _add_change("Zakres inspekcji", scopes_before_str, scopes_after_str)
@@ -2342,15 +3200,17 @@ def update_structure_inspection(
             (inspection_id,),
         ).fetchone()
 
-    if row is None:
-        raise HTTPException(status_code=404, detail="Inspection not found")
+        if row is None:
+            raise HTTPException(status_code=404, detail="Inspection not found")
 
-    return _row_to_structure_payload(dict(row), can_edit=True)
+        response_payload = _row_to_structure_payload(conn, dict(row), can_edit=True)
+
+    return response_payload
 
 
 @router.get("/api/inspections", response_model=InspectionStructureListResponse)
 def list_inspections_compat(
-    sortBy: str = Query(default="kodInspekcji"),
+    sortBy: str = Query(default="poczatekInspekcji"),
     sortOrder: str = Query(default="asc"),
     x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:

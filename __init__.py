@@ -53,6 +53,7 @@ class InspectionsDetailedRow(BaseModel):
 	status_inspekcji_id: int | None = None
 	status_inspekcji: str | None = None
 	zakres_inspekcji: str | None = None
+	zakres_inspekcji_items: list[str] = []
 	typ_zakres_inspekcji: str
 	rok_poczatku: str
 	poczatek_inspekcji: str
@@ -84,8 +85,6 @@ class InspectionsTimeAnalyticsResponse(BaseModel):
 	filteredCount: int
 	departmentMinTime: int | None = None
 	departmentMaxTime: int | None = None
-	departmentMinTimeByYear: dict[str, int | None] = {}
-	departmentMaxTimeByYear: dict[str, int | None] = {}
 	myCountByYear: dict[str, int] = {}
 	myCountByYearBreakdown: dict[str, dict[str, int]] = {}
 	myMetricByYearBreakdown: dict[str, dict[str, float]] = {}
@@ -351,13 +350,11 @@ def _end_to_today_bucket(days_value: int | None) -> int | None:
 		return None
 	if days_value < 21:
 		return 0
-	if days_value <= 26:
+	if days_value < 28:
 		return 1
-	if days_value <= 29:
+	if days_value < 35:
 		return 2
-	if days_value > 29:
-		return 3
-	return None
+	return 3
 
 
 def _end_to_today_bucket_alt(days_value: int | None) -> int | None:
@@ -365,13 +362,11 @@ def _end_to_today_bucket_alt(days_value: int | None) -> int | None:
 		return None
 	if days_value < 14:
 		return 0
-	if days_value <= 21:
+	if days_value < 21:
 		return 1
-	if days_value <= 28:
+	if days_value < 28:
 		return 2
-	if days_value > 29:
-		return 3
-	return None
+	return 3
 
 
 def _inspekcja_code(typ_inspekcji: str | None) -> str:
@@ -400,6 +395,44 @@ def _normalize_matrix_scopes(raw_scopes: str | None) -> list[str]:
 			parts.append(cleaned)
 	# Keep insertion order while removing duplicates.
 	return list(dict.fromkeys(parts))
+
+
+def _parse_scope_id_csv(raw_scope_ids: str | None) -> list[int]:
+	if raw_scope_ids is None:
+		return []
+	ids: list[int] = []
+	for part in str(raw_scope_ids).split(";"):
+		cleaned = part.strip()
+		if not cleaned:
+			continue
+		try:
+			ids.append(int(cleaned))
+		except ValueError:
+			continue
+	# Keep insertion order while removing duplicates.
+	return list(dict.fromkeys(ids))
+
+
+def _scope_items_from_ids_csv(conn: Any, raw_scope_ids: str | None, cache: dict[int, str]) -> list[str]:
+	scope_ids = _parse_scope_id_csv(raw_scope_ids)
+	if not scope_ids:
+		return []
+
+	missing_ids = [scope_id for scope_id in scope_ids if scope_id not in cache]
+	if missing_ids:
+		placeholders = ",".join("?" for _ in missing_ids)
+		rows = conn.execute(
+			f"""
+			SELECT id, COALESCE(NULLIF(trim(nazwa_pozycji), ''), '-') AS scope_name
+			FROM slownik_pozycje
+			WHERE id IN ({placeholders})
+			""",
+			tuple(missing_ids),
+		).fetchall()
+		for row in rows:
+			cache[int(row["id"])] = str(row["scope_name"] or "-")
+
+	return [cache[scope_id] for scope_id in scope_ids if scope_id in cache]
 
 
 def _normalize_text_key(value: str | None) -> str:
@@ -824,6 +857,26 @@ def get_inspections_time_analytics(
 				COALESCE(si.nazwa_pozycji, '-') AS status_inspekcji,
 				COALESCE(NULLIF(trim(si.skrot_pozycji), ''), si.nazwa_pozycji, '-') AS status_inspekcji_skrot,
 				COALESCE(NULLIF(trim(np.skrot_pozycji), ''), np.nazwa_pozycji, '-') AS nazwa_podmiotu,
+				(
+					SELECT group_concat(x.scope_name, '; ')
+					FROM (
+						SELECT COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-') AS scope_name
+						FROM inspection_scopes isc
+						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
+						WHERE isc.inspection_id = i.id
+						ORDER BY lower(COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-')), sp.id
+					) x
+				) AS zakres_inspekcji,
+				(
+					SELECT group_concat(x.scope_id, ';')
+					FROM (
+						SELECT CAST(isc.scope_id AS TEXT) AS scope_id
+						FROM inspection_scopes isc
+						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
+						WHERE isc.inspection_id = i.id
+						ORDER BY lower(COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-')), sp.id
+					) x
+				) AS zakres_inspekcji_ids_csv,
 				COALESCE(u.login, '-') AS osoba_kierujaca,
 				COALESCE(t.kod, '-') AS zespol_osoby_kierujacej_kod,
 				u.zespol_id AS lead_team_id
@@ -837,15 +890,10 @@ def get_inspections_time_analytics(
 			"""
 		).fetchall()
 
-		def _can_access_time_analytics_inspection(inspection_row: dict[str, Any]) -> bool:
-			# Business rule: in "Zestawienie czasu" manager should see the same dataset as director.
-			if int(operator["rola_id"]) == 2:
-				return True
-			return _can_access_inspection_for_reports(conn, inspection_row, operator)
-
 	typed_rows: list[dict[str, Any]] = []
 	all_type_base_rows: list[dict[str, Any]] = []
 	base_rows: list[dict[str, Any]] = []
+	scope_name_cache: dict[int, str] = {}
 	for raw_row in rows:
 		row = dict(raw_row)
 		if _is_reports_hidden_status_code(row.get("status_inspekcji_kod")):
@@ -863,14 +911,8 @@ def get_inspections_time_analytics(
 		leader_user_id = row.get("osoba_kierujaca_user_id")
 		is_leader_current_user = leader_user_id is not None and int(leader_user_id) == int(operator["id"])
 		is_member_current_user = inspection_id in operator_member_inspections
-		is_in_manager_team_scope = False
-		is_in_manager_added_scope = False
-		if int(operator["rola_id"]) == 2:
-			is_in_manager_team_scope, is_in_manager_added_scope = _manager_scope_flags_for_inspection(
-				conn,
-				inspection_id,
-				operator,
-			)
+		zakres_inspekcji_raw = str(row.get("zakres_inspekcji") or "-").strip() or "-"
+		zakres_inspekcji_items = _scope_items_from_ids_csv(conn, row.get("zakres_inspekcji_ids_csv"), scope_name_cache)
 		normalized_row = {
 			"inspectionId": inspection_id,
 			"kodInspekcji": str(row.get("kod_inspekcji") or "-").strip() or "-",
@@ -879,6 +921,8 @@ def get_inspections_time_analytics(
 			"statusInspekcji": status_label,
 				"statusInspekcjiSkrot": str(row.get("status_inspekcji_skrot") or status_label or "-").strip() or "-",
 			"nazwaPodmiotu": str(row.get("nazwa_podmiotu") or "-").strip() or "-",
+				"zakresInspekcji": zakres_inspekcji_raw,
+				"zakresInspekcjiItems": zakres_inspekcji_items,
 			"osobaKierujaca": str(row.get("osoba_kierujaca") or "-").strip() or "-",
 			"rokPoczatku": year,
 			"poczatekInspekcji": row.get("poczatek_inspekcji"),
@@ -888,8 +932,6 @@ def get_inspections_time_analytics(
 			"czas": diff,
 			"isLeaderCurrentUser": is_leader_current_user,
 			"isMemberCurrentUser": is_member_current_user,
-			"isInManagerTeamScope": bool(is_in_manager_team_scope),
-			"isInManagerAddedScope": bool(is_in_manager_added_scope),
 			"leadTeamId": row.get("lead_team_id"),
 			"stageGroupCode": stage_payload["stage_group_code"],
 			"stageGroupLabel": stage_payload["stage_group_label"],
@@ -899,7 +941,7 @@ def get_inspections_time_analytics(
 			"stageSubgroupOrder": stage_payload["stage_subgroup_order"],
 		}
 
-		if _can_access_time_analytics_inspection(row):
+		if _can_access_inspection_for_reports(conn, row, operator):
 			all_type_base_rows.append(normalized_row)
 
 		if row_type != inspection_type:
@@ -907,7 +949,7 @@ def get_inspections_time_analytics(
 
 		typed_rows.append(normalized_row)
 
-		if _can_access_time_analytics_inspection(row):
+		if _can_access_inspection_for_reports(conn, row, operator):
 			base_rows.append(normalized_row)
 
 	if year_filter:
@@ -921,18 +963,12 @@ def get_inspections_time_analytics(
 		filtered_rows = list(rows_after_year)
 
 	# Year-count section is intentionally based on all inspection types (K + W)
-	# and mirrors permission + filtering used by this report, including
-	# excluding records without computable protocol/report time.
+	# and mirrors permission + team filtering used by this report.
 	rows_for_counts = list(all_type_base_rows)
 	if year_filter:
 		rows_for_counts = [row for row in rows_for_counts if str(row.get("rokPoczatku") or "") in year_filter]
 	if team_filter:
 		rows_for_counts = [row for row in rows_for_counts if str(row.get("zespol") or "") in team_filter]
-	rows_for_counts = [
-		row
-		for row in rows_for_counts
-		if row.get("rokPoczatku") is not None and isinstance(row.get("czas"), (int, float))
-	]
 
 	(
 		year_count_columns,
@@ -1008,12 +1044,14 @@ def get_inspections_time_analytics(
 		my_user_scope_all_year = [
 			row
 			for row in base_rows
-			if _is_valid_for_aggregations(row) and bool(row.get("isLeaderCurrentUser"))
+			if _is_valid_for_aggregations(row)
+			and (bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser")))
 		]
 		my_user_scope = [
 			row
 			for row in rows_after_year
-			if _is_valid_for_aggregations(row) and bool(row.get("isLeaderCurrentUser"))
+			if _is_valid_for_aggregations(row)
+			and (bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser")))
 		]
 
 		dept_groups: dict[str, list[int]] = defaultdict(list)
@@ -1202,26 +1240,6 @@ def get_inspections_time_analytics(
 			}
 		)
 
-	department_year_values: dict[str, list[int]] = defaultdict(list)
-	for row in department_min_max_source:
-		year_key = str(row.get("rokPoczatku") or "").strip()
-		if not year_key:
-			continue
-		department_year_values[year_key].append(int(row["czas"]))
-
-	target_years_for_bounds: list[str]
-	if year_filter:
-		target_years_for_bounds = sorted({str(item).strip() for item in year_filter if str(item).strip()})
-	else:
-		target_years_for_bounds = [str(item["year"]) for item in trend_rows if item.get("year") is not None]
-
-	department_min_time_by_year: dict[str, int | None] = {}
-	department_max_time_by_year: dict[str, int | None] = {}
-	for year_key in target_years_for_bounds:
-		year_values = department_year_values.get(year_key, [])
-		department_min_time_by_year[year_key] = min(year_values) if year_values else None
-		department_max_time_by_year[year_key] = max(year_values) if year_values else None
-
 	summary_pivot_years = sorted({str(row.get("rok")) for row in summary_rows if row.get("rok") not in {None, ""}})
 	pivot_team_order: list[str] = []
 	pivot_team_values: dict[str, dict[str, float]] = {}
@@ -1240,11 +1258,17 @@ def get_inspections_time_analytics(
 	for team_name in all_year_metric_by_team.keys():
 		if team_name not in pivot_team_order:
 			pivot_team_order.append(team_name)
-	if "allYears" not in summary_pivot_years:
+	include_all_years_pivot = int(operator["rola_id"]) == 1 or bool(year_filter)
+	if include_all_years_pivot and "allYears" not in summary_pivot_years:
 		summary_pivot_years.append("allYears")
 	for team_name in pivot_team_order:
-		values = {year: float(pivot_team_values[team_name].get(year) or 0) for year in summary_pivot_years if year != "allYears"}
-		values["allYears"] = float(all_year_metric_by_team.get(team_name) or 0)
+		values = {
+			year: float(pivot_team_values[team_name].get(year) or 0)
+			for year in summary_pivot_years
+			if year != "allYears"
+		}
+		if include_all_years_pivot:
+			values["allYears"] = float(all_year_metric_by_team.get(team_name) or 0)
 		summary_pivot_rows.append(
 			{
 				"zespol": team_name,
@@ -1252,18 +1276,12 @@ def get_inspections_time_analytics(
 			}
 		)
 
-	detail_source_rows = list(agg_filtered_rows)
+	detail_source_rows = list(filtered_rows)
 	if int(operator["rola_id"]) == 1:
 		detail_source_rows = [
 			row
 			for row in detail_source_rows
 			if bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))
-		]
-	elif int(operator["rola_id"]) == 2:
-		detail_source_rows = [
-			row
-			for row in detail_source_rows
-			if bool(row.get("isInManagerTeamScope")) or bool(row.get("isInManagerAddedScope"))
 		]
 
 	detail_rows = [
@@ -1285,6 +1303,8 @@ def get_inspections_time_analytics(
 			"stage_subgroup_label": row.get("stageSubgroupLabel"),
 			"stage_subgroup_order": row.get("stageSubgroupOrder"),
 			"nazwaPodmiotu": row["nazwaPodmiotu"],
+			"zakres_inspekcji": row.get("zakresInspekcji") or "-",
+			"zakres_inspekcji_items": row.get("zakresInspekcjiItems") or [],
 			"poczatekInspekcji": row.get("poczatekInspekcji") or "-",
 			"koniecInspekcji": row.get("koniecInspekcji") or "-",
 			"osobaKierujaca": row.get("osobaKierujaca", "-"),
@@ -1292,15 +1312,13 @@ def get_inspections_time_analytics(
 			"isMemberCurrentUser": bool(row.get("isMemberCurrentUser")),
 			"zespol": row["zespol"],
 			"data": row.get("data") or "-",
-			"czas": int(row["czas"]),
+			"czas": int(row["czas"]) if isinstance(row.get("czas"), (int, float)) else 0,
 		}
 		for row in detail_source_rows
 	]
 
 	my_count_by_year_groups: dict[str, int] = defaultdict(int)
 	for row in rows_after_year:
-		if not _is_valid_for_aggregations(row):
-			continue
 		if not (bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))):
 			continue
 		year_key = str(row.get("rokPoczatku") or "").strip()
@@ -1316,13 +1334,11 @@ def get_inspections_time_analytics(
 		lambda: {"leader": 0, "member": 0, "combined": 0}
 	)
 	for row in rows_after_year:
-		if not _is_valid_for_aggregations(row):
-			continue
 		year_key = str(row.get("rokPoczatku") or "").strip()
 		if not year_key:
 			continue
 		is_leader = bool(row.get("isLeaderCurrentUser"))
-		is_member = bool(row.get("isMemberCurrentUser")) and not is_leader
+		is_member = bool(row.get("isMemberCurrentUser"))
 		if not (is_leader or is_member):
 			continue
 		if is_leader:
@@ -1351,7 +1367,7 @@ def get_inspections_time_analytics(
 			continue
 		czas_value = int(row["czas"])
 		is_leader = bool(row.get("isLeaderCurrentUser"))
-		is_member = bool(row.get("isMemberCurrentUser")) and not is_leader
+		is_member = bool(row.get("isMemberCurrentUser"))
 		if not (is_leader or is_member):
 			continue
 		if is_leader:
@@ -1401,12 +1417,6 @@ def get_inspections_time_analytics(
 			for row in scatter_source_rows
 			if bool(row.get("isLeaderCurrentUser")) or bool(row.get("isMemberCurrentUser"))
 		]
-	elif int(operator["rola_id"]) == 2:
-		scatter_source_rows = [
-			row
-			for row in scatter_source_rows
-			if bool(row.get("isInManagerTeamScope")) or bool(row.get("isInManagerAddedScope"))
-		]
 
 	scatter_rows = [
 		{
@@ -1453,8 +1463,6 @@ def get_inspections_time_analytics(
 		"filteredCount": len(filtered_rows),
 		"departmentMinTime": department_min_time,
 		"departmentMaxTime": department_max_time,
-		"departmentMinTimeByYear": department_min_time_by_year,
-		"departmentMaxTimeByYear": department_max_time_by_year,
 		"myCountByYear": my_count_by_year,
 		"myCountByYearBreakdown": my_count_by_year_breakdown,
 		"myMetricByYearBreakdown": my_metric_by_year_breakdown,
@@ -1478,7 +1486,7 @@ def get_inspections_time_analytics(
 		"scatterRows": scatter_rows,
 		"overallColumns": [
 			{"key": "zespol", "label": "Zespol"},
-			{"key": overall_metric_key, "label": f"{overall_metric_label}"},
+			{"key": "metric", "label": f"{overall_metric_label}"},
 			{"key": "count", "label": "Liczba"},
 		],
 		"overallRows": overall_rows,
@@ -1678,6 +1686,16 @@ def get_inspections_detailed(
 						ORDER BY lower(COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-')), sp.id
 					) x
 				) AS zakres_inspekcji,
+				(
+					SELECT group_concat(x.scope_id, ';')
+					FROM (
+						SELECT CAST(isc.scope_id AS TEXT) AS scope_id
+						FROM inspection_scopes isc
+						JOIN slownik_pozycje sp ON sp.id = isc.scope_id
+						WHERE isc.inspection_id = i.id
+						ORDER BY lower(COALESCE(NULLIF(trim(sp.nazwa_pozycji), ''), '-')), sp.id
+					) x
+				) AS zakres_inspekcji_ids_csv,
 				i.poczatek_inspekcji AS poczatek_inspekcji,
 				i.koniec_inspekcji AS koniec_inspekcji,
 				i.data_protokolu_sprawozdania AS data_protokolu_sprawozdania,
@@ -1699,6 +1717,7 @@ def get_inspections_detailed(
 		).fetchall()
 
 	result_rows: list[dict[str, Any]] = []
+	scope_name_cache: dict[int, str] = {}
 	for row in rows:
 		if _is_dashboard_hidden_status_code(row["status_inspekcji_kod"]):
 			continue
@@ -1717,6 +1736,8 @@ def get_inspections_detailed(
 		bucket_value = _end_to_today_bucket(end_to_today_days) if _should_compute_bucket_code(row["status_inspekcji_kod"]) else None
 		bucket_value_alt = _end_to_today_bucket_alt(end_to_today_days) if _should_compute_bucket_code(row["status_inspekcji_kod"]) else None
 		inspection_id = int(row["id"])
+		zakres_inspekcji_raw = str(row["zakres_inspekcji"] or "-").strip() or "-"
+		zakres_inspekcji_items = _scope_items_from_ids_csv(conn, row["zakres_inspekcji_ids_csv"], scope_name_cache)
 		leader_user_id = int(row["osoba_kierujaca_user_id"]) if row["osoba_kierujaca_user_id"] is not None else None
 		is_leader_current_user = leader_user_id is not None and int(operator["id"]) == leader_user_id
 		is_member_current_user = _is_member_current_user(conn, inspection_id, int(operator["id"]))
@@ -1739,7 +1760,8 @@ def get_inspections_detailed(
 				"status_inspekcji_skrot": str(row["status_inspekcji_skrot"] or status_label or "-").strip() or "-",
 				"status_inspekcji_id": int(row["status_inspekcji_id"]) if row["status_inspekcji_id"] is not None else None,
 				"status_inspekcji": status_label,
-				"zakres_inspekcji": str(row["zakres_inspekcji"] or "-").strip() or "-",
+				"zakres_inspekcji": zakres_inspekcji_raw,
+				"zakres_inspekcji_items": zakres_inspekcji_items,
 				"typ_zakres_inspekcji": _matrix_cell_value(row["typ_inspekcji"], row["zakres_inspekcji"]),
 				"rok_poczatku": _year_from_date(row["poczatek_inspekcji"]) or "-",
 				"poczatek_inspekcji": poczatek_inspekcji,

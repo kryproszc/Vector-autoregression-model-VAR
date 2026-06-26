@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import json
 import os
 import re
 import sqlite3
@@ -83,6 +84,18 @@ CREATE TABLE IF NOT EXISTS inspection_scopes (
 )
 """
 
+CREATE_INSPECTION_TEAMS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS inspection_teams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    inspection_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    utworzono_o TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (inspection_id) REFERENCES inspections(id) ON DELETE CASCADE,
+    FOREIGN KEY (team_id) REFERENCES teams(id),
+    UNIQUE (inspection_id, team_id)
+)
+"""
+
 CREATE_INDEX_INSPECTION_SCOPES_INSPECTION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_inspection_scopes_inspection_id
 ON inspection_scopes(inspection_id)
@@ -91,6 +104,16 @@ ON inspection_scopes(inspection_id)
 CREATE_INDEX_INSPECTION_SCOPES_SCOPE_SQL = """
 CREATE INDEX IF NOT EXISTS idx_inspection_scopes_scope_id
 ON inspection_scopes(scope_id)
+"""
+
+CREATE_INDEX_INSPECTION_TEAMS_INSPECTION_SQL = """
+CREATE INDEX IF NOT EXISTS idx_inspection_teams_inspection_id
+ON inspection_teams(inspection_id)
+"""
+
+CREATE_INDEX_INSPECTION_TEAMS_TEAM_SQL = """
+CREATE INDEX IF NOT EXISTS idx_inspection_teams_team_id
+ON inspection_teams(team_id)
 """
 
 CREATE_INDEX_INSPECTION_MEMBERS_INSPECTION_SQL = """
@@ -196,6 +219,18 @@ CREATE TABLE IF NOT EXISTS recommendation_multi_dates (
 )
 """
 
+CREATE_RECOMMENDATION_TEAMS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS recommendation_teams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recommendation_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (recommendation_id) REFERENCES recommendations(id) ON DELETE CASCADE,
+    FOREIGN KEY (team_id) REFERENCES teams(id),
+    UNIQUE (recommendation_id, team_id)
+)
+"""
+
 CREATE_INDEX_RECOMMENDATION_MULTI_DATES_REC_SQL = """
 CREATE INDEX IF NOT EXISTS idx_recommendation_multi_dates_rec
 ON recommendation_multi_dates(recommendation_id)
@@ -204,6 +239,16 @@ ON recommendation_multi_dates(recommendation_id)
 CREATE_INDEX_RECOMMENDATION_MULTI_DATES_TYPE_VALUE_SQL = """
 CREATE INDEX IF NOT EXISTS idx_recommendation_multi_dates_type_value
 ON recommendation_multi_dates(date_type, date_value)
+"""
+
+CREATE_INDEX_RECOMMENDATION_TEAMS_REC_SQL = """
+CREATE INDEX IF NOT EXISTS idx_recommendation_teams_rec
+ON recommendation_teams(recommendation_id)
+"""
+
+CREATE_INDEX_RECOMMENDATION_TEAMS_TEAM_SQL = """
+CREATE INDEX IF NOT EXISTS idx_recommendation_teams_team
+ON recommendation_teams(team_id)
 """
 
 CREATE_OBLIGATING_DECISIONS_TABLE_SQL = """
@@ -1092,6 +1137,56 @@ WHERE slownik_pozycja_id IS NULL
 """
 
 
+def _migrate_inspection_team_ids_column_to_relation(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(inspections)").fetchall()}
+    if "inspection_team_ids" not in columns:
+        return
+
+    inspection_rows = conn.execute(
+        "SELECT id, inspection_team_ids FROM inspections"
+    ).fetchall()
+    for row in inspection_rows:
+        inspection_id = int(row["id"])
+        existing_rel = conn.execute(
+            "SELECT 1 FROM inspection_teams WHERE inspection_id = ? LIMIT 1",
+            (inspection_id,),
+        ).fetchone()
+        if existing_rel is not None:
+            continue
+
+        raw_value = row["inspection_team_ids"]
+        if raw_value is None:
+            continue
+        cleaned = str(raw_value).strip()
+        if not cleaned:
+            continue
+        try:
+            loaded = json.loads(cleaned)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(loaded, list):
+            continue
+
+        normalized_ids: list[int] = []
+        for item in loaded:
+            try:
+                normalized_ids.append(int(item))
+            except (TypeError, ValueError):
+                continue
+
+        for team_id in sorted(set(normalized_ids)):
+            team_exists = conn.execute(
+                "SELECT 1 FROM teams WHERE id = ? LIMIT 1",
+                (team_id,),
+            ).fetchone()
+            if team_exists is None:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO inspection_teams (inspection_id, team_id) VALUES (?, ?)",
+                (inspection_id, team_id),
+            )
+
+
 def _ensure_inspections_schema(conn: sqlite3.Connection) -> None:
     has_table = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='inspections'"
@@ -1239,17 +1334,28 @@ def _ensure_inspections_schema(conn: sqlite3.Connection) -> None:
 
         if not required.issubset(columns):
             conn.execute("DROP TABLE IF EXISTS inspection_members")
+            conn.execute("DROP TABLE IF EXISTS inspection_teams")
             conn.execute("DROP TABLE inspections")
 
     conn.execute(CREATE_INSPECTIONS_TABLE_SQL)
     conn.execute(CREATE_INSPECTION_MEMBERS_TABLE_SQL)
     conn.execute(CREATE_INSPECTION_SCOPES_TABLE_SQL)
+    conn.execute(CREATE_INSPECTION_TEAMS_TABLE_SQL)
     conn.execute(CREATE_INDEX_INSPECTION_MEMBERS_INSPECTION_SQL)
     conn.execute(CREATE_INDEX_INSPECTION_MEMBERS_USER_SQL)
     conn.execute(CREATE_INDEX_INSPECTION_SCOPES_INSPECTION_SQL)
     conn.execute(CREATE_INDEX_INSPECTION_SCOPES_SCOPE_SQL)
+    conn.execute(CREATE_INDEX_INSPECTION_TEAMS_INSPECTION_SQL)
+    conn.execute(CREATE_INDEX_INSPECTION_TEAMS_TEAM_SQL)
     conn.execute(CREATE_INDEX_INSPECTIONS_LP_SQL)
     conn.execute(CREATE_INDEX_INSPECTIONS_KOD_SQL)
+
+    # Migrate legacy JSON column values to relation table and then remove the legacy column.
+    _migrate_inspection_team_ids_column_to_relation(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(inspections)").fetchall()}
+    if "inspection_team_ids" in columns:
+        conn.execute("ALTER TABLE inspections DROP COLUMN inspection_team_ids")
+
     conn.execute(CREATE_INSPECTION_MULTI_DATES_TABLE_SQL)
     conn.execute(CREATE_INDEX_MULTI_DATES_INSPECTION_SQL)
     conn.execute(CREATE_INDEX_MULTI_DATES_TYPE_VALUE_SQL)
@@ -1664,6 +1770,7 @@ def _ensure_recommendations_schema(conn: sqlite3.Connection) -> None:
         }
         if not required.issubset(columns):
             conn.execute("DROP TABLE IF EXISTS recommendation_multi_dates")
+            conn.execute("DROP TABLE IF EXISTS recommendation_teams")
             conn.execute("DROP TABLE recommendations")
         else:
             if "kod_zalecenia" not in columns:
@@ -1839,6 +1946,9 @@ def _ensure_recommendations_schema(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_RECOMMENDATION_MULTI_DATES_TABLE_SQL)
     conn.execute(CREATE_INDEX_RECOMMENDATION_MULTI_DATES_REC_SQL)
     conn.execute(CREATE_INDEX_RECOMMENDATION_MULTI_DATES_TYPE_VALUE_SQL)
+    conn.execute(CREATE_RECOMMENDATION_TEAMS_TABLE_SQL)
+    conn.execute(CREATE_INDEX_RECOMMENDATION_TEAMS_REC_SQL)
+    conn.execute(CREATE_INDEX_RECOMMENDATION_TEAMS_TEAM_SQL)
 
     code_rows = conn.execute(
         "SELECT id, kod_zalecenia, data_zalecen, inspection_id, utworzono_o FROM recommendations"

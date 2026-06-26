@@ -38,30 +38,29 @@ INSPECTION_STATUS_BLOCK_ERROR_CODE = "INSPECTION_STATUS_BLOCKS_OPERATION"
 
 class RecommendationCreate(BaseModel):
     model_config = ConfigDict(
+        extra="forbid",
         json_schema_extra={
             "example": {
                 "inspectionId": 1,
                 "pozycja": 1,
-                "nazwaPodmiotu": "Zaklad Tamy",
                 "dataZalecen": "2026-10-31",
-                "status": "W toku",
+                "statusId": 1,
                 "komentarz": "Opis zalecenia",
                 "terminyWykonaniaZalecenList": ["2026-10-01", "2026-10-05"],
                 "dataAkceptacjiNotyWeryfikacjiList": ["2026-10-10"],
             }
-        }
+        },
     )
 
     inspectionId: int | None = None
+    inspectionTeamIds: list[int] | None = None
+    inspection_team_ids: list[int] | None = None
     pozycja: int = Field(ge=1)
-    nazwaPodmiotu: str | None = None
+    nazwaPodmiotuId: int | None = None
     dataZalecen: str | None = None
     terminyWykonaniaZalecenList: list[str] | None = None
-    # Legacy aliases kept for backward compatibility.
-    terminWykonaniaZalecen: str | None = None
-    status: str | None = None
+    statusId: int
     komentarz: str | None = None
-    dataZalecenList: list[str] | None = None
     dataAkceptacjiNotyWeryfikacjiList: list[str] | None = None
     brakTerminowWykonaniaZalecen: bool = False
     brakDatAkceptacjiNotyWeryfikacji: bool = False
@@ -69,10 +68,11 @@ class RecommendationCreate(BaseModel):
 
 class RecommendationUpdate(BaseModel):
     model_config = ConfigDict(
+        extra="forbid",
         json_schema_extra={
             "example": {
                 "pozycja": 2,
-                "status": "Zamkniete",
+                "statusId": 2,
                 "komentarz": "Po weryfikacji",
                 "terminyWykonaniaZalecenList": ["2026-10-15"],
                 "dataAkceptacjiNotyWeryfikacjiList": ["2026-10-20", "2026-10-22"],
@@ -81,17 +81,16 @@ class RecommendationUpdate(BaseModel):
     )
 
     inspectionId: int | None = None
+    inspectionTeamIds: list[int] | None = None
+    inspection_team_ids: list[int] | None = None
     lockToken: str | None = None
     expectedUpdatedAt: str | None = None
     pozycja: int | None = Field(default=None, ge=1)
-    nazwaPodmiotu: str | None = None
+    nazwaPodmiotuId: int | None = None
     dataZalecen: str | None = None
     terminyWykonaniaZalecenList: list[str] | None = None
-    # Legacy aliases kept for backward compatibility.
-    terminWykonaniaZalecen: str | None = None
-    status: str | None = None
+    statusId: int | None = None
     komentarz: str | None = None
-    dataZalecenList: list[str] | None = None
     dataAkceptacjiNotyWeryfikacjiList: list[str] | None = None
     brakTerminowWykonaniaZalecen: bool | None = None
     brakDatAkceptacjiNotyWeryfikacji: bool | None = None
@@ -103,9 +102,11 @@ class RecommendationRead(BaseModel):
     kodZalecenia: str | None = None
     canEdit: bool
     inspectionId: int | None = None
+    inspectionTeamIds: list[int]
     inspectionLp: int | None = None
     inspectionKod: str | None = None
     pozycja: int
+    nazwaPodmiotuId: int | None = None
     nazwaPodmiotu: str | None = None
     nazwaPodmiotuSkrocona: str | None = None
     nazwaPodmiotuSkrot: str | None = None
@@ -113,6 +114,7 @@ class RecommendationRead(BaseModel):
     terminyWykonaniaZalecenList: list[str]
     # Legacy aliases kept for backward compatibility.
     terminWykonaniaZalecen: str | None = None
+    statusId: int | None = None
     status: str | None = None
     statusSkrocona: str | None = None
     statusSkrot: str | None = None
@@ -148,6 +150,25 @@ def _norm(value: str | None) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned if cleaned else None
+
+
+def _raise_contract_422(
+    code: str,
+    message: str,
+    *,
+    field: str,
+    value: Any = None,
+    kod_typu: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "field": field,
+        "value": value,
+    }
+    if kod_typu is not None:
+        payload["kodTypu"] = kod_typu
+    raise HTTPException(status_code=422, detail=payload)
 
 
 def _slug_code(value: str) -> str:
@@ -320,6 +341,45 @@ def _resolve_slownik_item_id(conn: Any, kod_typu: str, raw_value: str | None) ->
     return int(cursor.lastrowid)
 
 
+def _resolve_dictionary_id_strict(
+    conn: Any,
+    *,
+    kod_typu: str,
+    field_name: str,
+    id_value: int | None,
+    required: bool,
+) -> int | None:
+    if id_value is None:
+        if required:
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                f"Pole {field_name} jest wymagane.",
+                field=field_name,
+                value=id_value,
+                kod_typu=kod_typu,
+            )
+        return None
+
+    row = conn.execute(
+        """
+        SELECT id, aktywny
+        FROM slownik_pozycje
+        WHERE lower(kod_typu) = lower(?) AND id = ?
+        LIMIT 1
+        """,
+        (kod_typu, int(id_value)),
+    ).fetchone()
+    if row is None or int(row["aktywny"] or 0) != 1:
+        _raise_contract_422(
+            "UNKNOWN_DICTIONARY_ID",
+            f"{field_name} nie wskazuje aktywnej pozycji slownika.",
+            field=field_name,
+            value=id_value,
+            kod_typu=kod_typu,
+        )
+    return int(row["id"])
+
+
 def _normalize_date_list(raw_values: list[str] | None, field_name: str) -> list[str]:
     if raw_values is None:
         return []
@@ -327,16 +387,36 @@ def _normalize_date_list(raw_values: list[str] | None, field_name: str) -> list[
     normalized: list[str] = []
     for raw in raw_values:
         if not isinstance(raw, str):
-            raise HTTPException(status_code=422, detail=f"{field_name} zawiera niepoprawny typ")
+            _raise_contract_422(
+                "INVALID_DATE_VALUE",
+                f"{field_name} zawiera niepoprawny typ.",
+                field=field_name,
+                value=raw,
+            )
         value = raw.strip()
         if not value:
-            raise HTTPException(status_code=422, detail=f"{field_name} nie moze zawierac pustych wartosci")
+            _raise_contract_422(
+                "INVALID_DATE_VALUE",
+                f"{field_name} nie moze zawierac pustych wartosci.",
+                field=field_name,
+                value=raw,
+            )
         if value.lower() in {"brak", "0", "0000-00-00"}:
-            raise HTTPException(status_code=422, detail=f"{field_name} ma niepoprawny format daty")
+            _raise_contract_422(
+                "INVALID_DATE_VALUE",
+                f"{field_name} ma niepoprawny format daty.",
+                field=field_name,
+                value=raw,
+            )
         try:
             parsed = date.fromisoformat(value)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"{field_name} ma niepoprawny format daty") from exc
+            _raise_contract_422(
+                "INVALID_DATE_VALUE",
+                f"{field_name} ma niepoprawny format daty.",
+                field=field_name,
+                value=raw,
+            )
         normalized.append(parsed.isoformat())
 
     # Keep deterministic order and remove duplicates.
@@ -351,7 +431,12 @@ def _normalize_date_absence_state(
     bool_field_name: str,
 ) -> tuple[list[str], bool]:
     if brak and dates:
-        raise HTTPException(status_code=422, detail=f"Gdy {bool_field_name}=true, {list_field_name} musi byc puste")
+        _raise_contract_422(
+            "INVALID_ABSENCE_COMBINATION",
+            f"Gdy {bool_field_name}=true, {list_field_name} musi byc puste.",
+            field=bool_field_name,
+            value=True,
+        )
     if brak:
         return [], True
     if dates:
@@ -365,48 +450,95 @@ def _validate_optional_iso_date(value: str | None, field_name: str) -> str | Non
     try:
         parsed = date.fromisoformat(str(value))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"{field_name} ma niepoprawny format daty") from exc
+        _raise_contract_422(
+            "INVALID_DATE_VALUE",
+            f"{field_name} ma niepoprawny format daty.",
+            field=field_name,
+            value=value,
+        )
     return parsed.isoformat()
 
 
 def _resolve_single_data_zalecen(
     *,
     data_zalecen: str | None,
-    legacy_termin_wykonania: str | None,
 ) -> str | None:
-    normalized_data = _validate_optional_iso_date(data_zalecen, "dataZalecen") if data_zalecen is not None else None
-    normalized_legacy = (
-        _validate_optional_iso_date(legacy_termin_wykonania, "terminWykonaniaZalecen")
-        if legacy_termin_wykonania is not None
-        else None
-    )
-    # Frontend may send canonical and legacy fields together during transition.
-    # Canonical field always wins to avoid silent save failures.
-    return normalized_data if normalized_data is not None else normalized_legacy
+    return _validate_optional_iso_date(data_zalecen, "dataZalecen") if data_zalecen is not None else None
+
+
+def _normalize_and_validate_recommendation_team_ids(
+    conn: Any,
+    *,
+    team_ids: list[int] | None,
+    team_ids_legacy: list[int] | None,
+    field_sent: bool,
+) -> list[int]:
+    if team_ids is not None and team_ids_legacy is not None:
+        normalized_primary = sorted(set(int(x) for x in team_ids))
+        normalized_legacy = sorted(set(int(x) for x in team_ids_legacy))
+        if normalized_primary != normalized_legacy:
+            _raise_contract_422(
+                "CONFLICTING_TEAM_IDS",
+                "inspectionTeamIds i inspection_team_ids wskazuja rozne wartosci.",
+                field="inspectionTeamIds",
+                value={"inspectionTeamIds": team_ids, "inspection_team_ids": team_ids_legacy},
+            )
+
+    selected = team_ids if team_ids is not None else team_ids_legacy
+    if field_sent and selected is None:
+        _raise_contract_422(
+            "INVALID_TEAM_IDS",
+            "Pole inspectionTeamIds nie moze byc null.",
+            field="inspectionTeamIds",
+            value=selected,
+        )
+    if selected is None:
+        return []
+
+    normalized_ids = sorted(set(int(x) for x in selected))
+    if not normalized_ids:
+        return []
+
+    placeholders = ",".join(["?"] * len(normalized_ids))
+    rows = conn.execute(
+        f"SELECT id FROM teams WHERE id IN ({placeholders})",
+        tuple(normalized_ids),
+    ).fetchall()
+    existing = {int(row["id"]) for row in rows}
+    missing = [team_id for team_id in normalized_ids if team_id not in existing]
+    if missing:
+        _raise_contract_422(
+            "UNKNOWN_TEAM_ID",
+            "inspectionTeamIds zawiera nieistniejace teams.id.",
+            field="inspectionTeamIds",
+            value=missing,
+        )
+
+    return normalized_ids
+
+
+def _sync_recommendation_teams(conn: Any, recommendation_id: int, team_ids: list[int]) -> None:
+    conn.execute("DELETE FROM recommendation_teams WHERE recommendation_id = ?", (recommendation_id,))
+    for team_id in team_ids:
+        conn.execute(
+            "INSERT OR IGNORE INTO recommendation_teams (recommendation_id, team_id) VALUES (?, ?)",
+            (recommendation_id, int(team_id)),
+        )
+
+
+def _get_recommendation_team_ids(conn: Any, recommendation_id: int) -> list[int]:
+    rows = conn.execute(
+        "SELECT team_id FROM recommendation_teams WHERE recommendation_id = ? ORDER BY team_id ASC",
+        (recommendation_id,),
+    ).fetchall()
+    return [int(row["team_id"]) for row in rows]
 
 
 def _resolve_terminy_wykonania_list(
     *,
     terminy_wykonania_list: list[str] | None,
-    legacy_data_zalecen_list: list[str] | None,
 ) -> list[str]:
-    normalized_new = (
-        _normalize_date_list(terminy_wykonania_list, "terminyWykonaniaZalecenList")
-        if terminy_wykonania_list is not None
-        else None
-    )
-    normalized_legacy = (
-        _normalize_date_list(legacy_data_zalecen_list, "dataZalecenList")
-        if legacy_data_zalecen_list is not None
-        else None
-    )
-    # Frontend may send canonical and legacy fields together during transition.
-    # Canonical field always wins to avoid silent save failures.
-    if normalized_new is not None:
-        return normalized_new
-    if normalized_legacy is not None:
-        return normalized_legacy
-    return []
+    return _normalize_date_list(terminy_wykonania_list, "terminyWykonaniaZalecenList") if terminy_wykonania_list is not None else []
 
 
 def _recommendation_code_year(
@@ -653,16 +785,27 @@ def _base_select_sql() -> str:
         SELECT
             r.id,
             r.inspection_id,
+            (
+                SELECT group_concat(x.tid, ',')
+                FROM (
+                    SELECT rt.team_id AS tid
+                    FROM recommendation_teams rt
+                    WHERE rt.recommendation_id = r.id
+                    ORDER BY rt.team_id ASC
+                ) x
+            ) AS inspection_team_ids_csv,
             i.lp AS inspection_lp,
             i.kod_inspekcji AS inspection_kod,
             r.kod_zalecenia,
             r.created_by_user_id,
             r.pozycja,
+            r.nazwa_podmiotu_id,
             np.nazwa_pozycji AS nazwa_podmiotu_nazwa,
             np.skrot_pozycji AS nazwa_podmiotu_skrot,
             r.data_zalecen,
             r.brak_terminow_wykonania_zalecen,
             r.brak_dat_akceptacji_noty_weryfikacji,
+            r.status_zalecenia_id,
             st.nazwa_pozycji AS status_nazwa,
             st.skrot_pozycji AS status_skrot,
             r.komentarz,
@@ -701,15 +844,21 @@ def _row_to_payload(row: dict[str, Any], lp: int, can_edit: bool) -> dict[str, A
     termin_wykonania_single = _first_date_or_none(terminy_wykonania_list)
     brak_terminow = int(row.get("brak_terminow_wykonania_zalecen") or 0) == 1
     brak_akceptacji = int(row.get("brak_dat_akceptacji_noty_weryfikacji") or 0) == 1
+    inspection_team_ids_csv = row.get("inspection_team_ids_csv")
+    inspection_team_ids: list[int] = []
+    if inspection_team_ids_csv:
+        inspection_team_ids = [int(x) for x in str(inspection_team_ids_csv).split(",") if x.strip()]
     return {
         "id": int(row["id"]),
         "lp": lp,
         "kodZalecenia": row.get("kod_zalecenia"),
         "canEdit": can_edit,
         "inspectionId": int(row["inspection_id"]) if row.get("inspection_id") is not None else None,
+        "inspectionTeamIds": inspection_team_ids,
         "inspectionLp": int(row["inspection_lp"]) if row.get("inspection_lp") is not None else None,
         "inspectionKod": row.get("inspection_kod"),
         "pozycja": int(row["pozycja"]),
+        "nazwaPodmiotuId": int(row["nazwa_podmiotu_id"]) if row.get("nazwa_podmiotu_id") is not None else None,
         "nazwaPodmiotu": row.get("nazwa_podmiotu_nazwa") or "brak",
         "nazwaPodmiotuSkrocona": row.get("nazwa_podmiotu_skrot"),
         "nazwaPodmiotuSkrot": row.get("nazwa_podmiotu_skrot"),
@@ -717,6 +866,7 @@ def _row_to_payload(row: dict[str, Any], lp: int, can_edit: bool) -> dict[str, A
         "terminyWykonaniaZalecenList": terminy_wykonania_list,
         # Legacy aliases.
         "terminWykonaniaZalecen": termin_wykonania_single,
+        "statusId": int(row["status_zalecenia_id"]) if row.get("status_zalecenia_id") is not None else None,
         "status": row.get("status_nazwa") or "brak",
         "statusSkrocona": row.get("status_skrot"),
         "statusSkrot": row.get("status_skrot"),
@@ -795,7 +945,7 @@ def list_recommendations(
     inspectionId: int | None = Query(default=None),
     status: str | None = Query(default=None),
     nazwaPodmiotu: str | None = Query(default=None),
-    sortBy: str = Query(default="id"),
+    sortBy: str = Query(default="dataZalecen"),
     sortOrder: str = Query(default="desc"),
     x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
@@ -892,12 +1042,8 @@ def create_recommendation(
     payload: RecommendationCreate,
     x_operator_login: str | None = Header(default=None, alias="X-Operator-Login"),
 ) -> dict[str, Any]:
-    if payload.pozycja < 1:
-        raise HTTPException(status_code=400, detail="pozycja musi byc >= 1")
-
     terminy_wykonania_list = _resolve_terminy_wykonania_list(
         terminy_wykonania_list=payload.terminyWykonaniaZalecenList,
-        legacy_data_zalecen_list=payload.dataZalecenList,
     )
     data_akceptacji_list = _normalize_date_list(
         payload.dataAkceptacjiNotyWeryfikacjiList,
@@ -905,7 +1051,6 @@ def create_recommendation(
     )
     data_zalecen_single = _resolve_single_data_zalecen(
         data_zalecen=payload.dataZalecen,
-        legacy_termin_wykonania=payload.terminWykonaniaZalecen,
     )
     terminy_wykonania_list, brak_terminow = _normalize_date_absence_state(
         dates=terminy_wykonania_list,
@@ -925,6 +1070,7 @@ def create_recommendation(
 
         resolved_inspection_id: int | None = None
         resolved_nazwa_podmiotu_id: int | None = None
+        inspection_row = None
 
         if payload.inspectionId is not None:
             inspection_row = conn.execute(
@@ -950,14 +1096,36 @@ def create_recommendation(
             if inspection_row["nazwa_podmiotu_id"] is not None:
                 resolved_nazwa_podmiotu_id = int(inspection_row["nazwa_podmiotu_id"])
             else:
-                resolved_nazwa_podmiotu_id = _resolve_slownik_item_id(conn, "nazwy_podmiotow", payload.nazwaPodmiotu)
+                resolved_nazwa_podmiotu_id = _resolve_dictionary_id_strict(
+                    conn,
+                    kod_typu="nazwy_podmiotow",
+                    field_name="nazwaPodmiotuId",
+                    id_value=payload.nazwaPodmiotuId,
+                    required=True,
+                )
         else:
-            if _norm(payload.nazwaPodmiotu) is None:
-                raise HTTPException(status_code=400, detail="nazwaPodmiotu jest wymagane gdy inspectionId jest null")
-            resolved_nazwa_podmiotu_id = _resolve_slownik_item_id(conn, "nazwy_podmiotow", payload.nazwaPodmiotu)
+            resolved_nazwa_podmiotu_id = _resolve_dictionary_id_strict(
+                conn,
+                kod_typu="nazwy_podmiotow",
+                field_name="nazwaPodmiotuId",
+                id_value=payload.nazwaPodmiotuId,
+                required=True,
+            )
 
-        status_id = _resolve_slownik_item_id(conn, "statusy_zalecen", payload.status)
-        inspection_start = str(inspection_row["poczatek_inspekcji"]) if payload.inspectionId is not None and inspection_row is not None else None
+        status_id = _resolve_dictionary_id_strict(
+            conn,
+            kod_typu="statusy_zalecen",
+            field_name="statusId",
+            id_value=payload.statusId,
+            required=True,
+        )
+        inspection_team_ids = _normalize_and_validate_recommendation_team_ids(
+            conn,
+            team_ids=payload.inspectionTeamIds,
+            team_ids_legacy=payload.inspection_team_ids,
+            field_sent=(payload.inspectionTeamIds is not None or payload.inspection_team_ids is not None),
+        )
+        inspection_start = str(inspection_row["poczatek_inspekcji"]) if inspection_row is not None else None
         recommendation_year = _recommendation_code_year(data_zalecen_single, inspection_start, terminy_wykonania_list)
 
         cursor = conn.execute(
@@ -991,6 +1159,7 @@ def create_recommendation(
             ),
         )
         recommendation_id = int(cursor.lastrowid)
+        _sync_recommendation_teams(conn, recommendation_id, inspection_team_ids)
 
         _sync_multi_dates(conn, recommendation_id, "TERMIN_WYKONANIA_ZALECEN", terminy_wykonania_list, operator["id"])
         _sync_multi_dates(
@@ -1018,6 +1187,7 @@ def create_recommendation(
             [
                 ("Kod zalecenia", created_payload.get("kodZalecenia")),
                 ("Kod inspekcji", created_payload.get("inspectionKod")),
+                ("Zespoły inspekcji", created_payload.get("inspectionTeamIds")),
                 ("Pozycja", created_payload.get("pozycja")),
                 ("Nazwa podmiotu", created_payload.get("nazwaPodmiotu")),
                 ("Data zaleceń", created_payload.get("dataZalecen")),
@@ -1085,6 +1255,11 @@ def update_recommendation(
         previous_inspection_id = inspection_id
         next_inspection_id = inspection_id
         next_nazwa_podmiotu_id = current_dict.get("nazwa_podmiotu_id")
+        inspection_id_changed = False
+        current_team_ids = _get_recommendation_team_ids(conn, recommendation_id)
+        current_dict["_inspection_team_ids"] = ", ".join(str(x) for x in current_team_ids) or None
+        next_team_ids = current_team_ids
+        teams_updated = False
 
         set_parts: list[str] = []
         values: list[Any] = []
@@ -1115,61 +1290,86 @@ def update_recommendation(
 
             set_parts.append("inspection_id = ?")
             values.append(next_inspection_id)
+            inspection_id_changed = next_inspection_id != previous_inspection_id
 
-        if next_inspection_id is not None:
+        # Closed-inspection guard applies only when switching target inspection.
+        if inspection_id_changed and next_inspection_id is not None:
             blocked, status_code, status_label = _inspection_status_is_forbidden(conn, next_inspection_id, operator)
             if blocked:
                 _raise_inspection_status_block(next_inspection_id, status_code, status_label)
 
         if "pozycja" in fields:
             if fields["pozycja"] is None or int(fields["pozycja"]) < 1:
-                raise HTTPException(status_code=400, detail="pozycja musi byc >= 1")
+                _raise_contract_422(
+                    "INVALID_VALUE",
+                    "pozycja musi byc >= 1.",
+                    field="pozycja",
+                    value=fields.get("pozycja"),
+                )
             set_parts.append("pozycja = ?")
             values.append(int(fields["pozycja"]))
 
-        if "nazwaPodmiotu" in fields:
-            nazwa_id = _resolve_slownik_item_id(conn, "nazwy_podmiotow", fields["nazwaPodmiotu"])
+        if "nazwaPodmiotuId" in fields:
+            nazwa_id = _resolve_dictionary_id_strict(
+                conn,
+                kod_typu="nazwy_podmiotow",
+                field_name="nazwaPodmiotuId",
+                id_value=fields.get("nazwaPodmiotuId"),
+                required=next_inspection_id is None,
+            )
             next_nazwa_podmiotu_id = nazwa_id
             set_parts.append("nazwa_podmiotu_id = ?")
             values.append(nazwa_id)
 
         if next_inspection_id is None and next_nazwa_podmiotu_id is None:
-            raise HTTPException(status_code=400, detail="nazwaPodmiotu jest wymagane gdy inspectionId jest null")
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                "Pole nazwaPodmiotuId jest wymagane gdy inspectionId jest null.",
+                field="nazwaPodmiotuId",
+                value=None,
+                kod_typu="nazwy_podmiotow",
+            )
 
-        single_date_payload_present = "dataZalecen" in fields or "terminWykonaniaZalecen" in fields
+        single_date_payload_present = "dataZalecen" in fields
         if single_date_payload_present:
             resolved_data_zalecen = _resolve_single_data_zalecen(
                 data_zalecen=fields.get("dataZalecen"),
-                legacy_termin_wykonania=fields.get("terminWykonaniaZalecen"),
             )
             set_parts.append("data_zalecen = ?")
             values.append(resolved_data_zalecen)
 
-        if "status" in fields:
-            incoming_status_norm = _norm(fields.get("status"))
+        if "statusId" in fields:
             current_status_id = (
                 int(current_dict["status_zalecenia_id"])
                 if current_dict.get("status_zalecenia_id") is not None
                 else None
             )
 
-            # Some frontend flows send a synthetic placeholder "brak" even when
-            # no status is persisted. Treat this as a no-op to avoid fake updates.
-            if current_status_id is None and (
-                incoming_status_norm is None or incoming_status_norm.casefold() == "brak"
-            ):
-                fields.pop("status", None)
+            status_id = _resolve_dictionary_id_strict(
+                conn,
+                kod_typu="statusy_zalecen",
+                field_name="statusId",
+                id_value=fields.get("statusId"),
+                required=True,
+            )
+            if current_status_id != int(status_id):
+                set_parts.append("status_zalecenia_id = ?")
+                values.append(status_id)
             else:
-                status_id = _resolve_slownik_item_id(conn, "statusy_zalecen", fields["status"])
-                if current_status_id != int(status_id):
-                    set_parts.append("status_zalecenia_id = ?")
-                    values.append(status_id)
-                else:
-                    fields.pop("status", None)
+                fields.pop("statusId", None)
 
         if "komentarz" in fields:
             set_parts.append("komentarz = ?")
             values.append(fields["komentarz"])
+
+        if "inspectionTeamIds" in fields or "inspection_team_ids" in fields:
+            next_team_ids = _normalize_and_validate_recommendation_team_ids(
+                conn,
+                team_ids=fields.get("inspectionTeamIds"),
+                team_ids_legacy=fields.get("inspection_team_ids"),
+                field_sent=True,
+            )
+            teams_updated = next_team_ids != current_team_ids
 
         current_brak_terminow = int(current_dict.get("brak_terminow_wykonania_zalecen") or 0) == 1
         current_brak_akceptacji = int(current_dict.get("brak_dat_akceptacji_noty_weryfikacji") or 0) == 1
@@ -1186,12 +1386,11 @@ def update_recommendation(
             )
             row_touched = True
 
-        multi_dates_payload_present = "terminyWykonaniaZalecenList" in fields or "dataZalecenList" in fields
+        multi_dates_payload_present = "terminyWykonaniaZalecenList" in fields
         bool_columns_update: dict[str, int] = {}
         if multi_dates_payload_present:
             terminy_wykonania = _resolve_terminy_wykonania_list(
                 terminy_wykonania_list=fields.get("terminyWykonaniaZalecenList"),
-                legacy_data_zalecen_list=fields.get("dataZalecenList"),
             )
             terminy_wykonania, brak_terminow_after = _normalize_date_absence_state(
                 dates=terminy_wykonania,
@@ -1243,6 +1442,14 @@ def update_recommendation(
         for affected_inspection_id in {previous_inspection_id, next_inspection_id}:
             _sync_inspection_recommendation_dates(conn, affected_inspection_id, operator["id"])
 
+        if teams_updated:
+            _sync_recommendation_teams(conn, recommendation_id, next_team_ids)
+            conn.execute(
+                "UPDATE recommendations SET updated_by_user_id = ?, zaktualizowano_o = ? WHERE id = ?",
+                (operator["id"], now_rfc3339_utc_ms(), recommendation_id),
+            )
+            row_touched = True
+
         if not row_touched and (
             multi_dates_payload_present or "dataAkceptacjiNotyWeryfikacjiList" in fields
         ):
@@ -1258,6 +1465,8 @@ def update_recommendation(
             audit_fields["dataZalecen"] = resolved_data_zalecen
         if multi_dates_payload_present:
             audit_fields["terminyWykonaniaZalecenList"] = terminy_wykonania
+        if teams_updated:
+            audit_fields["inspectionTeamIds"] = next_team_ids
         changes_r = build_recommendation_changes(conn, current_dict, audit_fields, dates_z_before, dates_a_before)
         write_audit_log(conn, new_session_id(), operator["login"], AKCJA_UPDATE,
                         REJESTR_ZALECENIA, rekord_kod_u, changes_r)
