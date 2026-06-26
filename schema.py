@@ -922,12 +922,7 @@ FROM slownik_pozycje p
 WHERE lower(p.kod_typu) = 'statusy_inspekcji'
   AND upper(p.kod_pozycji) IN ('I_SI_2', 'I_SI_3', 'I_SI_4', 'I_SI_5', 'I_SI_6', 'I_SI_7', 'I_SI_8', 'I_SI_9')
 ON CONFLICT(slownik_pozycja_id)
-DO UPDATE SET
-    kolor = excluded.kolor,
-    odcien = excluded.odcien,
-    intensywnosc = excluded.intensywnosc,
-    zaktualizowano_o = CURRENT_TIMESTAMP,
-    zaktualizowano_przez = excluded.zaktualizowano_przez
+DO NOTHING
 """
 
 SEED_TEAMS_SQL = """
