@@ -1,1 +1,548 @@
-INSPECTIONS_LEGACY_SCOPE_TEXT_SPLIT_ENABLED=0.
+import { type CSSProperties, type ReactNode, useEffect, useRef } from "react";
+
+import { INSPECTION_COLUMN_TOOLTIPS } from "@/features/inspections/data";
+import type {
+	InspectionColumn,
+	InspectionColumnKey,
+	InspectionRow,
+} from "@/features/inspections/types";
+import { RegistryDataTable } from "@/shared/components/table/RegistryDataTable";
+import { formatDatesInDisplayText } from "@/shared/utils/date";
+
+type SortDirection = "asc" | "desc";
+
+type InspectionNoLetterFlags = {
+	brakDataDoreczeniaPisma: boolean;
+	brakDataPismaZastrzezenia: boolean;
+	brakDataWyslaniaPismaZZastrzezeniami: boolean;
+	brakDataWplywuPisma: boolean;
+	brakDataPismaZOdpowiedzia: boolean;
+	brakDataWyslaniaPismaZOdpowiedzia: boolean;
+};
+
+type InspectionNoAcceptanceDatesFlags = {
+	brakDatAkceptacjiNoty: boolean;
+};
+
+type InspectionStatusStyle = {
+	kolor: string | null;
+	odcien: number | null;
+	intensywnosc: number | null;
+};
+
+type InspectionsDataTableProps = {
+	rowsError: string | null;
+	isRowsLoading: boolean;
+	visibleColumns: InspectionColumn[];
+	columnWidths?: Partial<Record<InspectionColumnKey, number>>;
+	minColumnWidth?: number;
+	sortColumnKey: InspectionColumnKey | null;
+	sortDirection: SortDirection | null;
+	advancedFilters: Partial<Record<InspectionColumnKey, string[]>>;
+	columnFilters: Partial<Record<InspectionColumnKey, string>>;
+	rows: InspectionRow[];
+	scopeDisplayItemsByRowId?: Record<string, string[]>;
+	teamDisplayItemsByRowId?: Record<string, string[]>;
+	noLetterFlagsByRowId?: Record<string, InspectionNoLetterFlags>;
+	noAcceptanceDatesByRowId?: Record<string, InspectionNoAcceptanceDatesFlags>;
+	statusCodeByRowId?: Record<string, string>;
+	statusStyleByCode?: Record<string, InspectionStatusStyle>;
+	enableStatusHighlighting?: boolean;
+	selectedInspectionId: string | null;
+	flashInspectionId?: string | null;
+	centerOnInspectionId?: string | null;
+	onInspectionCentered?: () => void;
+	onSelectInspection: (inspectionId: string) => void;
+	onOpenInspectionPreview?: (inspectionId: string) => void;
+	onSortByColumn: (columnKey: InspectionColumnKey) => void;
+	onResizeColumn?: (columnKey: InspectionColumnKey, width: number) => void;
+	onOpenAdvancedFilter: (
+		columnKey: InspectionColumnKey,
+		triggerElement: HTMLElement,
+	) => void;
+	onFilterChange: (columnKey: InspectionColumnKey, value: string) => void;
+	footer?: ReactNode;
+};
+
+function resolveInspectionTypeFlags(inspectionType: string) {
+	const normalizedType = inspectionType.trim().toLowerCase();
+	const isControlType =
+		normalizedType.includes("kontrol") ||
+		normalizedType.startsWith("kont") ||
+		normalizedType === "k";
+	const isSupervisoryVisitType =
+		normalizedType.includes("wizyta") ||
+		normalizedType.startsWith("wiz") ||
+		normalizedType === "w";
+
+	return {
+		isControlType,
+		isSupervisoryVisitType,
+	};
+}
+
+function isNotApplicableByInspectionType(
+	inspectionType: string,
+	columnKey: InspectionColumnKey,
+) {
+	const { isControlType, isSupervisoryVisitType } =
+		resolveInspectionTypeFlags(inspectionType);
+
+	if (isControlType && !isSupervisoryVisitType) {
+		return columnKey === "dataAkceptacjiSprawozdania" || columnKey === "dataDoreczeniaPisma";
+	}
+
+	if (isSupervisoryVisitType && !isControlType) {
+		return (
+			columnKey === "dataDoreczeniaProtokolu" ||
+			columnKey === "dataWyslaniaPismaZOdpowiedzia" ||
+			columnKey === "dataPismaZOdpowiedzia"
+		);
+	}
+
+	return false;
+}
+
+function resolveStatusRowClass(statusCode: string | undefined) {
+	void statusCode;
+	return "";
+}
+
+const STATUS_PALETTES = [
+	"slate",
+	"gray",
+	"zinc",
+	"neutral",
+	"stone",
+	"red",
+	"orange",
+	"amber",
+	"yellow",
+	"lime",
+	"green",
+	"emerald",
+	"teal",
+	"cyan",
+	"sky",
+	"blue",
+	"indigo",
+	"violet",
+	"purple",
+	"fuchsia",
+	"pink",
+	"rose",
+] as const;
+
+const STATUS_SHADES = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950] as const;
+
+type StatusPalette = (typeof STATUS_PALETTES)[number];
+type StatusShade = (typeof STATUS_SHADES)[number];
+
+type ColorSettings = {
+	color: StatusPalette;
+	shade: StatusShade;
+	opacity: number;
+};
+
+type StatusColorConfig = {
+	si2: ColorSettings;
+	si3: ColorSettings;
+	si4: ColorSettings;
+	si5To9: ColorSettings;
+};
+
+const PALETTE_HUE_SAT: Record<StatusPalette, { hue: number; saturation: number }> = {
+	slate: { hue: 215, saturation: 20 },
+	gray: { hue: 215, saturation: 10 },
+	zinc: { hue: 240, saturation: 6 },
+	neutral: { hue: 30, saturation: 5 },
+	stone: { hue: 24, saturation: 9 },
+	red: { hue: 0, saturation: 84 },
+	orange: { hue: 24, saturation: 92 },
+	amber: { hue: 43, saturation: 96 },
+	yellow: { hue: 55, saturation: 96 },
+	lime: { hue: 83, saturation: 86 },
+	green: { hue: 142, saturation: 71 },
+	emerald: { hue: 160, saturation: 84 },
+	teal: { hue: 173, saturation: 80 },
+	cyan: { hue: 188, saturation: 94 },
+	sky: { hue: 199, saturation: 95 },
+	blue: { hue: 221, saturation: 83 },
+	indigo: { hue: 239, saturation: 84 },
+	violet: { hue: 258, saturation: 90 },
+	purple: { hue: 270, saturation: 91 },
+	fuchsia: { hue: 292, saturation: 84 },
+	pink: { hue: 330, saturation: 81 },
+	rose: { hue: 350, saturation: 89 },
+};
+
+const SHADE_TO_LIGHTNESS: Record<StatusShade, number> = {
+	50: 97,
+	100: 93,
+	200: 86,
+	300: 76,
+	400: 65,
+	500: 54,
+	600: 45,
+	700: 37,
+	800: 30,
+	900: 23,
+	950: 14,
+};
+
+const DEFAULT_STATUS_COLOR_CONFIG: StatusColorConfig = {
+	si2: { color: "emerald", shade: 200, opacity: 55 },
+	si3: { color: "sky", shade: 200, opacity: 51 },
+	si4: { color: "rose", shade: 200, opacity: 39 },
+	si5To9: { color: "yellow", shade: 200, opacity: 31 },
+};
+
+function resolveStatusRowStyle(
+	statusCode: string | undefined,
+	statusStyleByCode: Record<string, InspectionStatusStyle>,
+	config: StatusColorConfig,
+): CSSProperties {
+	void config;
+	const normalized = (statusCode ?? "").trim().toUpperCase();
+
+	const styleFromDictionary = statusStyleByCode[normalized];
+	if (styleFromDictionary) {
+		const paletteKey = String(styleFromDictionary.kolor ?? "").trim().toLowerCase();
+		if (paletteKey in PALETTE_HUE_SAT) {
+			const palette = PALETTE_HUE_SAT[paletteKey as StatusPalette];
+			const shade = Number.isFinite(styleFromDictionary.odcien)
+				? Math.round(Number(styleFromDictionary.odcien))
+				: 200;
+			const lightness =
+				SHADE_TO_LIGHTNESS[shade as StatusShade] ?? SHADE_TO_LIGHTNESS[200];
+			const opacity = Number.isFinite(styleFromDictionary.intensywnosc)
+				? Math.max(0, Math.min(100, Number(styleFromDictionary.intensywnosc))) /
+				  100
+				: 0.75;
+
+			return {
+				backgroundColor: `hsl(${palette.hue} ${palette.saturation}% ${lightness}% / ${opacity})`,
+			};
+		}
+
+		// User explicitly cleared style for this status, so keep it neutral.
+		return {
+			backgroundColor: "rgb(255 255 255 / 1)",
+		};
+	}
+
+	return {
+		backgroundColor: "rgb(255 255 255 / 1)",
+	};
+}
+
+
+export function InspectionsDataTable({
+	rowsError,
+	isRowsLoading,
+	visibleColumns,
+	columnWidths,
+	minColumnWidth,
+	sortColumnKey,
+	sortDirection,
+	advancedFilters,
+	columnFilters,
+	rows,
+	scopeDisplayItemsByRowId = {},
+	teamDisplayItemsByRowId = {},
+	noLetterFlagsByRowId = {},
+	noAcceptanceDatesByRowId = {},
+	statusCodeByRowId = {},
+	statusStyleByCode = {},
+	enableStatusHighlighting = true,
+	selectedInspectionId,
+	flashInspectionId = null,
+	centerOnInspectionId = null,
+	onInspectionCentered,
+	onSelectInspection,
+	onOpenInspectionPreview,
+	onSortByColumn,
+	onResizeColumn,
+	onOpenAdvancedFilter,
+	onFilterChange,
+	footer,
+}: InspectionsDataTableProps) {
+	const tbodyRef = useRef<HTMLTableSectionElement | null>(null);
+
+	useEffect(() => {
+		if (!centerOnInspectionId) {
+			return;
+		}
+
+		const rows = tbodyRef.current?.querySelectorAll<HTMLTableRowElement>(
+			"tr[data-inspection-id]",
+		);
+		if (!rows || rows.length === 0) {
+			return;
+		}
+
+		const targetRow = Array.from(rows).find(
+			(row) => row.dataset.inspectionId === centerOnInspectionId,
+		);
+		if (!targetRow) {
+			return;
+		}
+
+		targetRow.scrollIntoView({ block: "center", inline: "nearest" });
+		onInspectionCentered?.();
+	}, [centerOnInspectionId, onInspectionCentered, rows]);
+
+	return (
+		<RegistryDataTable
+			isLoading={isRowsLoading}
+			errorMessage={rowsError}
+			footer={footer}
+			containerClassName="-mt-1"
+			scrollAreaClassName="h-[calc(96vh-11rem)] min-h-88"
+			tableClassName="min-w-350 table-fixed border-collapse text-slate-900 text-sm"
+			visibleColumns={visibleColumns.map((column) => ({
+				...column,
+				tooltip: INSPECTION_COLUMN_TOOLTIPS[column.key],
+			}))}
+			sortColumnKey={sortColumnKey}
+			sortDirection={sortDirection}
+			advancedFilters={advancedFilters}
+			columnFilters={columnFilters}
+			onSortByColumn={onSortByColumn}
+			columnWidths={columnWidths}
+			minColumnWidth={minColumnWidth}
+			wrapHeaderLabels
+			controlsInFilterRow
+			showInfoIcon
+			infoIconSize={11}
+			onResizeColumn={onResizeColumn}
+			onOpenAdvancedFilter={onOpenAdvancedFilter}
+			onFilterChange={onFilterChange}
+		>
+				<tbody ref={tbodyRef}>
+					{rows.map((row) => {
+						const isActive = selectedInspectionId === row.id;
+						const isFlashing = flashInspectionId === row.id;
+						const statusRowClass = resolveStatusRowClass(statusCodeByRowId[row.id]);
+						const statusRowStyle = enableStatusHighlighting
+							? resolveStatusRowStyle(
+									statusCodeByRowId[row.id],
+									statusStyleByCode,
+									DEFAULT_STATUS_COLOR_CONFIG,
+							  )
+							: { backgroundColor: "rgb(255 255 255 / 1)" };
+
+						return (
+							<tr
+								key={row.id}
+								data-inspection-id={row.id}
+								onClick={() => onSelectInspection(row.id)}
+								onDoubleClick={() => onOpenInspectionPreview?.(row.id)}
+								className={`cursor-pointer border-slate-200 border-b transition-[filter] hover:drop-shadow-[0_2px_6px_rgba(15,23,42,0.14)] last:border-b-0 ${
+									isFlashing || isActive
+										? "bg-blue-100 text-slate-900 [&>td]:border-blue-300 [&>td]:border-y [&>td:first-child]:border-l [&>td:last-child]:border-r"
+										: `${statusRowClass} text-slate-900`
+								}`}
+								style={isFlashing || isActive ? undefined : statusRowStyle}
+							>
+								{visibleColumns.map((column) => {
+									const value = row[column.key];
+									const rawValue = String(value ?? "").trim();
+									const normalizedValue = rawValue.toLowerCase();
+									const rowFlags = noLetterFlagsByRowId[row.id];
+									const acceptanceFlags = noAcceptanceDatesByRowId[row.id];
+									const shouldShowNoLetter =
+										(column.key === "dataDoreczeniaPisma" &&
+											rowFlags?.brakDataDoreczeniaPisma) ||
+										(column.key === "dataPismaZastrzezenia" &&
+											rowFlags?.brakDataPismaZastrzezenia) ||
+										(column.key === "dataWyslaniaPismaZZastrzezeniami" &&
+											rowFlags?.brakDataWyslaniaPismaZZastrzezeniami) ||
+										(column.key === "dataWplywuPisma" &&
+											rowFlags?.brakDataWplywuPisma) ||
+										(column.key === "dataPismaZOdpowiedzia" &&
+											rowFlags?.brakDataPismaZOdpowiedzia) ||
+										(column.key === "dataWyslaniaPismaZOdpowiedzia" &&
+											rowFlags?.brakDataWyslaniaPismaZOdpowiedzia);
+									const shouldShowNoAcceptanceDates =
+										column.key === "dataAkceptacjiNoty" &&
+										acceptanceFlags?.brakDatAkceptacjiNoty;
+									const shouldShowNotApplicable = isNotApplicableByInspectionType(
+										String(row.typInspekcji ?? ""),
+										column.key,
+									);
+									const displayValue =
+										shouldShowNotApplicable
+											? "Nie dotyczy"
+											: shouldShowNoLetter
+											? "Brak pisma"
+											: shouldShowNoAcceptanceDates
+												? "Brak pisma"
+												: normalizedValue === "" || normalizedValue === "brak"
+												? "-"
+												: rawValue;
+									const formattedDisplayValue = formatDatesInDisplayText(displayValue);
+									const isLongTextColumn =
+										column.key === "zakresInspekcji" ||
+										column.key === "skladZespolu" ||
+										column.key === "zespoly" ||
+										column.key === "szczegolyDotyczaceZakresu" ||
+										column.key === "dataAkceptacjiNoty" ||
+										column.key === "dataZalecen";
+									const isEntityNameColumn = column.key === "nazwaPodmiotu";
+									const isScopeDetailsColumn =
+										column.key === "szczegolyDotyczaceZakresu";
+									const isStatusColumn = column.key === "status";
+									const isCommentColumn = column.key === "komentarz";
+									const columnWidth = columnWidths?.[column.key];
+									const isScopeColumn = column.key === "zakresInspekcji";
+									const isTeamColumn = column.key === "skladZespolu";
+									const isInspectionTeamsColumn = column.key === "zespoly";
+									const isAcceptanceDatesColumn =
+										column.key === "dataAkceptacjiNoty";
+									const isRecommendationDatesColumn =
+										column.key === "dataZalecen";
+									const scopedItems = isScopeColumn
+										? scopeDisplayItemsByRowId[row.id] ?? []
+										: [];
+									const teamItems = isTeamColumn
+										? teamDisplayItemsByRowId[row.id] ?? []
+										: [];
+									const inspectionTeamsItems = isInspectionTeamsColumn
+										? formattedDisplayValue
+												.split(",")
+												.map((item) => item.trim())
+												.filter(Boolean)
+										: [];
+									const verticalListItems = isTeamColumn
+										? teamItems.length > 0
+											? teamItems
+											: [formattedDisplayValue].filter(
+													(item) => Boolean(item) && item !== "-",
+											  )
+										: isInspectionTeamsColumn
+											? inspectionTeamsItems.length > 0
+												? inspectionTeamsItems
+												: [formattedDisplayValue].filter(
+														(item) => Boolean(item) && item !== "-",
+												  )
+										: isScopeColumn
+											? scopedItems.length > 0
+												? scopedItems
+												: [formattedDisplayValue].filter(
+														(item) => Boolean(item) && item !== "-",
+												  )
+										: isAcceptanceDatesColumn || isRecommendationDatesColumn
+												? formattedDisplayValue
+												.split(",")
+												.map((item) => item.trim())
+												.filter(Boolean)
+										: [];
+									const shouldUseNumberedList =
+										(isScopeColumn && verticalListItems.length > 1) ||
+										(isTeamColumn && verticalListItems.length > 1) ||
+										(isInspectionTeamsColumn && verticalListItems.length > 1);
+									const tooltipListValue = shouldUseNumberedList
+										? verticalListItems
+												.map((item, index) => `${index + 1}. ${item}`)
+												.join("\n")
+										: verticalListItems.join("\n");
+									const tooltipValue = isLongTextColumn
+										? (verticalListItems.length > 0
+											? tooltipListValue
+											: formattedDisplayValue)
+										: undefined;
+
+									return (
+										<td
+											key={column.key}
+											className={`overflow-hidden align-top px-3 py-2.5 whitespace-normal break-words ${
+												(column.key === "lp" || column.key === "kodInspekcji") && isActive
+													? "font-medium"
+													: "font-normal"
+											}`}
+											title={tooltipValue}
+											style={
+												columnWidth
+													? { width: columnWidth, minWidth: columnWidth, maxWidth: columnWidth }
+													: undefined
+											}
+										>
+											{(isTeamColumn || isScopeColumn || isInspectionTeamsColumn) && formattedDisplayValue !== "-" ? (
+												<div className="subtle-vertical-scroll max-h-28 w-full space-y-1 overflow-y-auto pr-1">
+													{shouldUseNumberedList ? (
+														<ol className="list-inside list-decimal space-y-1 pl-1">
+															{verticalListItems.map((item, index) => (
+																<li
+																	key={`${row.id}-${column.key}-${index}`}
+																	className="whitespace-normal break-words"
+																>
+																	{item}
+																</li>
+															))}
+														</ol>
+													) : (
+														verticalListItems.map((item, index) => (
+															<div
+																key={`${row.id}-${column.key}-${index}`}
+																className="whitespace-normal break-words"
+															>
+																{item}
+															</div>
+														))
+													)}
+												</div>
+											) : (isAcceptanceDatesColumn || isRecommendationDatesColumn) && formattedDisplayValue !== "-" ? (
+												<div className="subtle-vertical-scroll max-h-28 w-full space-y-1 overflow-y-auto pr-1">
+													{verticalListItems.map((item, index) => (
+														<div key={`${row.id}-${column.key}-${index}`} className="whitespace-normal break-words">
+															{item}
+														</div>
+													))}
+												</div>
+											) : isEntityNameColumn || isScopeDetailsColumn || isStatusColumn || isCommentColumn ? (
+												<div className="w-full whitespace-normal break-words leading-5">
+													{shouldShowNotApplicable ? (
+														<span className="italic text-slate-400">{formattedDisplayValue}</span>
+													) : (
+														formattedDisplayValue
+													)}
+												</div>
+											) : isLongTextColumn ? (
+												<div className="w-full whitespace-normal break-words leading-5">
+													{shouldShowNotApplicable ? (
+														<span className="italic text-slate-400">{formattedDisplayValue}</span>
+													) : (
+														formattedDisplayValue
+													)}
+												</div>
+											) : (
+												<div className="w-full whitespace-normal break-words leading-5">
+													{shouldShowNotApplicable ? (
+														<span className="italic text-slate-400">{formattedDisplayValue}</span>
+													) : (
+														formattedDisplayValue
+													)}
+												</div>
+											)}
+										</td>
+									);
+								})}
+							</tr>
+						);
+					})}
+
+					{rows.length === 0 ? (
+						<tr>
+							<td
+								colSpan={visibleColumns.length}
+								className="px-3 py-6 text-center text-slate-500 text-sm"
+							>
+								Brak rekordów spełniających aktualne filtry.
+							</td>
+						</tr>
+					) : null}
+				</tbody>
+			</RegistryDataTable>
+	);
+}
