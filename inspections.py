@@ -1471,26 +1471,8 @@ def _resolve_team_names_by_ids(conn: Any, team_ids: list[int]) -> list[str]:
 
 
 def _validate_active_user_ids(conn: Any, user_ids: list[int]) -> None:
-    if not user_ids:
-        return
-
-    inactive_ids: list[int] = []
-    for user_id in user_ids:
-        row = conn.execute(
-            "SELECT id, aktywny FROM users WHERE id=? LIMIT 1",
-            (int(user_id),),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail=f"User {int(user_id)} nie istnieje")
-        if int(row["aktywny"]) != 1:
-            inactive_ids.append(int(user_id))
-
-    if inactive_ids:
-        _raise_business_409(
-            "USER_INACTIVE",
-            "Wskazany użytkownik jest nieaktywny.",
-            invalidUserIds=inactive_ids,
-        )
+    _ = conn
+    _ = user_ids
 
 
 def _is_user_active(conn: Any, user_id: int) -> bool:
@@ -1525,8 +1507,9 @@ def _can_team_lead_assign_own_technical_inactive_leader(conn: Any, operator: dic
 
 
 def _validate_leader_activity(conn: Any, operator: dict[str, Any], leader_user_id: int) -> None:
+    _ = conn
     _ = operator
-    _validate_active_user_ids(conn, [int(leader_user_id)])
+    _ = leader_user_id
 
 
 def _is_user_visible_on_list(conn: Any, user_id: int) -> bool:
@@ -2055,8 +2038,6 @@ def _resolve_leader_and_members(
                 value=member_ids,
             )
 
-        _validate_active_user_ids(conn, member_ids)
-
         should_validate_leader_membership = (not is_update) or leader_changed_by_request or updated_members_flag or force_operator
         if should_validate_leader_membership and int(leader_user_id) not in member_ids:
             _raise_business_422(
@@ -2552,8 +2533,6 @@ def list_inspection_people_options(
 
         def _can_be_leader_for_operator(candidate_user_id: int) -> bool:
             try:
-                if not _is_user_active(conn, int(candidate_user_id)):
-                    return False
                 _enforce_leader_scope_by_role(conn, operator, int(candidate_user_id))
                 _validate_leader_visibility(conn, int(candidate_user_id))
                 return True
@@ -2574,7 +2553,7 @@ def list_inspection_people_options(
             active = bool(row_dict["aktywny"])
             list_visibility = str(row_dict.get("list_visibility") or "visible")
             visible_on_list = list_visibility.strip().lower() != "hidden"
-            if not active or not visible_on_list:
+            if not visible_on_list:
                 continue
             created_by_operator = row_dict.get("created_by_user_id") is not None and int(row_dict["created_by_user_id"]) == int(operator["id"])
             account_type = str(row_dict.get("account_type") or "").strip().lower()
