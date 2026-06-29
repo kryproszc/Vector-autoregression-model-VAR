@@ -142,6 +142,8 @@ class RiskExposureInspectionOption(BaseModel):
     lp: int
     kodInspekcji: str | None = None
     nazwaPodmiotu: str
+    nazwaPodmiotuSkrocona: str | None = None
+    nazwaPodmiotuSkrot: str | None = None
     poczatekInspekcji: str
     koniecInspekcji: str
     osobaKierujacaUserId: int | None = None
@@ -690,6 +692,24 @@ def _can_access_inspection_for_risk_exposure(conn: Any, inspection_id: int, oper
         return True
 
     if operator["rola_id"] == 2:
+        inspection_author_row = conn.execute(
+            """
+            SELECT u.zespol_id, u.created_by_user_id
+            FROM inspections i
+            JOIN users u ON u.id = i.created_by_user_id
+            WHERE i.id = ?
+            LIMIT 1
+            """,
+            (inspection_id,),
+        ).fetchone()
+        if inspection_author_row is not None:
+            author_created_by = inspection_author_row["created_by_user_id"]
+            if author_created_by is not None and int(author_created_by) == int(operator["id"]):
+                return True
+            if operator["zespol_id"] is not None and inspection_author_row["zespol_id"] is not None:
+                if int(inspection_author_row["zespol_id"]) == int(operator["zespol_id"]):
+                    return True
+
         leader_row = conn.execute(
             """
             SELECT 1
@@ -1197,6 +1217,7 @@ def list_available_inspections_for_risk_exposure(
 ) -> list[dict[str, Any]]:
     with get_connection() as conn:
         operator = _resolve_operator(conn, x_operator_login)
+        require_write_access(conn, operator)
         require_permission(conn, operator, PERMISSION_RISK_EXPOSURE_READ)
         rows = conn.execute(
             """
@@ -1205,6 +1226,7 @@ def list_available_inspections_for_risk_exposure(
                 i.lp,
                 i.kod_inspekcji,
                 np.nazwa_pozycji AS nazwa_podmiotu_nazwa,
+                np.skrot_pozycji AS nazwa_podmiotu_skrot,
                 i.poczatek_inspekcji,
                 i.koniec_inspekcji,
                 i.osoba_kierujaca_user_id,
@@ -1221,7 +1243,7 @@ def list_available_inspections_for_risk_exposure(
         for row in rows:
             row_dict = dict(row)
             inspection_id = int(row_dict["id"])
-            if not _can_access_inspection_for_risk_exposure(conn, inspection_id, operator):
+            if not _can_edit_risk_exposure(conn, inspection_id, operator, None):
                 continue
             blocked, _, _ = _inspection_status_is_forbidden(conn, inspection_id, operator)
             if blocked:
@@ -1232,6 +1254,8 @@ def list_available_inspections_for_risk_exposure(
                     "lp": int(row_dict["lp"]),
                     "kodInspekcji": row_dict.get("kod_inspekcji"),
                     "nazwaPodmiotu": row_dict.get("nazwa_podmiotu_nazwa") or "brak",
+                    "nazwaPodmiotuSkrocona": row_dict.get("nazwa_podmiotu_skrot"),
+                    "nazwaPodmiotuSkrot": row_dict.get("nazwa_podmiotu_skrot"),
                     "poczatekInspekcji": row_dict.get("poczatek_inspekcji"),
                     "koniecInspekcji": row_dict.get("koniec_inspekcji"),
                     "osobaKierujacaUserId": row_dict.get("osoba_kierujaca_user_id"),

@@ -736,6 +736,19 @@ def _can_edit_recommendation(
     # kierownik: moze dodawac/edytowac zalecenia dla inspekcji,
     # gdzie osoba kierujaca LUB dowolny czlonek skladu jest z jego zespolu.
     if operator["rola_id"] == 2:
+        if created_by_user_id is not None:
+            author_row = conn.execute(
+                "SELECT zespol_id, created_by_user_id FROM users WHERE id = ? LIMIT 1",
+                (int(created_by_user_id),),
+            ).fetchone()
+            if author_row is not None:
+                author_created_by = author_row["created_by_user_id"]
+                if author_created_by is not None and int(author_created_by) == int(operator["id"]):
+                    return True
+                if operator["zespol_id"] is not None and author_row["zespol_id"] is not None:
+                    if int(author_row["zespol_id"]) == int(operator["zespol_id"]):
+                        return True
+
         leader_row = conn.execute(
             """
             SELECT 1

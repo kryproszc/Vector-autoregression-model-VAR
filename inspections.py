@@ -254,6 +254,10 @@ class InspectionStructureUpdate(BaseModel):
 class InspectionStructureRead(BaseModel):
     id: int
     kodInspekcji: str | None = None
+    createdByUserId: int | None = None
+    createdByLogin: str | None = None
+    createdByDisplayName: str | None = None
+    createdAt: str | None = None
     canEdit: bool
     nazwaPodmiotu: str
     nazwaPodmiotuSkrocona: str | None = None
@@ -357,10 +361,35 @@ def _normalize_optional_text_with_limit(value: str | None, field_name: str, max_
 def _raise_business_403(code: str, detail: str, **extra: Any) -> None:
     payload: dict[str, Any] = {
         "code": code,
+        "message": detail,
         "detail": detail,
+        "details": dict(extra),
     }
     payload.update(extra)
+    logger.warning("Inspection authorization rejected: %s", payload)
     raise HTTPException(status_code=403, detail=payload)
+
+
+def _raise_business_422(code: str, detail: str, **extra: Any) -> None:
+    payload: dict[str, Any] = {
+        "code": code,
+        "message": detail,
+        "detail": detail,
+        "details": dict(extra),
+    }
+    payload.update(extra)
+    raise HTTPException(status_code=422, detail=payload)
+
+
+def _raise_business_409(code: str, detail: str, **extra: Any) -> None:
+    payload: dict[str, Any] = {
+        "code": code,
+        "message": detail,
+        "detail": detail,
+        "details": dict(extra),
+    }
+    payload.update(extra)
+    raise HTTPException(status_code=409, detail=payload)
 
 
 def _slug_code(value: str) -> str:
@@ -1442,15 +1471,26 @@ def _resolve_team_names_by_ids(conn: Any, team_ids: list[int]) -> list[str]:
 
 
 def _validate_active_user_ids(conn: Any, user_ids: list[int]) -> None:
+    if not user_ids:
+        return
+
+    inactive_ids: list[int] = []
     for user_id in user_ids:
         row = conn.execute(
             "SELECT id, aktywny FROM users WHERE id=? LIMIT 1",
-            (user_id,),
+            (int(user_id),),
         ).fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail=f"User {user_id} nie istnieje")
+            raise HTTPException(status_code=404, detail=f"User {int(user_id)} nie istnieje")
         if int(row["aktywny"]) != 1:
-            raise HTTPException(status_code=403, detail=f"User {user_id} jest nieaktywny")
+            inactive_ids.append(int(user_id))
+
+    if inactive_ids:
+        _raise_business_409(
+            "USER_INACTIVE",
+            "Wskazany użytkownik jest nieaktywny.",
+            invalidUserIds=inactive_ids,
+        )
 
 
 def _is_user_active(conn: Any, user_id: int) -> bool:
@@ -1485,31 +1525,8 @@ def _can_team_lead_assign_own_technical_inactive_leader(conn: Any, operator: dic
 
 
 def _validate_leader_activity(conn: Any, operator: dict[str, Any], leader_user_id: int) -> None:
-    row = conn.execute(
-        "SELECT id, aktywny, account_type, created_by_user_id FROM users WHERE id = ? LIMIT 1",
-        (int(leader_user_id),),
-    ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"User {int(leader_user_id)} nie istnieje")
-
-    if int(row["aktywny"]) == 1:
-        return
-
-    account_type = str(row["account_type"] or "").strip().lower()
-    if account_type in {"technical", "diu"}:
-        # Directors can always point to historical placeholders (technical/inactive DIU).
-        if int(operator.get("rola_id", 0)) == 3:
-            return
-
-        created_by = row["created_by_user_id"]
-        # Team lead can point only to placeholders created by that team lead.
-        if int(operator.get("rola_id", 0)) == 2 and created_by is not None and int(created_by) == int(operator["id"]):
-            return
-
-    _raise_business_403(
-        "INACTIVE_USER_NOT_ALLOWED",
-        "Wskazany użytkownik nieaktywny nie jest dozwolony w tym scenariuszu.",
-    )
+    _ = operator
+    _validate_active_user_ids(conn, [int(leader_user_id)])
 
 
 def _is_user_visible_on_list(conn: Any, user_id: int) -> bool:
@@ -1540,65 +1557,87 @@ def _validate_visible_member_ids(conn: Any, user_ids: list[int]) -> None:
             )
 
 
+def _is_user_in_operator_scope_row(
+    operator: dict[str, Any],
+    *,
+    candidate_user_id: int,
+    candidate_team_id: Any,
+    candidate_created_by_user_id: Any,
+) -> bool:
+    role_id = int(operator.get("rola_id", 0))
+    operator_id = int(operator.get("id", 0))
+
+    if role_id == 3:
+        return True
+
+    if int(candidate_user_id) == operator_id:
+        return True
+
+    operator_team_id = operator.get("zespol_id")
+    same_team = (
+        operator_team_id is not None
+        and candidate_team_id is not None
+        and int(candidate_team_id) == int(operator_team_id)
+    )
+    created_by_operator = (
+        candidate_created_by_user_id is not None
+        and int(candidate_created_by_user_id) == operator_id
+    )
+
+    if role_id == 2:
+        return bool(same_team or created_by_operator)
+
+    if role_id == 1:
+        return bool(same_team)
+
+    return False
+
+
+def _is_user_in_operator_scope(conn: Any, operator: dict[str, Any], user_id: int) -> bool:
+    row = conn.execute(
+        """
+        SELECT id, zespol_id, created_by_user_id
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (int(user_id),),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"User {int(user_id)} nie istnieje")
+
+    return _is_user_in_operator_scope_row(
+        operator,
+        candidate_user_id=int(row["id"]),
+        candidate_team_id=row["zespol_id"],
+        candidate_created_by_user_id=row["created_by_user_id"],
+    )
+
+
+def _is_user_visible_for_people_options(
+    operator: dict[str, Any],
+    *,
+    candidate_user_id: int,
+    candidate_team_id: Any,
+    candidate_created_by_user_id: Any,
+) -> bool:
+    _ = operator
+    _ = candidate_user_id
+    _ = candidate_team_id
+    _ = candidate_created_by_user_id
+    return True
+
+
 def _enforce_leader_scope_by_role(conn: Any, operator: dict[str, Any], leader_user_id: int) -> None:
-    # director: pelny zakres lidera wg zasad backendu
-    if operator["rola_id"] == 3:
-        return
-
-    # team_lead: scope by team for active users, and own-created inactive technical/DIU placeholders
-    if operator["rola_id"] == 2:
-        if leader_user_id == operator["id"]:
-            return
-
-        target_row = conn.execute(
-            "SELECT zespol_id, created_by_user_id, account_type, aktywny FROM users WHERE id = ? LIMIT 1",
-            (leader_user_id,),
-        ).fetchone()
-        if target_row is None:
-            raise HTTPException(status_code=404, detail=f"User {leader_user_id} nie istnieje")
-
-        created_by = target_row["created_by_user_id"]
-
-        # Team lead scope includes any user explicitly created by that operator.
-        if created_by is not None and int(created_by) == int(operator["id"]):
-            return
-
-        operator_team_id = operator.get("zespol_id")
-        target_team_id = target_row["zespol_id"]
-        if operator_team_id is not None and target_team_id is not None and int(target_team_id) == int(operator_team_id):
-            return
-
-        _raise_business_403(
-            "LEADER_OUT_OF_SCOPE",
-            "Wskazana osoba kierująca jest poza zakresem operatora.",
-        )
-        return
-
-    # pozostale role: zachowanie bez zmian
-    return
+    _ = conn
+    _ = operator
+    _ = leader_user_id
 
 
 def _enforce_member_scope_by_role(conn: Any, operator: dict[str, Any], member_ids: list[int]) -> None:
-    if not member_ids:
-        return
-
-    if int(operator.get("rola_id", 0)) == 3:
-        return
-
-    if int(operator.get("rola_id", 0)) == 2:
-        placeholders = ",".join("?" for _ in member_ids)
-        rows = conn.execute(
-            f"SELECT id, zespol_id, created_by_user_id FROM users WHERE id IN ({placeholders})",
-            tuple(int(uid) for uid in member_ids),
-        ).fetchall()
-        by_id = {int(row["id"]): row for row in rows}
-        for member_id in member_ids:
-            row = by_id.get(int(member_id))
-            if row is None:
-                raise HTTPException(status_code=404, detail=f"User {int(member_id)} nie istnieje")
-            # For inspection team composition, a team lead may include any existing
-            # user as long as other validators pass (especially listVisibility=visible).
-            continue
+    _ = conn
+    _ = operator
+    _ = member_ids
 
 
 def _base_select_sql() -> str:
@@ -1608,6 +1647,10 @@ def _base_select_sql() -> str:
             i.lp,
             i.kod_inspekcji,
             i.created_by_user_id,
+            i.utworzono_o AS created_at,
+            cbu.login AS created_by_login,
+            cbu.imie AS created_by_imie,
+            cbu.nazwisko AS created_by_nazwisko,
             np.nazwa_pozycji AS nazwa_podmiotu_nazwa,
             np.skrot_pozycji AS nazwa_podmiotu_skrot,
             i.typ_inspekcji_id,
@@ -1752,6 +1795,7 @@ def _base_select_sql() -> str:
                 ) x
             ) AS sklad_zespolu_z_relacji
         FROM inspections i
+        LEFT JOIN users cbu ON cbu.id = i.created_by_user_id
         LEFT JOIN slownik_pozycje np ON np.id = i.nazwa_podmiotu_id
         LEFT JOIN slownik_pozycje ti ON ti.id = i.typ_inspekcji_id
         LEFT JOIN users ulead ON ulead.id = i.osoba_kierujaca_user_id
@@ -1785,6 +1829,24 @@ def _can_edit_inspection(conn: Any, inspection_id: int, operator: dict[str, Any]
         return True
 
     if operator["rola_id"] == 2 and operator["zespol_id"] is not None:
+        inspection_author_row = conn.execute(
+            """
+            SELECT u.zespol_id, u.created_by_user_id
+            FROM inspections i
+            JOIN users u ON u.id = i.created_by_user_id
+            WHERE i.id = ?
+            LIMIT 1
+            """,
+            (inspection_id,),
+        ).fetchone()
+        if inspection_author_row is not None:
+            author_created_by = inspection_author_row["created_by_user_id"]
+            if author_created_by is not None and int(author_created_by) == int(operator["id"]):
+                return True
+            if inspection_author_row["zespol_id"] is not None:
+                if int(inspection_author_row["zespol_id"]) == int(operator["zespol_id"]):
+                    return True
+
         lead_row = conn.execute(
             """
             SELECT 1
@@ -1808,6 +1870,9 @@ def _can_edit_inspection(conn: Any, inspection_id: int, operator: dict[str, Any]
 def _row_to_structure_payload(conn: Any, row: dict[str, Any], can_edit: bool) -> dict[str, Any]:
     lead_full = _norm(" ".join([row.get("lead_imie") or "", row.get("lead_nazwisko") or ""]).strip())
     sklad_rel = _norm(row.get("sklad_zespolu_z_relacji"))
+    creator_login = _norm(row.get("created_by_login"))
+    creator_display = _norm(" ".join([row.get("created_by_imie") or "", row.get("created_by_nazwisko") or ""]).strip())
+    creator_display = creator_display or creator_login
 
     member_ids_csv = row.get("team_member_ids_csv")
     member_ids: list[int] = []
@@ -1851,6 +1916,10 @@ def _row_to_structure_payload(conn: Any, row: dict[str, Any], can_edit: bool) ->
     return {
         "id": row["id"],
         "kodInspekcji": row.get("kod_inspekcji"),
+        "createdByUserId": row.get("created_by_user_id"),
+        "createdByLogin": creator_login,
+        "createdByDisplayName": creator_display,
+        "createdAt": row.get("created_at"),
         "canEdit": can_edit,
         "nazwaPodmiotu": row.get("nazwa_podmiotu_nazwa") or "brak",
         "nazwaPodmiotuSkrocona": row.get("nazwa_podmiotu_skrot"),
@@ -1939,31 +2008,13 @@ def _resolve_leader_and_members(
     elif leader_user_id is None and is_update:
         leader_user_id = current_leader_user_id
 
-    if leader_user_id is None and not is_update:
-        raise HTTPException(status_code=400, detail="osobaKierujacaUserId jest wymagane")
-
-    if _is_inspector_diu_operator(operator):
-        if leader_user_id is None:
-            leader_user_id = int(operator["id"]) if not is_update else current_leader_user_id
-
-        leader_changed_by_request = (
-            leader_was_explicitly_sent
-            and (
-                (int(current_leader_user_id) if current_leader_user_id is not None else None)
-                != (int(leader_user_id) if leader_user_id is not None else None)
-            )
+    if leader_user_id is None:
+        _raise_contract_422(
+            "MISSING_DICTIONARY_ID",
+            "Pole osobaKierujacaUserId jest wymagane.",
+            field="osobaKierujacaUserId",
+            value=leader_user_id,
         )
-        enforce_self_leader_rule = (not is_update) or leader_changed_by_request or force_operator
-
-        if enforce_self_leader_rule and (leader_user_id is None or int(leader_user_id) != int(operator["id"])):
-            _raise_business_403(
-                "INSPECTOR_LEADER_MUST_BE_SELF",
-                "Dla aktywnego inspektora DIU osoba kierująca musi być zalogowanym operatorem.",
-                requiredLeaderUserId=int(operator["id"]),
-            )
-
-        if not is_update:
-            leader_user_id = int(operator["id"])
 
     member_ids = getattr(payload, "teamMemberUserIds", None)
     updated_members_flag = False
@@ -1971,10 +2022,7 @@ def _resolve_leader_and_members(
         updated_members_flag = True
         member_ids = [int(x) for x in member_ids]
     elif not is_update:
-        if leader_user_id is not None and _is_user_visible_on_list(conn, leader_user_id):
-            member_ids = [leader_user_id]
-        else:
-            member_ids = []
+        member_ids = []
         updated_members_flag = True
     else:
         member_ids = current_member_ids
@@ -1983,13 +2031,12 @@ def _resolve_leader_and_members(
         leader_was_explicitly_sent
         and (
             (int(current_leader_user_id) if current_leader_user_id is not None else None)
-            != (int(leader_user_id) if leader_user_id is not None else None)
+            != int(leader_user_id)
         )
     )
-    leader_scope_should_be_checked = (not is_update) or leader_changed_by_request or force_operator
-    if leader_user_id is not None and leader_scope_should_be_checked:
-        _enforce_leader_scope_by_role(conn, operator, leader_user_id)
-        _validate_leader_visibility(conn, leader_user_id)
+    _validate_leader_activity(conn, operator, int(leader_user_id))
+    _enforce_leader_scope_by_role(conn, operator, int(leader_user_id))
+    _validate_leader_visibility(conn, int(leader_user_id))
 
     if member_ids is not None:
         seen: set[int] = set()
@@ -1999,16 +2046,30 @@ def _resolve_leader_and_members(
                 seen.add(uid)
                 deduped.append(uid)
         member_ids = deduped
-        if (
-            leader_user_id is not None
-            and leader_user_id not in member_ids
-            and _is_user_visible_on_list(conn, leader_user_id)
-        ):
-            member_ids.append(leader_user_id)
-        if member_ids:
-            if updated_members_flag or not is_update:
-                _validate_visible_member_ids(conn, member_ids)
-            _enforce_member_scope_by_role(conn, operator, member_ids)
+
+        if not member_ids:
+            _raise_contract_422(
+                "MISSING_DICTIONARY_ID",
+                "Pole teamMemberUserIds nie moze byc puste.",
+                field="teamMemberUserIds",
+                value=member_ids,
+            )
+
+        _validate_active_user_ids(conn, member_ids)
+
+        should_validate_leader_membership = (not is_update) or leader_changed_by_request or updated_members_flag or force_operator
+        if should_validate_leader_membership and int(leader_user_id) not in member_ids:
+            _raise_business_422(
+                "LEADER_NOT_IN_TEAM",
+                "Wybrana osoba kierująca nie należy do składu zespołu.",
+                leaderUserId=int(leader_user_id),
+                teamMemberUserIds=[int(uid) for uid in member_ids],
+                operatorLogin=operator.get("login"),
+                operatorRoleId=int(operator.get("rola_id", 0)),
+            )
+
+        _validate_visible_member_ids(conn, member_ids)
+        _enforce_member_scope_by_role(conn, operator, member_ids)
 
     return leader_user_id, member_ids, updated_members_flag
 
@@ -2462,8 +2523,8 @@ def list_inspection_people_options(
         operator = _resolve_people_options_operator(conn, x_operator_login)
         require_permission(conn, operator, PERMISSION_INSPECTIONS_READ)
 
-        # Backward-compatibility: endpoint keeps returning users regardless of activity.
-        # UI should decide based on active/canBeLeader/visibleOnList.
+        # Contract consistency: returned users must be selectable for create/update.
+        # includeInactive is ignored intentionally to avoid GET/POST/PUT drift.
         _ = includeInactive
 
         rows = conn.execute(
@@ -2491,7 +2552,7 @@ def list_inspection_people_options(
 
         def _can_be_leader_for_operator(candidate_user_id: int) -> bool:
             try:
-                if _is_inspector_diu_operator(operator) and int(candidate_user_id) != int(operator["id"]):
+                if not _is_user_active(conn, int(candidate_user_id)):
                     return False
                 _enforce_leader_scope_by_role(conn, operator, int(candidate_user_id))
                 _validate_leader_visibility(conn, int(candidate_user_id))
@@ -2502,9 +2563,19 @@ def list_inspection_people_options(
         items: list[dict[str, Any]] = []
         for row in rows:
             row_dict = dict(row)
+            if not _is_user_visible_for_people_options(
+                operator,
+                candidate_user_id=int(row_dict["id"]),
+                candidate_team_id=row_dict.get("zespol_id"),
+                candidate_created_by_user_id=row_dict.get("created_by_user_id"),
+            ):
+                continue
+
             active = bool(row_dict["aktywny"])
             list_visibility = str(row_dict.get("list_visibility") or "visible")
             visible_on_list = list_visibility.strip().lower() != "hidden"
+            if not active or not visible_on_list:
+                continue
             created_by_operator = row_dict.get("created_by_user_id") is not None and int(row_dict["created_by_user_id"]) == int(operator["id"])
             account_type = str(row_dict.get("account_type") or "").strip().lower()
             can_be_leader = _can_be_leader_for_operator(int(row_dict["id"]))
